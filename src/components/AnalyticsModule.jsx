@@ -22,19 +22,35 @@ export default function AnalyticsModule() {
   }, [timeRange, selectedPlatform]);
 
   const loadShopifyData = async () => {
-    setShopifyLoading(true);
-    setShopifyError(null);
+  setShopifyLoading(true);
+  setShopifyError(null);
 
-    try {
-      const { data, error } = await supabase.functions.invoke(
-        'shopify-analytics',
-        {
-          body: {
-            range: timeRange,
-            platform: 'shopify',
-          },
-        }
-      );
+  try {
+    const { data, error } = await supabase.functions.invoke(
+      "shopify-analytics",
+      {
+        body: {
+          range: timeRange,
+          platform: "shopify",
+        },
+      }
+    );
+
+    if (error) {
+      setShopifyError(error.message || "Error invocando shopify-analytics");
+      setShopifyData(null);
+      return;
+    }
+
+    setShopifyData(data);
+  } catch (e) {
+    setShopifyError(e?.message || String(e));
+    setShopifyData(null);
+  } finally {
+    setShopifyLoading(false);
+  }
+};
+
 
       if (error) {
         setShopifyError(error.message || 'Error en shopify-analytics');
