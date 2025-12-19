@@ -55,12 +55,25 @@ export default function AnalyticsModule() {
       // Let the function decide defaults; but we pass limits for consistency.
       const url = `${baseUrl}?productsFirst=50&ordersFirst=50`;
 
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
+      const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+let token = null;
+try {
+  const { data: { session } } = await supabase.auth.getSession();
+  token = session?.access_token ?? null;
+} catch (_) {
+  // ignore
+}
+
+const response = await fetch(url, {
+  method: 'GET',
+  headers: {
+    'Content-Type': 'application/json',
+    apikey: anon,
+    Authorization: `Bearer ${token ?? anon}`,
+  },
+});
+
 
       const data = await response.json().catch(() => ({}));
 
