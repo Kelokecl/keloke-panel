@@ -48,7 +48,7 @@ export default function AnalyticsModule() {
     try {
       // If you disabled "Verify JWT" for this Edge Function, you can call it publicly.
    
-          // Invoke Supabase Edge Function for Shopify analytics
+          // Invoke Supabase Edge Function for Shopify Analytics
     const { data: shopifyDataResponse, error: shopifyInvokeError } = await supabase.functions.invoke("Shopify-Analytics", {
       body: {
         range: timeRange,
@@ -56,7 +56,7 @@ export default function AnalyticsModule() {
       },
     });
     if (shopifyInvokeError) {
-      setShopifyError(shopifyInvokeError.message || "Error invocando shopify-analytics");
+      setShopifyError(shopifyInvokeError.message || "Error invocando Shopify-Analytics");
       setShopifyData(null);
       return;
     }
