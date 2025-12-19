@@ -27,14 +27,26 @@ export default function AnalyticsModule() {
 
   try {
     const { data, error } = await supabase.functions.invoke(
-      "shopify-analytics",
+      'shopify-analytics',
       {
-        body: {
-          range: timeRange,
-          platform: "shopify",
-        },
+        body: { range: timeRange }
       }
     );
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    setShopifyData(data);
+  } catch (e) {
+    console.error('Shopify analytics error:', e);
+    setShopifyError(e.message || 'Error al cargar Shopify');
+    setShopifyData(null);
+  } finally {
+    setShopifyLoading(false);
+  }
+};
+
 
     if (error) {
       setShopifyError(error.message || "Error invocando shopify-analytics");
