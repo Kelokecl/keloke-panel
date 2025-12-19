@@ -59,8 +59,7 @@ export default function AnalyticsModule() {
       .finally(() => setLoading(false));
   };
 
-  // ✅ SOLO invoke() y sin try/catch (para evitar el error de build)
-  const loadShopifyData = () => {
+    const loadShopifyData = () => {
     setShopifyLoading(true);
     setShopifyError(null);
 
