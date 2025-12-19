@@ -57,11 +57,7 @@ export default function AnalyticsModule() {
     setShopifyData(data);
   } catch (e) {
     setShopifyError(e?.message || String(e));
-    setShopifyData(null);
-  } finally {
-    setShopifyLoading(false);
-  }
-};
+    
 
 
       if (error) {
