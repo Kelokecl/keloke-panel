@@ -47,7 +47,23 @@ export default function AnalyticsModule() {
     setShopifyError(null);
     try {
       // If you disabled "Verify JWT" for this Edge Function, you can call it publicly.
-      // Recommended: set VITE_SHOPIFY_ANALYTICS_URL to the full function URL.
+   
+          // Invoke Supabase Edge Function for Shopify analytics
+    const { data: shopifyDataResponse, error: shopifyInvokeError } = await supabase.functions.invoke("shopify-analytics", {
+      body: {
+        range: timeRange,
+        platform: "shopify",
+      },
+    });
+    if (shopifyInvokeError) {
+      setShopifyError(shopifyInvokeError.message || "Error invocando shopify-analytics");
+      setShopifyData(null);
+      return;
+    }
+    setShopifyData(shopifyDataResponse);
+    // Return early to skip old fetch logic
+    return;
+// Recommended: set VITE_SHOPIFY_ANALYTICS_URL to the full function URL.
       // Example: https://<project-ref>.supabase.co/functions/v1/Shopify-Analytics
       const baseUrl = import.meta.env.VITE_SHOPIFY_ANALYTICS_URL
         || `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/Shopify-Analytics`;
