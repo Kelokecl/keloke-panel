@@ -73,48 +73,37 @@ export default function Analytics() {
   };
 
   // --- Shopify: SOLO invoke a Edge Function (sin fetch directo, sin CORS)
-  const loadShopifyData = async () => {
-    setShopifyLoading(true);
-    setShopifyError(null);
+ const loadShopifyData = () => {
+  setShopifyLoading(true);
+  setShopifyError(null);
 
-    const FUNCTION_NAME =
-      import.meta?.env?.VITE_SHOPIFY_FUNCTION_NAME ||
-      "Shopify-Analytics"; // 👈 si tu función se llama distinto, cambia aquí
+  // OJO: el nombre correcto casi siempre es en minúscula con guiones
+  const FN = "shopify-analytics";
 
-    try {
-      const { data, error } = await supabase.functions.invoke(FUNCTION_NAME, {
-        body: { range: timeRange, platform: "shopify" },
-      });
-
-      if (error) throw error;
-
-      // Normalizamos para que no reviente el UI aunque falten campos
-      const normalized = {
-        storeUrl: data?.storeUrl || data?.store_url || "Keloke.cl",
-        totalOrders: Number(data?.totalOrders ?? data?.orders ?? 0),
-        totalRevenue: Number(data?.totalRevenue ?? data?.revenue ?? 0),
-        averageOrderValue: Number(data?.averageOrderValue ?? data?.aov ?? 0),
-        conversionRate: Number(data?.conversionRate ?? data?.cr ?? 0),
-        totalProducts: Number(data?.totalProducts ?? 0),
-        activeProducts: Number(data?.activeProducts ?? 0),
-        topProducts: Array.isArray(data?.topProducts) ? data.topProducts : [],
-        recentOrders: Array.isArray(data?.recentOrders) ? data.recentOrders : [],
-        salesByCategory: Array.isArray(data?.salesByCategory) ? data.salesByCategory : [],
-        weeklyRevenue: Array.isArray(data?.weeklyRevenue) ? data.weeklyRevenue : [],
-        lowStock: Array.isArray(data?.lowStock) ? data.lowStock : [],
-        insights: Array.isArray(data?.insights) ? data.insights : [],
-        _raw: data,
-      };
-
-      setShopifyData(normalized);
-    } catch (e) {
-      console.error("Error loading Shopify data:", e);
+  supabase.functions
+    .invoke(FN, {
+      body: {
+        range: timeRange,
+        platform: "shopify",
+      },
+    })
+    .then(({ data, error }) => {
+      if (error) {
+        setShopifyError(error.message || "Error invocando shopify-analytics");
+        setShopifyData(null);
+        return;
+      }
+      setShopifyData(data);
+    })
+    .catch((e) => {
       setShopifyError(String(e?.message || e));
       setShopifyData(null);
-    } finally {
+    })
+    .finally(() => {
       setShopifyLoading(false);
-    }
-  };
+    });
+};
+
 
   // --- YouTube (si lo quieres mantener, dejamos placeholder sin romper)
   const loadYouTubeData = async () => {
