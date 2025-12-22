@@ -51,7 +51,10 @@ export default function Analytics() {
   const loadAnalytics = async () => {
     setLoading(true);
     try {
-      let query = supabase.from("analytics").select("*").order("date", { ascending: false });
+      let query = supabase
+        .from("analytics")
+        .select("*")
+        .order("date", { ascending: false });
 
       if (
         selectedPlatform !== "all" &&
@@ -73,67 +76,79 @@ export default function Analytics() {
   };
 
   // --- Shopify: SOLO invoke a Edge Function (sin fetch directo, sin CORS)
- const loadShopifyData = () => {
-  setShopifyLoading(true);
-  setShopifyError(null);
+  const loadShopifyData = () => {
+    setShopifyLoading(true);
+    setShopifyError(null);
 
-  // OJO: el nombre correcto casi siempre es en minúscula con guiones
-  const FN = "shopify-analytics";
+    const FN = "shopify-analytics";
 
-  supabase.functions
-    .invoke(FN, {
-      body: {
-        range: timeRange,
-        platform: "shopify",
-      },
-    })
-    .then(({ data, error }) => {
-      if (error) {
-        setShopifyError(error.message || "Error invocando shopify-analytics");
+    supabase.functions
+      .invoke(FN, {
+        body: {
+          range: timeRange, // "7days" | "30days" | "90days"
+          platform: "shopify",
+        },
+      })
+      .then(({ data, error }) => {
+        if (error) {
+          setShopifyError(error.message || "Error invocando shopify-analytics");
+          setShopifyData(null);
+          return;
+        }
+
+        // ✅ NORMALIZACIÓN REAL (calza con tu UI actual)
+        const orders = Number(data?.orders ?? 0);
+        const totalRevenue = Number(data?.totalSales ?? 0);
+        const averageOrderValue = Number(
+          data?.averageOrderValue ?? (orders > 0 ? totalRevenue / orders : 0)
+        );
+
+        // Conversión real requiere sesiones/visitas. Tu función la manda como conversionRate (0 por ahora).
+        const conversionRate = Number(data?.conversionRate ?? 0);
+
+        setShopifyData((prev) => ({
+          ...(prev || {}),
+
+          // ✅ Estos 4 son los que tu UI usa en "Key Metrics"
+          totalOrders: orders,
+          totalRevenue: totalRevenue,
+          averageOrderValue: Math.round(averageOrderValue),
+          conversionRate: conversionRate,
+
+          currency: data?.currency ?? "CLP",
+
+          // ✅ opcional / UI header (evitar undefined)
+          storeUrl: data?.storeUrl ?? "Keloke.cl",
+          activeProducts: Number(data?.activeProducts ?? 0),
+          totalProducts: Number(data?.totalProducts ?? 0),
+
+          // ✅ placeholders seguros (no revienta nada)
+          topProducts: Array.isArray(data?.topProducts) ? data.topProducts : [],
+          recentOrders: Array.isArray(data?.recentOrders) ? data.recentOrders : [],
+          salesByCategory: Array.isArray(data?.salesByCategory) ? data.salesByCategory : [],
+          weeklyRevenue: Array.isArray(data?.weeklyRevenue) ? data.weeklyRevenue : [],
+          lowStock: Array.isArray(data?.lowStock) ? data.lowStock : [],
+          insights: Array.isArray(data?.insights) ? data.insights : [],
+
+          // debug/info
+          generatedAt: data?.generatedAt || null,
+          note: data?.note || "",
+          source: data?.source || "shopify",
+        }));
+      })
+      .catch((e) => {
+        setShopifyError(String(e?.message || e));
         setShopifyData(null);
-        return;
-      }
-      // Normalizamos para que la UI no muera con undefined
-const orders = data?.orders ?? 0;
-const totalSales = data?.totalSales ?? 0;
-
-// métricas derivadas
-const ticketPromedio = orders > 0 ? Math.round(totalSales / orders) : 0;
-
-// Shopify NO entrega visitas aquí → conversión real se deja en 0 estable
-const tasaConversion = 0;
-
-setShopifyData({
-  totalOrders: orders,
-  totalRevenue: totalSales,
-  averageOrderValue: ticketPromedio,
-  conversionRate: tasaConversion,
-  currency: data?.currency ?? "CLP",
-
-  // placeholders para que la UI no reviente
-  topProducts: [],
-  recentOrders: [],
-  salesByCategory: [],
-  weeklySales: [],
-});
-
-    })
-    .catch((e) => {
-      setShopifyError(String(e?.message || e));
-      setShopifyData(null);
-    })
-    .finally(() => {
-      setShopifyLoading(false);
-    });
-};
-
+      })
+      .finally(() => {
+        setShopifyLoading(false);
+      });
+  };
 
   // --- YouTube (si lo quieres mantener, dejamos placeholder sin romper)
   const loadYouTubeData = async () => {
     setLoading(true);
     try {
-      // Aquí mantén tu lógica real si ya la tenías estable.
-      // De momento evitamos romper el build / UI.
       const { data: analyticsData } = await supabase
         .from("analytics")
         .select("*")
@@ -150,7 +165,6 @@ setShopifyData({
   };
 
   useEffect(() => {
-    // Carga según plataforma
     if (selectedPlatform === "shopify") {
       loadShopifyData();
       return;
@@ -165,7 +179,12 @@ setShopifyData({
 
   const totals = useMemo(() => {
     if (!analytics?.length) {
-      return { totalReach: 0, avgEngagement: "0.0", totalConversions: 0, avgROI: "0.0" };
+      return {
+        totalReach: 0,
+        avgEngagement: "0.0",
+        totalConversions: 0,
+        avgROI: "0.0",
+      };
     }
     const totalReach = analytics.reduce((sum, a) => sum + (a.reach || 0), 0);
     const totalImpressions = analytics.reduce((sum, a) => sum + (a.impressions || 0), 0);
@@ -222,12 +241,28 @@ setShopifyData({
         </div>
       </div>
 
-      {/* Métricas Principales */}
+      {/* Métricas Principales (multicanal) */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <CardMetric title="Alcance Total" value={formatNumber(totals.totalReach)} icon={<Eye className="w-5 h-5 text-blue-500" />} />
-        <CardMetric title="Engagement Rate" value={`${totals.avgEngagement}%`} icon={<Heart className="w-5 h-5 text-red-500" />} />
-        <CardMetric title="Conversiones" value={formatNumber(totals.totalConversions)} icon={<ShoppingCart className="w-5 h-5 text-purple-500" />} />
-        <CardMetric title="ROI Promedio" value={`${totals.avgROI}x`} icon={<DollarSign className="w-5 h-5" style={{ color: "#D4A017" }} />} />
+        <CardMetric
+          title="Alcance Total"
+          value={formatNumber(totals.totalReach)}
+          icon={<Eye className="w-5 h-5 text-blue-500" />}
+        />
+        <CardMetric
+          title="Engagement Rate"
+          value={`${totals.avgEngagement}%`}
+          icon={<Heart className="w-5 h-5 text-red-500" />}
+        />
+        <CardMetric
+          title="Conversiones"
+          value={formatNumber(totals.totalConversions)}
+          icon={<ShoppingCart className="w-5 h-5 text-purple-500" />}
+        />
+        <CardMetric
+          title="ROI Promedio"
+          value={`${totals.avgROI}x`}
+          icon={<DollarSign className="w-5 h-5" style={{ color: "#D4A017" }} />}
+        />
       </div>
 
       {/* Shopify Dashboard */}
@@ -257,7 +292,9 @@ setShopifyData({
               <h3 className="font-bold text-xl mb-2" style={{ color: "#2D5016" }}>
                 No hay datos de Shopify disponibles
               </h3>
-              <p className="text-gray-600 mb-4">Configura la integración con Shopify para ver tus métricas</p>
+              <p className="text-gray-600 mb-4">
+                Configura la integración con Shopify para ver tus métricas
+              </p>
             </div>
           ) : (
             <>
@@ -271,7 +308,7 @@ setShopifyData({
                   <div className="text-right">
                     <p className="text-sm text-green-100">Productos Activos</p>
                     <p className="text-3xl font-bold">
-                      {shopifyData.activeProducts}/{shopifyData.totalProducts}
+                      {formatNumber(shopifyData.activeProducts)}/{formatNumber(shopifyData.totalProducts)}
                     </p>
                   </div>
                 </div>
@@ -279,11 +316,26 @@ setShopifyData({
 
               {/* Key Metrics */}
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                <CardMetric title="Total de Órdenes" value={formatNumber(shopifyData.totalOrders)} icon={<ShoppingCart className="w-5 h-5 text-green-500" />} />
-                <CardMetric title="Ingresos Totales" value={formatCurrency(shopifyData.totalRevenue)} icon={<DollarSign className="w-5 h-5" style={{ color: "#D4A017" }} />} />
-                <CardMetric title="Ticket Promedio" value={formatCurrency(shopifyData.averageOrderValue)} icon={<Target className="w-5 h-5 text-purple-500" />} />
-                <CardMetric title="Tasa de Conversión" value=value={`${Number(shopifyData?.conversionRate ?? shopifyData?.tasaConversion ?? 0).toFixed(2)}%`}
- icon={<TrendingUp className="w-5 h-5 text-blue-500" />} />
+                <CardMetric
+                  title="Total de Órdenes"
+                  value={formatNumber(shopifyData.totalOrders)}
+                  icon={<ShoppingCart className="w-5 h-5 text-green-500" />}
+                />
+                <CardMetric
+                  title="Ingresos Totales"
+                  value={formatCurrency(shopifyData.totalRevenue)}
+                  icon={<DollarSign className="w-5 h-5" style={{ color: "#D4A017" }} />}
+                />
+                <CardMetric
+                  title="Ticket Promedio"
+                  value={formatCurrency(shopifyData.averageOrderValue)}
+                  icon={<Target className="w-5 h-5 text-purple-500" />}
+                />
+                <CardMetric
+                  title="Tasa de Conversión"
+                  value={`${Number(shopifyData.conversionRate ?? 0).toFixed(2)}%`}
+                  icon={<TrendingUp className="w-5 h-5 text-blue-500" />}
+                />
               </div>
 
               {/* Top products / Recent orders */}
@@ -510,7 +562,9 @@ setShopifyData({
       {selectedPlatform !== "shopify" && (
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
           <h3 className="font-bold text-lg mb-2" style={{ color: "#2D5016" }}>
-            {selectedPlatform === "all" ? "Rendimiento por Plataforma" : `Analítica: ${selectedPlatform}`}
+            {selectedPlatform === "all"
+              ? "Rendimiento por Plataforma"
+              : `Analítica: ${selectedPlatform}`}
           </h3>
           {loading ? (
             <LoadingCard text="Cargando..." />
@@ -548,7 +602,10 @@ function EmptyText({ text }) {
 function LoadingCard({ text = "Cargando...", color = "#2D5016" }) {
   return (
     <div className="bg-white p-12 rounded-xl shadow-sm border border-gray-100 flex flex-col items-center justify-center">
-      <div className="animate-spin rounded-full h-12 w-12 border-4 border-gray-200 mb-4" style={{ borderTopColor: color }} />
+      <div
+        className="animate-spin rounded-full h-12 w-12 border-4 border-gray-200 mb-4"
+        style={{ borderTopColor: color }}
+      />
       <p className="text-gray-600">{text}</p>
     </div>
   );
