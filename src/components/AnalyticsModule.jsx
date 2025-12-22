@@ -97,21 +97,24 @@ export default function Analytics() {
 const orders = data?.orders ?? 0;
 const totalSales = data?.totalSales ?? 0;
 
+// métricas derivadas
 const ticketPromedio = orders > 0 ? Math.round(totalSales / orders) : 0;
-const tasaConversion = 0; // aún no la calculamos (placeholder estable)
+
+// Shopify NO entrega visitas aquí → conversión real se deja en 0 estable
+const tasaConversion = 0;
 
 setShopifyData({
-  orders,
-  totalSales,
-  ticketPromedio,
-  tasaConversion,
+  totalOrders: orders,
+  totalRevenue: totalSales,
+  averageOrderValue: ticketPromedio,
+  conversionRate: tasaConversion,
   currency: data?.currency ?? "CLP",
 
-  // placeholders para que no reviente si el UI los usa
-  topProducts: data?.topProducts ?? [],
-  recentOrders: data?.recentOrders ?? [],
-  salesByCategory: data?.salesByCategory ?? [],
-  weeklySales: data?.weeklySales ?? [],
+  // placeholders para que la UI no reviente
+  topProducts: [],
+  recentOrders: [],
+  salesByCategory: [],
+  weeklySales: [],
 });
 
     })
@@ -279,7 +282,8 @@ setShopifyData({
                 <CardMetric title="Total de Órdenes" value={formatNumber(shopifyData.totalOrders)} icon={<ShoppingCart className="w-5 h-5 text-green-500" />} />
                 <CardMetric title="Ingresos Totales" value={formatCurrency(shopifyData.totalRevenue)} icon={<DollarSign className="w-5 h-5" style={{ color: "#D4A017" }} />} />
                 <CardMetric title="Ticket Promedio" value={formatCurrency(shopifyData.averageOrderValue)} icon={<Target className="w-5 h-5 text-purple-500" />} />
-                <CardMetric title="Tasa de Conversión" value={`${Number(shopifyData?.conversionRate ?? 0).toFixed(2)}%`} icon={<TrendingUp className="w-5 h-5 text-blue-500" />} />
+                <CardMetric title="Tasa de Conversión" value=value={`${Number(shopifyData?.conversionRate ?? shopifyData?.tasaConversion ?? 0).toFixed(2)}%`}
+ icon={<TrendingUp className="w-5 h-5 text-blue-500" />} />
               </div>
 
               {/* Top products / Recent orders */}
