@@ -1,15 +1,22 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4'
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-}
+// supabase/functions/init-storage/index.ts
+// Edge Function: init-storage
+// Objetivo: Inicializar buckets/policies para WhatsApp media u otros assets.
+// Fix crítico: responder OPTIONS (CORS preflight) SIEMPRE.
 
-serve(async (req) => {
-  // Handle CORS preflight requests
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders })
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type, x-requested-with",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+};
+
+Deno.serve(async (req) => {
+  // ✅ CORS preflight
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
   }
 
   try {
@@ -104,36 +111,17 @@ serve(async (req) => {
 
     return new Response(
       JSON.stringify({
-        success: true,
-        message: `Bucket ${bucketName} creado exitosamente`,
-        bucket: bucketName,
-        bucketPublic: true,
-        limit: 16777216,
-        allowedMimeTypes: [
-          'image/jpeg', 'image/png', 'image/webp',
-          'video/mp4', 'video/mov',
-          'audio/webm', 'audio/ogg', 'audio/mpeg',
-          'application/pdf', 'application/msword',
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        ]
+        ok: true,
+        message: "init-storage OK (CORS + OPTIONS fixed)",
       }),
-      {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 200,
-      }
-    )
-
-  } catch (error) {
-    console.error('Error en init-storage:', error)
-    return new Response(
-      JSON.stringify({
-        success: false,
-        error: error.message || 'Error desconocido al crear bucket'
-      }),
-      {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 500,
-      }
-    )
+      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  } catch (e) {
+    return new Response(JSON.stringify({ error: String(e?.message || e) }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
+});
+
 })
