@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
   AlertCircle,
   BarChart3,
@@ -47,8 +47,8 @@ export default function Analytics() {
   const formatNumber = (value) =>
     new Intl.NumberFormat("es-CL").format(Number(value || 0));
 
-  // --- Loader genérico (DB) para plataformas "sociales" (si la tabla existe)
-  const loadAnalytics = async () => {
+  // --- Loader genérico (DB) para plataformas sociales (si la tabla existe)
+  const loadAnalytics = useCallback(async () => {
     setLoading(true);
     try {
       let query = supabase
@@ -66,6 +66,7 @@ export default function Analytics() {
 
       const { data, error } = await query;
       if (error) throw error;
+
       setAnalytics(data || []);
     } catch (e) {
       console.error("Error loading analytics:", e);
@@ -73,10 +74,10 @@ export default function Analytics() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedPlatform]);
 
-  // --- Shopify: SOLO invoke a Edge Function (sin fetch directo, sin CORS)
-  const loadShopifyData = () => {
+  // --- Shopify: invoca Edge Function
+  const loadShopifyData = useCallback(() => {
     setShopifyLoading(true);
     setShopifyError(null);
 
@@ -96,20 +97,16 @@ export default function Analytics() {
           return;
         }
 
-        // ✅ NORMALIZACIÓN REAL (calza con tu UI actual)
         const orders = Number(data?.orders ?? 0);
         const totalRevenue = Number(data?.totalSales ?? 0);
         const averageOrderValue = Number(
           data?.averageOrderValue ?? (orders > 0 ? totalRevenue / orders : 0)
         );
 
-        // Conversión real requiere sesiones/visitas. Tu función la manda como conversionRate (0 por ahora).
         const conversionRate = Number(data?.conversionRate ?? 0);
 
         setShopifyData((prev) => ({
           ...(prev || {}),
-
-          // ✅ Estos 4 son los que tu UI usa en "Key Metrics"
           totalOrders: orders,
           totalRevenue: totalRevenue,
           averageOrderValue: Math.round(averageOrderValue),
@@ -117,12 +114,10 @@ export default function Analytics() {
 
           currency: data?.currency ?? "CLP",
 
-          // ✅ opcional / UI header (evitar undefined)
           storeUrl: data?.storeUrl ?? "Keloke.cl",
           activeProducts: Number(data?.activeProducts ?? 0),
           totalProducts: Number(data?.totalProducts ?? 0),
 
-          // ✅ placeholders seguros (no revienta nada)
           topProducts: Array.isArray(data?.topProducts) ? data.topProducts : [],
           recentOrders: Array.isArray(data?.recentOrders) ? data.recentOrders : [],
           salesByCategory: Array.isArray(data?.salesByCategory) ? data.salesByCategory : [],
@@ -130,7 +125,6 @@ export default function Analytics() {
           lowStock: Array.isArray(data?.lowStock) ? data.lowStock : [],
           insights: Array.isArray(data?.insights) ? data.insights : [],
 
-          // debug/info
           generatedAt: data?.generatedAt || null,
           note: data?.note || "",
           source: data?.source || "shopify",
@@ -143,10 +137,10 @@ export default function Analytics() {
       .finally(() => {
         setShopifyLoading(false);
       });
-  };
+  }, [timeRange]);
 
-  // --- YouTube (si lo quieres mantener, dejamos placeholder sin romper)
-  const loadYouTubeData = async () => {
+  // --- YouTube (placeholder estable)
+  const loadYouTubeData = useCallback(async () => {
     setLoading(true);
     try {
       const { data: analyticsData } = await supabase
@@ -162,48 +156,47 @@ export default function Analytics() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
+  // 1) carga inmediata cuando cambia plataforma o rango
   useEffect(() => {
     if (selectedPlatform === "shopify") {
       loadShopifyData();
       return;
     }
-    useEffect(() => {
-  const intervalMs = 2 * 60 * 1000; // 2 minutos
-  const id = setInterval(() => {
-    if (selectedPlatform === "shopify") loadShopifyData();
-    else if (selectedPlatform === "youtube") loadYouTubeData();
-    else loadAnalytics();
-  }, intervalMs);
-
-  return () => clearInterval(id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [selectedPlatform, timeRange]);
-
     if (selectedPlatform === "youtube") {
       loadYouTubeData();
       return;
     }
     loadAnalytics();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeRange, selectedPlatform]);
+  }, [selectedPlatform, timeRange, loadShopifyData, loadYouTubeData, loadAnalytics]);
+
+  // 2) auto-refresh (cada 2 minutos)
+  useEffect(() => {
+    const intervalMs = 2 * 60 * 1000;
+    const id = setInterval(() => {
+      if (selectedPlatform === "shopify") loadShopifyData();
+      else if (selectedPlatform === "youtube") loadYouTubeData();
+      else loadAnalytics();
+    }, intervalMs);
+
+    return () => clearInterval(id);
+  }, [selectedPlatform, timeRange, loadShopifyData, loadYouTubeData, loadAnalytics]);
 
   const totals = useMemo(() => {
     if (!analytics?.length) {
-      return {
-        totalReach: 0,
-        avgEngagement: "0.0",
-        totalConversions: 0,
-        avgROI: "0.0",
-      };
+      return { totalReach: 0, avgEngagement: "0.0", totalConversions: 0, avgROI: "0.0" };
     }
+
     const totalReach = analytics.reduce((sum, a) => sum + (a.reach || 0), 0);
     const totalImpressions = analytics.reduce((sum, a) => sum + (a.impressions || 0), 0);
     const totalEngagement = analytics.reduce((sum, a) => sum + (a.engagement || 0), 0);
+
     const avgEngagement =
       totalImpressions > 0 ? ((totalEngagement / totalImpressions) * 100).toFixed(1) : "0.0";
+
     const totalConversions = analytics.reduce((sum, a) => sum + (a.conversions || 0), 0);
+
     const avgROI =
       (analytics.reduce((sum, a) => sum + (a.roi || 0), 0) / analytics.length).toFixed(1) || "0.0";
 
@@ -211,20 +204,22 @@ export default function Analytics() {
   }, [analytics]);
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-4 sm:p-6 space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between gap-4 flex-wrap">
+      <div className="flex items-start sm:items-center justify-between gap-4 flex-col sm:flex-row">
         <div>
-          <h1 className="text-3xl font-bold" style={{ color: "#2D5016" }}>
+          <h1 className="text-2xl sm:text-3xl font-bold" style={{ color: "#2D5016" }}>
             Analítica Avanzada
           </h1>
-          <p className="text-gray-600 mt-1">Métricas detalladas de rendimiento por canal</p>
+          <p className="text-gray-600 mt-1 text-sm sm:text-base">
+            Métricas detalladas de rendimiento por canal
+          </p>
         </div>
 
         <select
           value={timeRange}
           onChange={(e) => setTimeRange(e.target.value)}
-          className="px-4 py-2 border border-gray-300 rounded-lg outline-none"
+          className="w-full sm:w-auto px-4 py-2 border border-gray-300 rounded-lg outline-none bg-white"
         >
           <option value="7days">Últimos 7 días</option>
           <option value="30days">Últimos 30 días</option>
@@ -233,13 +228,13 @@ export default function Analytics() {
       </div>
 
       {/* Filtros de Plataforma */}
-      <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
-        <div className="flex items-center gap-2 overflow-x-auto">
+      <div className="bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-gray-100">
+        <div className="flex items-center gap-2 overflow-x-auto pb-1">
           {platforms.map((platform) => (
             <button
               key={platform.id}
               onClick={() => setSelectedPlatform(platform.id)}
-              className={`px-4 py-2 rounded-lg font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
+              className={`px-3 sm:px-4 py-2 rounded-lg font-medium transition-all whitespace-nowrap flex items-center gap-2 text-sm ${
                 selectedPlatform === platform.id
                   ? "text-white"
                   : "bg-gray-100 text-gray-700 hover:bg-gray-200"
@@ -247,14 +242,14 @@ export default function Analytics() {
               style={selectedPlatform === platform.id ? { backgroundColor: "#2D5016" } : {}}
             >
               <span>{platform.emoji}</span>
-              <span className="text-sm">{platform.name}</span>
+              <span>{platform.name}</span>
             </button>
           ))}
         </div>
       </div>
 
       {/* Métricas Principales (multicanal) */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6">
         <CardMetric
           title="Alcance Total"
           value={formatNumber(totals.totalReach)}
@@ -283,12 +278,12 @@ export default function Analytics() {
           {shopifyLoading ? (
             <LoadingCard color="#96BF48" text="Cargando datos de Shopify..." />
           ) : shopifyError ? (
-            <div className="bg-red-50 p-6 rounded-xl border border-red-200">
+            <div className="bg-red-50 p-4 sm:p-6 rounded-xl border border-red-200">
               <div className="flex items-start gap-4">
                 <AlertCircle className="w-6 h-6 text-red-600 flex-shrink-0 mt-1" />
-                <div>
+                <div className="min-w-0">
                   <h3 className="font-bold text-red-900 mb-2">Error al cargar datos de Shopify</h3>
-                  <p className="text-red-700 text-sm">{shopifyError}</p>
+                  <p className="text-red-700 text-sm break-words">{shopifyError}</p>
                   <button
                     onClick={loadShopifyData}
                     className="mt-4 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm"
@@ -299,27 +294,29 @@ export default function Analytics() {
               </div>
             </div>
           ) : !shopifyData ? (
-            <div className="bg-white p-12 rounded-xl shadow-sm border border-gray-100 text-center">
-              <ShoppingCart className="w-16 h-16 mx-auto mb-4 text-gray-300" />
+            <div className="bg-white p-10 sm:p-12 rounded-xl shadow-sm border border-gray-100 text-center">
+              <ShoppingCart className="w-14 h-14 sm:w-16 sm:h-16 mx-auto mb-4 text-gray-300" />
               <h3 className="font-bold text-xl mb-2" style={{ color: "#2D5016" }}>
                 No hay datos de Shopify disponibles
               </h3>
-              <p className="text-gray-600 mb-4">
+              <p className="text-gray-600 mb-4 text-sm sm:text-base">
                 Configura la integración con Shopify para ver tus métricas
               </p>
             </div>
           ) : (
             <>
               {/* Overview */}
-              <div className="bg-gradient-to-r from-green-600 to-green-500 p-6 rounded-xl text-white">
-                <div className="flex items-center justify-between gap-4 flex-wrap">
-                  <div>
-                    <h2 className="text-2xl font-bold mb-1">🛍️ Shopify Store Dashboard</h2>
-                    <p className="text-green-100">{shopifyData.storeUrl}</p>
+              <div className="bg-gradient-to-r from-green-600 to-green-500 p-4 sm:p-6 rounded-xl text-white">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                  <div className="min-w-0">
+                    <h2 className="text-xl sm:text-2xl font-bold mb-1">🛍️ Shopify Store Dashboard</h2>
+                    <p className="text-green-100 text-xs sm:text-sm break-words">
+                      {shopifyData.storeUrl}
+                    </p>
                   </div>
-                  <div className="text-right">
-                    <p className="text-sm text-green-100">Productos Activos</p>
-                    <p className="text-3xl font-bold">
+                  <div className="text-left sm:text-right">
+                    <p className="text-xs sm:text-sm text-green-100">Productos Activos</p>
+                    <p className="text-2xl sm:text-3xl font-bold">
                       {formatNumber(shopifyData.activeProducts)}/{formatNumber(shopifyData.totalProducts)}
                     </p>
                   </div>
@@ -327,7 +324,7 @@ export default function Analytics() {
               </div>
 
               {/* Key Metrics */}
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6">
                 <CardMetric
                   title="Total de Órdenes"
                   value={formatNumber(shopifyData.totalOrders)}
@@ -351,32 +348,40 @@ export default function Analytics() {
               </div>
 
               {/* Top products / Recent orders */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 sm:gap-6">
                 <Panel title="Top Productos" icon={<Target className="w-5 h-5 text-gray-400" />}>
                   {shopifyData.topProducts?.length ? (
                     <div className="space-y-3">
                       {shopifyData.topProducts.map((product, index) => (
                         <div
                           key={product.id || `${product.name}-${index}`}
-                          className="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
+                          className="p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
                         >
-                          <div className="flex items-center gap-3 flex-1">
+                          <div className="flex items-start gap-3 min-w-0">
                             <div
-                              className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-sm"
+                              className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-sm flex-shrink-0"
                               style={{ backgroundColor: "#96BF48" }}
                             >
                               {index + 1}
                             </div>
-                            <div className="flex-1 min-w-0">
-                              <p className="font-medium text-sm truncate">{product.name || "Producto"}</p>
-                              <p className="text-xs text-gray-500">SKU: {product.sku || "-"}</p>
+
+                            <div className="min-w-0 flex-1">
+                              <p className="font-medium text-sm leading-snug text-gray-900 break-words">
+                                {product.name || "Producto"}
+                              </p>
+                              <p className="text-xs text-gray-500 mt-0.5 break-words">
+                                SKU: {product.sku || "-"}
+                              </p>
                             </div>
-                          </div>
-                          <div className="text-right ml-3">
-                            <p className="font-bold text-sm" style={{ color: "#2D5016" }}>
-                              {formatCurrency(product.revenue)}
-                            </p>
-                            <p className="text-xs text-gray-500">{formatNumber(product.sold)} vendidos</p>
+
+                            <div className="text-right flex-shrink-0 pl-2">
+                              <p className="font-bold text-sm whitespace-nowrap" style={{ color: "#2D5016" }}>
+                                {formatCurrency(product.revenue)}
+                              </p>
+                              <p className="text-xs text-gray-500 whitespace-nowrap">
+                                {formatNumber(product.sold)} vendidos
+                              </p>
+                            </div>
                           </div>
                         </div>
                       ))}
@@ -392,35 +397,48 @@ export default function Analytics() {
                       {shopifyData.recentOrders.map((order, idx) => (
                         <div
                           key={order.id || idx}
-                          className="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
+                          className="p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
                         >
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 mb-1">
-                              <p className="font-mono font-bold text-sm" style={{ color: "#2D5016" }}>
-                                {order.id || "—"}
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2 mb-1 min-w-0 flex-wrap">
+                                <p
+                                  className="font-mono font-bold text-sm whitespace-nowrap"
+                                  style={{ color: "#2D5016" }}
+                                >
+                                  {order.id || "—"}
+                                </p>
+
+                                <span
+                                  className={`px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap ${
+                                    order.status === "fulfilled"
+                                      ? "bg-green-100 text-green-700"
+                                      : order.status === "shipped"
+                                      ? "bg-blue-100 text-blue-700"
+                                      : "bg-yellow-100 text-yellow-700"
+                                  }`}
+                                >
+                                  {order.status || "pending"}
+                                </span>
+                              </div>
+
+                              <p className="text-xs text-gray-600 break-words">
+                                {order.customer || "Cliente"}
                               </p>
-                              <span
-                                className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                  order.status === "fulfilled"
-                                    ? "bg-green-100 text-green-700"
-                                    : order.status === "shipped"
-                                    ? "bg-blue-100 text-blue-700"
-                                    : "bg-yellow-100 text-yellow-700"
-                                }`}
-                              >
-                                {order.status || "pending"}
-                              </span>
+
+                              <p className="text-xs text-gray-500 break-words">
+                                {order.date ? new Date(order.date).toLocaleString("es-CL") : ""}
+                              </p>
                             </div>
-                            <p className="text-xs text-gray-600">{order.customer || "Cliente"}</p>
-                            <p className="text-xs text-gray-500">
-                              {order.date ? new Date(order.date).toLocaleString("es-CL") : ""}
-                            </p>
-                          </div>
-                          <div className="text-right">
-                            <p className="font-bold text-sm" style={{ color: "#2D5016" }}>
-                              {formatCurrency(order.total)}
-                            </p>
-                            <p className="text-xs text-gray-500">{formatNumber(order.items)} items</p>
+
+                            <div className="text-right flex-shrink-0">
+                              <p className="font-bold text-sm whitespace-nowrap" style={{ color: "#2D5016" }}>
+                                {formatCurrency(order.total)}
+                              </p>
+                              <p className="text-xs text-gray-500 whitespace-nowrap">
+                                {formatNumber(order.items)} items
+                              </p>
+                            </div>
                           </div>
                         </div>
                       ))}
@@ -432,15 +450,17 @@ export default function Analytics() {
               </div>
 
               {/* Categorías / Weekly */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 sm:gap-6">
                 <Panel title="Ventas por Categoría" icon={<BarChart3 className="w-5 h-5 text-gray-400" />}>
                   {shopifyData.salesByCategory?.length ? (
                     <div className="space-y-4">
                       {shopifyData.salesByCategory.map((cat, index) => (
-                        <div key={index}>
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="font-medium text-sm">{cat.category || "Categoría"}</span>
-                            <span className="text-sm font-bold" style={{ color: "#2D5016" }}>
+                        <div key={index} className="min-w-0">
+                          <div className="flex items-center justify-between gap-3 mb-2">
+                            <span className="font-medium text-sm min-w-0 break-words">
+                              {cat.category || "Categoría"}
+                            </span>
+                            <span className="text-sm font-bold whitespace-nowrap" style={{ color: "#2D5016" }}>
                               {formatCurrency(cat.revenue)}
                             </span>
                           </div>
@@ -454,8 +474,8 @@ export default function Analytics() {
                             />
                           </div>
                           <div className="flex items-center justify-between text-xs text-gray-500">
-                            <span>{formatNumber(cat.sales)} ventas</span>
-                            <span>{Math.min(100, Number(cat.percentage || 0))}%</span>
+                            <span className="whitespace-nowrap">{formatNumber(cat.sales)} ventas</span>
+                            <span className="whitespace-nowrap">{Math.min(100, Number(cat.percentage || 0))}%</span>
                           </div>
                         </div>
                       ))}
@@ -470,13 +490,15 @@ export default function Analytics() {
                     <div className="space-y-3">
                       {shopifyData.weeklyRevenue.map((week, index) => (
                         <div key={index} className="space-y-2">
-                          <div className="flex items-center justify-between text-sm">
-                            <span className="font-medium">{week.week || "Semana"}</span>
-                            <div className="text-right">
-                              <span className="font-bold" style={{ color: "#2D5016" }}>
+                          <div className="flex items-start justify-between gap-3 text-sm">
+                            <span className="font-medium min-w-0 break-words">
+                              {week.week || "Semana"}
+                            </span>
+                            <div className="text-right flex-shrink-0">
+                              <span className="font-bold whitespace-nowrap" style={{ color: "#2D5016" }}>
                                 {formatCurrency(week.revenue)}
                               </span>
-                              <span className="text-xs text-gray-500 ml-2">
+                              <span className="text-xs text-gray-500 ml-2 whitespace-nowrap">
                                 ({formatNumber(week.orders)} órdenes)
                               </span>
                             </div>
@@ -501,22 +523,27 @@ export default function Analytics() {
 
               {/* Low stock */}
               {shopifyData.lowStock?.length ? (
-                <div className="bg-gradient-to-r from-orange-50 to-red-50 p-6 rounded-xl border border-orange-200">
+                <div className="bg-gradient-to-r from-orange-50 to-red-50 p-4 sm:p-6 rounded-xl border border-orange-200">
                   <div className="flex items-start gap-4">
-                    <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-orange-500">
+                    <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-orange-500 flex-shrink-0">
                       <AlertCircle className="w-5 h-5 text-white" />
                     </div>
-                    <div className="flex-1">
-                      <h3 className="font-bold text-lg mb-3 text-orange-900">⚠️ Alerta de Inventario Bajo</h3>
+                    <div className="flex-1 min-w-0">
+                      <h3 className="font-bold text-lg mb-3 text-orange-900">
+                        ⚠️ Alerta de Inventario Bajo
+                      </h3>
                       <div className="space-y-2">
                         {shopifyData.lowStock.map((item, index) => (
-                          <div key={index} className="flex items-center justify-between p-3 bg-white rounded-lg">
-                            <div>
-                              <p className="font-medium text-sm">{item.name || "Producto"}</p>
-                              <p className="text-xs text-gray-500">SKU: {item.sku || "-"}</p>
+                          <div
+                            key={index}
+                            className="flex items-start sm:items-center justify-between gap-3 p-3 bg-white rounded-lg"
+                          >
+                            <div className="min-w-0">
+                              <p className="font-medium text-sm break-words">{item.name || "Producto"}</p>
+                              <p className="text-xs text-gray-500 break-words">SKU: {item.sku || "-"}</p>
                             </div>
-                            <div className="text-right">
-                              <p className="text-sm">
+                            <div className="text-right flex-shrink-0">
+                              <p className="text-sm whitespace-nowrap">
                                 <span className="font-bold text-orange-600">{formatNumber(item.stock)}</span>
                                 <span className="text-gray-500"> / {formatNumber(item.threshold)} unidades</span>
                               </p>
@@ -531,29 +558,29 @@ export default function Analytics() {
 
               {/* Insights */}
               {shopifyData.insights?.length ? (
-                <div className="bg-gradient-to-r from-green-50 to-emerald-50 p-6 rounded-xl border border-green-100">
+                <div className="bg-gradient-to-r from-green-50 to-emerald-50 p-4 sm:p-6 rounded-xl border border-green-100">
                   <div className="flex items-start gap-4">
                     <div
-                      className="w-10 h-10 rounded-lg flex items-center justify-center"
+                      className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
                       style={{ backgroundColor: "#96BF48" }}
                     >
                       <Zap className="w-5 h-5 text-white" />
                     </div>
-                    <div className="flex-1">
+                    <div className="flex-1 min-w-0">
                       <h3 className="font-bold text-lg mb-2" style={{ color: "#2D5016" }}>
                         Insights de Shopify
                       </h3>
                       <ul className="space-y-2 text-sm text-gray-700">
                         {shopifyData.insights.map((insight, index) => (
-                          <li key={index} className="flex items-start gap-2">
+                          <li key={index} className="flex items-start gap-2 min-w-0">
                             <span
                               className={`${
                                 insight.type === "warning" ? "text-orange-500" : "text-green-500"
-                              } font-bold`}
+                              } font-bold flex-shrink-0`}
                             >
                               •
                             </span>
-                            <span>{insight.message || String(insight)}</span>
+                            <span className="break-words">{insight.message || String(insight)}</span>
                           </li>
                         ))}
                       </ul>
@@ -572,7 +599,7 @@ export default function Analytics() {
 
       {/* Placeholder para otros */}
       {selectedPlatform !== "shopify" && (
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-sm border border-gray-100">
           <h3 className="font-bold text-lg mb-2" style={{ color: "#2D5016" }}>
             {selectedPlatform === "all"
               ? "Rendimiento por Plataforma"
@@ -595,12 +622,12 @@ export default function Analytics() {
 
 function Panel({ title, icon, children }) {
   return (
-    <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="font-bold text-lg" style={{ color: "#2D5016" }}>
-          {title}
+    <div className="bg-white p-4 sm:p-6 rounded-xl shadow-sm border border-gray-100">
+      <div className="flex items-center justify-between mb-4 gap-3">
+        <h3 className="font-bold text-lg min-w-0" style={{ color: "#2D5016" }}>
+          <span className="break-words">{title}</span>
         </h3>
-        {icon}
+        <div className="flex-shrink-0">{icon}</div>
       </div>
       {children}
     </div>
@@ -613,7 +640,7 @@ function EmptyText({ text }) {
 
 function LoadingCard({ text = "Cargando...", color = "#2D5016" }) {
   return (
-    <div className="bg-white p-12 rounded-xl shadow-sm border border-gray-100 flex flex-col items-center justify-center">
+    <div className="bg-white p-10 sm:p-12 rounded-xl shadow-sm border border-gray-100 flex flex-col items-center justify-center">
       <div
         className="animate-spin rounded-full h-12 w-12 border-4 border-gray-200 mb-4"
         style={{ borderTopColor: color }}
@@ -625,12 +652,12 @@ function LoadingCard({ text = "Cargando...", color = "#2D5016" }) {
 
 function CardMetric({ title, value, icon }) {
   return (
-    <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-      <div className="flex items-center justify-between mb-2">
-        <p className="text-sm text-gray-600">{title}</p>
-        {icon}
+    <div className="bg-white p-4 sm:p-6 rounded-xl shadow-sm border border-gray-100">
+      <div className="flex items-center justify-between mb-2 gap-3">
+        <p className="text-sm text-gray-600 min-w-0 break-words">{title}</p>
+        <div className="flex-shrink-0">{icon}</div>
       </div>
-      <p className="text-3xl font-bold" style={{ color: "#2D5016" }}>
+      <p className="text-2xl sm:text-3xl font-bold" style={{ color: "#2D5016" }}>
         {value}
       </p>
       <div className="flex items-center gap-1 mt-2">
