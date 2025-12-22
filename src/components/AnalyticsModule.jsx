@@ -169,6 +169,18 @@ export default function Analytics() {
       loadShopifyData();
       return;
     }
+    useEffect(() => {
+  const intervalMs = 2 * 60 * 1000; // 2 minutos
+  const id = setInterval(() => {
+    if (selectedPlatform === "shopify") loadShopifyData();
+    else if (selectedPlatform === "youtube") loadYouTubeData();
+    else loadAnalytics();
+  }, intervalMs);
+
+  return () => clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [selectedPlatform, timeRange]);
+
     if (selectedPlatform === "youtube") {
       loadYouTubeData();
       return;
