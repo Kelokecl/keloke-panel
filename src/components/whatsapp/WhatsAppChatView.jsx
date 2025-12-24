@@ -10,16 +10,25 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
   const [messageText, setMessageText] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+
+  // ✅ NUEVO: refs/flags para scroll inteligente y evitar “refresh” molesto
   const messagesEndRef = useRef(null);
+  const listRef = useRef(null);
+  const lastMessageIdRef = useRef(null);
+  const [isNearBottom, setIsNearBottom] = useState(true);
 
   useEffect(() => {
     if (!contact?.phone_number) return;
 
+    // reset estado por cambio de contacto
+    lastMessageIdRef.current = null;
+    setIsNearBottom(true);
+
     loadMessages();
     markMessagesAsRead();
 
-    // Auto-refresh cada 3 segundos (backup)
-    const interval = setInterval(loadMessages, 3000);
+    // ✅ BACKUP MUCHO MENOS AGRESIVO (realtime manda)
+    const interval = setInterval(loadMessages, 30000);
 
     // Tiempo real (realtime)
     const channel = supabase
@@ -46,9 +55,10 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contact?.phone_number]);
 
+  // ✅ NUEVO: solo auto-scroll si estás “abajo”
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    if (isNearBottom) scrollToBottom();
+  }, [messages, isNearBottom]);
 
   async function loadMessages() {
     if (!contact?.phone_number) return;
@@ -64,6 +74,12 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
 
       if (error) throw error;
 
+      const lastId = data?.length ? data[data.length - 1].id : null;
+
+      // ✅ NUEVO: si no cambió el último mensaje, NO re-render (evita saltos)
+      if (lastMessageIdRef.current === lastId) return;
+
+      lastMessageIdRef.current = lastId;
       setMessages(data || []);
     } catch (err) {
       console.error('Error loading messages:', err);
@@ -139,7 +155,13 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
 
       if (insertError) console.error('❌ Error guardando outbound:', insertError);
 
+      // ✅ NUEVO: cuando tú envías, forzamos “modo abajo”
+      setIsNearBottom(true);
+
       await loadMessages();
+
+      // ✅ NUEVO: scroll suave al final después de render
+      setTimeout(scrollToBottom, 50);
     } catch (err) {
       console.error('❌ [SEND_ERROR]', err);
       alert('Error al enviar el mensaje: ' + err.message);
@@ -153,12 +175,16 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
   async function sendAudio(audioBlob, duration) {
     // Tu implementación actual está OK para seguir avanzando.
     // (No la toco aquí para no romperte el flujo ahora)
-    throw new Error('sendAudio aún no integrado en esta versión pegada. Pásame tu VoiceRecorder si quieres que lo dejemos 100% hoy.');
+    throw new Error(
+      'sendAudio aún no integrado en esta versión pegada. Pásame tu VoiceRecorder si quieres que lo dejemos 100% hoy.'
+    );
   }
 
   async function sendFile(file, caption) {
     // Tu implementación actual está OK para seguir avanzando.
-    throw new Error('sendFile aún no integrado en esta versión pegada. Si lo necesitas hoy sí o sí, lo integramos después de que carguen los mensajes.');
+    throw new Error(
+      'sendFile aún no integrado en esta versión pegada. Si lo necesitas hoy sí o sí, lo integramos después de que carguen los mensajes.'
+    );
   }
 
   function scrollToBottom() {
@@ -206,13 +232,27 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
             )}
           </div>
         </div>
-        <button onClick={() => onShowClientInfo(contact)} className="p-2 hover:bg-gray-100 rounded-full">
+        <button
+          onClick={() => onShowClientInfo(contact)}
+          className="p-2 hover:bg-gray-100 rounded-full"
+        >
           <Info className="w-5 h-5 text-gray-600" />
         </button>
       </div>
 
       {/* Mensajes */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-2">
+      <div
+        ref={listRef}
+        onScroll={() => {
+          const el = listRef.current;
+          if (!el) return;
+
+          // ✅ si estás a menos de 120px del final, “estás abajo”
+          const near = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+          setIsNearBottom(near);
+        }}
+        className="flex-1 overflow-y-auto p-4 space-y-2"
+      >
         {isLoading ? (
           <div className="flex justify-center">
             <Loader className="w-6 h-6 animate-spin text-green-500" />
@@ -270,7 +310,11 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
               disabled={isSending}
               className="p-3 bg-green-500 text-white rounded-full hover:bg-green-600 disabled:bg-gray-300 disabled:cursor-not-allowed"
             >
-              {isSending ? <Loader className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+              {isSending ? (
+                <Loader className="w-5 h-5 animate-spin" />
+              ) : (
+                <Send className="w-5 h-5" />
+              )}
             </button>
           ) : (
             <WhatsAppVoiceRecorder onSendAudio={() => {}} disabled={isSending} />
