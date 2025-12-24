@@ -77,10 +77,10 @@ export default function WhatsAppVoiceRecorder({ onSendAudio, disabled }) {
       streamRef.current = stream;
 
       const workerOptions = {
-        encoderWorkerFactory: () => new Worker("/opus/encoderWorker.umd.js"),
-        OggOpusEncoderWasmPath: "/opus/OggOpusEncoder.wasm",
-        WebMOpusEncoderWasmPath: "/opus/WebMOpusEncoder.wasm",
-      };
+  encoderWorkerFactory: () => new Worker("/opus/encoderWorker.umd.js"),
+  OggOpusEncoderWasmPath: "/opus/OggOpusEncoder.wasm",
+  WebMOpusEncoderWasmPath: "/opus/WebMOpusEncoder.wasm",
+};
 
       let recorder = null;
 
