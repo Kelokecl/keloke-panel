@@ -114,8 +114,36 @@ export default function WhatsAppVoiceRecorder({ onSendAudio, disabled }) {
       };
 
       recorder.onerror = (e) => {
-        console.error("❌ [VOICE] recorder.onerror:", e);
-      };
+  console.error("❌ [VOICE] recorder.onerror:", e);
+
+  alert("Falló el encoder OGG. Revisar carga de /public/opus/*.wasm y worker. Se hará fallback.");
+
+  try {
+    // fallback rápido a MediaRecorder nativo
+    const stream = streamRef.current;
+    if (!stream) return;
+
+    let fallback;
+    if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
+      fallback = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
+      actualMimeTypeRef.current = "audio/webm";
+    } else {
+      throw new Error("No hay fallback disponible en este navegador.");
+    }
+
+    mediaRecorderRef.current = fallback;
+    chunksRef.current = [];
+
+    fallback.ondataavailable = (ev) => {
+      if (ev.data?.size) chunksRef.current.push(ev.data);
+    };
+
+    fallback.onstop = recorder.onstop; // reutiliza tu mismo onstop
+    fallback.start();
+  } catch (err) {
+    console.error("❌ [VOICE] fallback error:", err);
+  }
+};
 
       recorder.onstop = () => {
         // IMPORTANTE: se puede disparar aunque tú ya marcaste isRecording=false
