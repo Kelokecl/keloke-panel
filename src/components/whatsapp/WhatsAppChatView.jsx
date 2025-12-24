@@ -172,13 +172,126 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
     }
   }
 
-  async function sendAudio(audioBlob, duration) {
-    // Tu implementación actual está OK para seguir avanzando.
-    // (No la toco aquí para no romperte el flujo ahora)
-    throw new Error(
-      'sendAudio aún no integrado en esta versión pegada. Pásame tu VoiceRecorder si quieres que lo dejemos 100% hoy.'
-    );
+    async function sendAudio(audioBlob, duration) {
+    if (!audioBlob || !connection || !contact?.phone_number) return;
+
+    setIsSending(true);
+
+    // Timeout para no quedar pegado
+    const timeoutId = setTimeout(() => {
+      console.error("⚠️ Timeout al enviar audio, reseteando UI");
+      setIsSending(false);
+    }, 20000);
+
+    try {
+      const cleanPhone = contact.phone_number.replace(/\D/g, "");
+      const phoneNumberId = connection.phone_number_id;
+      const accessToken = connection.access_token;
+
+      if (!phoneNumberId || !accessToken) {
+        throw new Error("Falta phone_number_id o access_token en la conexión.");
+      }
+
+      // 1) Subir media a WhatsApp (devuelve media_id)
+      const mime = audioBlob.type || "audio/ogg;codecs=opus";
+      const ext = mime.includes("webm") ? "webm" : "ogg";
+      const filename = `audio_out_${Date.now()}.${ext}`;
+
+      const form = new FormData();
+      form.append("messaging_product", "whatsapp");
+      // WhatsApp acepta file en multipart
+      form.append("file", new File([audioBlob], filename, { type: mime }));
+
+      const mediaUploadRes = await fetch(
+        `https://graph.facebook.com/v21.0/${phoneNumberId}/media`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: form,
+        }
+      );
+
+      const mediaUploadJson = await mediaUploadRes.json();
+      if (!mediaUploadRes.ok) {
+        console.error("❌ Error subiendo media:", mediaUploadJson);
+        throw new Error(mediaUploadJson?.error?.message || "Error subiendo media a WhatsApp");
+      }
+
+      const mediaId = mediaUploadJson.id;
+      if (!mediaId) throw new Error("No se recibió media_id desde WhatsApp.");
+
+      // 2) Enviar mensaje de audio usando media_id
+      const msgRes = await fetch(
+        `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            messaging_product: "whatsapp",
+            recipient_type: "individual",
+            to: cleanPhone,
+            type: "audio",
+            audio: { id: mediaId },
+          }),
+        }
+      );
+
+      const msgJson = await msgRes.json();
+      if (!msgRes.ok) {
+        console.error("❌ Error enviando mensaje audio:", msgJson);
+        throw new Error(msgJson?.error?.message || "Error enviando audio por WhatsApp");
+      }
+
+      const whatsappMessageId = msgJson?.messages?.[0]?.id ?? null;
+
+      // 3) Guardar outbound en Supabase para que aparezca en tu chat
+      // (El webhook también te traerá el status luego)
+      const { error: insertError } = await supabase.from("whatsapp_messages").insert({
+        phone_number: contact.phone_number,
+        direction: "outbound",
+        status: "sent",
+        message_type: "audio",
+        message: "",
+
+        // guarda el id de WhatsApp del mensaje
+        whatsapp_message_id: whatsappMessageId,
+
+        // guarda el media id (clave para debug/traerlo después)
+        media_id: mediaId,
+        media_mime_type: mime,
+        media_filename: filename,
+        media_size: audioBlob.size,
+
+        // opcional: guardar la respuesta
+        platform_response: {
+          media_upload: mediaUploadJson,
+          message_send: msgJson,
+        },
+
+        // si tu tabla tiene duration_seconds, úsalo (si no, bórralo)
+        duration_seconds: duration ?? null,
+      });
+
+      if (insertError) {
+        console.error("❌ Error guardando outbound audio en Supabase:", insertError);
+      }
+
+      // 4) Recargar mensajes para ver el “audio” aparecer al tiro
+      await loadMessages();
+    } catch (err) {
+      console.error("❌ [SEND_AUDIO_ERROR]", err);
+      alert("Error al enviar el audio: " + (err?.message || err));
+    } finally {
+      clearTimeout(timeoutId);
+      setIsSending(false);
+    }
   }
+
 
   async function sendFile(file, caption) {
     // Tu implementación actual está OK para seguir avanzando.
