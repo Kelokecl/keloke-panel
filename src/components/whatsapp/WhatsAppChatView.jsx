@@ -1,163 +1,206 @@
-import { useState, useEffect, useRef } from 'react';
-import { Send, User, Info, Loader, CheckCheck, Check } from 'lucide-react';
-import { supabase } from '../../lib/supabase';
-import WhatsAppMediaMessage from './WhatsAppMediaMessage';
-import WhatsAppVoiceRecorder from './WhatsAppVoiceRecorder';
-import WhatsAppFileAttachment from './WhatsAppFileAttachment';
+import { useState, useEffect, useRef, useCallback } from "react";
+import { Send, User, Info, Loader, CheckCheck, Check } from "lucide-react";
+import { supabase } from "../../lib/supabase";
+import WhatsAppMediaMessage from "./WhatsAppMediaMessage";
+import WhatsAppVoiceRecorder from "./WhatsAppVoiceRecorder";
+import WhatsAppFileAttachment from "./WhatsAppFileAttachment";
 
-export default function WhatsAppChatView({ 
-  contact, 
-  connection, 
-  onShowClientInfo 
-}) {
+export default function WhatsAppChatView({ contact, connection, onShowClientInfo }) {
   const [messages, setMessages] = useState([]);
-  const [messageText, setMessageText] = useState('');
+  const [messageText, setMessageText] = useState("");
   const [isSending, setIsSending] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
+
   const messagesEndRef = useRef(null);
+  const pollingRef = useRef(null);
+  const abortRef = useRef(null);
+  const lastReadMarkRef = useRef(0);
 
-  useEffect(() => {
-    if (contact) {
-      loadMessages();
-      markMessagesAsRead();
-      
-      // Auto-refresh cada 3 segundos
-      const interval = setInterval(loadMessages, 3000);
-      
-      // Tiempo real
-      const subscription = supabase
-        .channel(`chat_${contact.phone_number}`)
-        .on('postgres_changes',
-          { 
-            event: '*', 
-            schema: 'public', 
-            table: 'whatsapp_messages',
-            filter: `phone_number=eq.${contact.phone_number}`
-          },
-          () => {
-            loadMessages();
-          }
-        )
-        .subscribe();
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, []);
 
-      return () => {
-        clearInterval(interval);
-        subscription.unsubscribe();
-      };
-    }
-  }, [contact]);
+  const normalizePhone = useCallback((p) => String(p || "").replace(/\D/g, ""), []);
 
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+  const loadMessages = useCallback(async () => {
+    const phone = contact?.phone_number;
+    if (!phone) return;
 
-  async function loadMessages() {
-    if (!contact) return;
-    
+    // Cancelar request anterior si aún está volando (evita race + spam)
+    try {
+      abortRef.current?.abort?.();
+    } catch {}
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setIsLoading(true);
     try {
       const { data, error } = await supabase
-        .from('whatsapp_messages')
-        .select('*')
-        .eq('phone_number', contact.phone_number)
-        .order('created_at', { ascending: true });
+        .from("whatsapp_messages")
+        .select("*")
+        .eq("phone_number", phone)
+        .order("created_at", { ascending: true })
+        .abortSignal(controller.signal);
 
       if (error) throw error;
-      setMessages(data || []);
+
+      setMessages(Array.isArray(data) ? data : []);
     } catch (err) {
-      console.error('Error loading messages:', err);
+      // Si fue abort, no lo muestres como error real
+      if (err?.name !== "AbortError") {
+        console.error("❌ Error loading messages:", err);
+      }
     } finally {
       setIsLoading(false);
     }
-  }
+  }, [contact?.phone_number]);
 
-  async function markMessagesAsRead() {
-    if (!contact) return;
-    
+  const markMessagesAsRead = useCallback(async () => {
+    const phone = contact?.phone_number;
+    if (!phone) return;
+
+    // Throttle (evita que se dispare 200 veces por refresh/subs)
+    const now = Date.now();
+    if (now - lastReadMarkRef.current < 1500) return;
+    lastReadMarkRef.current = now;
+
     try {
-      await supabase
-        .from('whatsapp_messages')
+      const { error } = await supabase
+        .from("whatsapp_messages")
         .update({ is_read: true })
-        .eq('phone_number', contact.phone_number)
-        .eq('direction', 'inbound')
-        .eq('is_read', false);
+        .eq("phone_number", phone)
+        .eq("direction", "inbound")
+        .eq("is_read", false);
+
+      if (error) throw error;
     } catch (err) {
-      console.error('Error marking messages as read:', err);
+      console.error("❌ Error marking messages as read:", err);
     }
-  }
+  }, [contact?.phone_number]);
+
+  useEffect(() => {
+    if (!contact?.phone_number) {
+      setMessages([]);
+      return;
+    }
+
+    // carga inicial
+    loadMessages().then(() => markMessagesAsRead());
+
+    // Polling fallback (por si realtime falla)
+    if (pollingRef.current) clearInterval(pollingRef.current);
+    pollingRef.current = setInterval(() => {
+      loadMessages();
+    }, 4000);
+
+    // Realtime
+    const channel = supabase
+      .channel(`chat_${contact.phone_number}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "whatsapp_messages",
+          filter: `phone_number=eq.${contact.phone_number}`,
+        },
+        async (payload) => {
+          // Actualiza chat altiro
+          await loadMessages();
+
+          // Si llega inbound, márcalo como leído
+          const dir = payload?.new?.direction;
+          if (dir === "inbound") {
+            await markMessagesAsRead();
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      try {
+        abortRef.current?.abort?.();
+      } catch {}
+      if (pollingRef.current) clearInterval(pollingRef.current);
+      pollingRef.current = null;
+      channel.unsubscribe();
+    };
+  }, [contact?.phone_number, loadMessages, markMessagesAsRead]);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, scrollToBottom]);
+
+  const getStatusIcon = (status) => {
+    switch (status) {
+      case "read":
+      case "delivered":
+        return <CheckCheck className="w-4 h-4 text-blue-400" />;
+      case "sent":
+        return <CheckCheck className="w-4 h-4" />;
+      default:
+        return <Check className="w-4 h-4" />;
+    }
+  };
 
   async function sendMessage() {
     if (!messageText.trim() || !connection) return;
 
-    // Guardar el mensaje antes de limpiar el input
     const messageToSend = messageText.trim();
-    
     setIsSending(true);
-    
-    // CRÍTICO: Usar un timeout como safety net
-    // Si después de 10 segundos no termina, resetear el estado
+
     const timeoutId = setTimeout(() => {
-      console.error('⚠️ Timeout al enviar mensaje, reseteando UI');
-      setMessageText('');
+      console.error("⚠️ Timeout al enviar mensaje, reseteando UI");
+      setMessageText("");
       setIsSending(false);
     }, 10000);
-    
+
     try {
-      const cleanPhone = contact.phone_number.replace(/\D/g, '');
-      
-      console.log('📤 [SEND] Enviando mensaje de texto...');
+      const cleanPhone = normalizePhone(contact.phone_number);
+
+      // ✅ Envío directo (funciona ya). (Después lo migramos a Edge Function para no exponer token)
       const response = await fetch(
         `https://graph.facebook.com/v21.0/${connection.phone_number_id}/messages`,
         {
-          method: 'POST',
+          method: "POST",
           headers: {
-            'Authorization': `Bearer ${connection.access_token}`,
-            'Content-Type': 'application/json',
+            Authorization: `Bearer ${connection.access_token}`,
+            "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            messaging_product: 'whatsapp',
-            recipient_type: 'individual',
+            messaging_product: "whatsapp",
+            recipient_type: "individual",
             to: cleanPhone,
-            type: 'text',
-            text: { body: messageToSend }
-          })
+            type: "text",
+            text: { body: messageToSend },
+          }),
         }
       );
 
       const result = await response.json();
-      console.log('📥 [SEND] Respuesta WhatsApp API:', result);
-      
-      if (!response.ok) throw new Error(result.error?.message);
+      if (!response.ok) throw new Error(result?.error?.message || "Error WhatsApp API");
 
-      console.log('💾 [SEND] Guardando en BD...');
-      const { error: insertError } = await supabase.from('whatsapp_messages').insert({
+      // Guardar en BD (outbound)
+      const { error: insertError } = await supabase.from("whatsapp_messages").insert({
         phone_number: contact.phone_number,
         message: messageToSend,
-        direction: 'outbound',
-        status: 'sent',
-        message_type: 'text',
-        whatsapp_message_id: result.messages?.[0]?.id,
-        platform_response: result
+        direction: "outbound",
+        status: "sent",
+        message_type: "text",
+        whatsapp_message_id: result?.messages?.[0]?.id ?? null,
+        platform_response: result,
       });
 
-      if (insertError) {
-        console.error('❌ [SEND] Error guardando en BD:', insertError);
-      } else {
-        console.log('✅ [SEND] Guardado correctamente en BD');
-      }
+      if (insertError) console.error("❌ Error guardando outbound:", insertError);
 
-      console.log('🔄 [SEND] Recargando mensajes...');
       await loadMessages();
-      console.log('✅ [SEND] Flujo completo exitoso');
     } catch (err) {
-      console.error('❌ [SEND_ERROR]', err);
-      alert('Error al enviar el mensaje: ' + err.message);
+      console.error("❌ [SEND_ERROR]", err);
+      alert("Error al enviar el mensaje: " + (err?.message || String(err)));
     } finally {
-      // CRÍTICO: SIEMPRE limpiar input y desactivar loading
-      // Esto sucede INDEPENDIENTEMENTE de si el webhook funciona o no
       clearTimeout(timeoutId);
-      setMessageText('');
+      setMessageText("");
       setIsSending(false);
-      console.log('✅ [SEND] UI reseteada correctamente');
     }
   }
 
@@ -165,149 +208,69 @@ export default function WhatsAppChatView({
     if (!connection) return;
 
     try {
-      // Usar el MIME type y extensión REALES que vienen del blob
-      const mimeTypeForApi = audioBlob.mimeTypeForApi || 'audio/webm';
-      const fileExtensionForApi = audioBlob.fileExtensionForApi || 'webm';
+      const mimeTypeForApi = audioBlob?.mimeTypeForApi || "audio/webm";
+      const fileExtensionForApi = audioBlob?.fileExtensionForApi || "webm";
       const fileName = `audio_${Date.now()}.${fileExtensionForApi}`;
-      
-      // LOGS DE DEBUG COMPLETOS (solicitados por el usuario)
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('📤 [AUDIO_DEBUG] INICIO DEL FLUJO DE ENVÍO');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('[AUDIO_DEBUG] Blob recibido del grabador:');
-      console.log('[AUDIO_DEBUG]   - size:', audioBlob.size, 'bytes');
-      console.log('[AUDIO_DEBUG]   - blob.type:', audioBlob.type);
-      console.log('[AUDIO_DEBUG]   - blob.mimeTypeForApi:', audioBlob.mimeTypeForApi);
-      console.log('[AUDIO_DEBUG]   - blob.fileExtensionForApi:', audioBlob.fileExtensionForApi);
-      console.log('[AUDIO_DEBUG] Valores que se usarán:');
-      console.log('[AUDIO_DEBUG]   - mimeType para WhatsApp:', mimeTypeForApi);
-      console.log('[AUDIO_DEBUG]   - extensión del archivo:', fileExtensionForApi);
-      console.log('[AUDIO_DEBUG]   - nombre final:', fileName);
-      console.log('[AUDIO_DEBUG]   - duración:', duration, 'segundos');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      
-      // 1. Subir audio a Supabase Storage
-      console.log('📤 [AUDIO] Subiendo a Supabase Storage...');
-      
-      const { data: uploadData, error: uploadError } = await supabase.storage
-        .from('whatsapp-media')
+
+      // 1) Upload a Storage
+      const { error: uploadError } = await supabase.storage
+        .from("whatsapp-media")
         .upload(fileName, audioBlob, {
-          contentType: mimeTypeForApi, // Usar el Content-Type REAL
-          upsert: false
+          contentType: mimeTypeForApi,
+          upsert: false,
         });
 
-      if (uploadError) {
-        console.error('❌ [AUDIO] Error subiendo a Storage:', uploadError);
-        throw uploadError;
-      }
-      console.log('✅ [AUDIO] Subido correctamente a Storage');
+      if (uploadError) throw uploadError;
 
-      // 2. Obtener URL pública
-      const { data: { publicUrl } } = supabase.storage
-        .from('whatsapp-media')
-        .getPublicUrl(fileName);
-      
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('🔗 [AUDIO_DEBUG] URL PÚBLICA GENERADA');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('[AUDIO_DEBUG] URL pública:', publicUrl);
-      console.log('[AUDIO_DEBUG] ⚠️  IMPORTANTE: Verificar esta URL en incógnito');
-      console.log('[AUDIO_DEBUG] ⚠️  Debe descargar un archivo .ogg (NO .webm)');
-      console.log('[AUDIO_DEBUG] ⚠️  Debe reproducirse correctamente en un reproductor local');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      // 2) URL pública
+      const {
+        data: { publicUrl },
+      } = supabase.storage.from("whatsapp-media").getPublicUrl(fileName);
 
-      // 3. Enviar por WhatsApp Cloud API
-      const cleanPhone = contact.phone_number.replace(/\D/g, '');
-      
-      const payload = {
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: cleanPhone,
-        type: 'audio',
-        audio: { link: publicUrl }
-      };
-      
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('📡 [AUDIO_DEBUG] PAYLOAD PARA WHATSAPP CLOUD API');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('[AUDIO_DEBUG] Payload completo:');
-      console.log(JSON.stringify(payload, null, 2));
-      console.log('[AUDIO_DEBUG] Endpoint:', `https://graph.facebook.com/v21.0/${connection.phone_number_id}/messages`);
-      console.log('[AUDIO_DEBUG] Headers:');
-      console.log('[AUDIO_DEBUG]   - Authorization: Bearer [REDACTED]');
-      console.log('[AUDIO_DEBUG]   - Content-Type: application/json');
-      console.log('[AUDIO_DEBUG] ⚠️  VERIFICAR:');
-      console.log('[AUDIO_DEBUG]   ✓ type debe ser "audio" (NO "document")');
-      console.log('[AUDIO_DEBUG]   ✓ audio.link debe terminar en .ogg (NO .webm)');
-      console.log('[AUDIO_DEBUG]   ✓ URL debe ser accesible públicamente');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      
+      // 3) Enviar a WhatsApp
+      const cleanPhone = normalizePhone(contact.phone_number);
+
       const response = await fetch(
         `https://graph.facebook.com/v21.0/${connection.phone_number_id}/messages`,
         {
-          method: 'POST',
+          method: "POST",
           headers: {
-            'Authorization': `Bearer ${connection.access_token}`,
-            'Content-Type': 'application/json',
+            Authorization: `Bearer ${connection.access_token}`,
+            "Content-Type": "application/json",
           },
-          body: JSON.stringify(payload)
+          body: JSON.stringify({
+            messaging_product: "whatsapp",
+            recipient_type: "individual",
+            to: cleanPhone,
+            type: "audio",
+            audio: { link: publicUrl },
+          }),
         }
       );
 
       const result = await response.json();
-      
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('📥 [AUDIO_DEBUG] RESPUESTA DE WHATSAPP CLOUD API');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('[AUDIO_DEBUG] HTTP Status:', response.status, response.statusText);
-      console.log('[AUDIO_DEBUG] Response Body:');
-      console.log(JSON.stringify(result, null, 2));
-      
-      if (!response.ok) {
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('❌ [AUDIO_DEBUG] ERROR EN WHATSAPP API');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('[AUDIO_DEBUG] Error Code:', result.error?.code);
-        console.log('[AUDIO_DEBUG] Error Message:', result.error?.message);
-        console.log('[AUDIO_DEBUG] Error Type:', result.error?.type);
-        console.log('[AUDIO_DEBUG] Error Details:', result.error?.error_data);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        const errorMsg = result.error?.message || 'Error desconocido de WhatsApp API';
-        alert(`❌ Error al enviar audio: ${errorMsg}`);
-        throw new Error(errorMsg);
-      }
-      
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('✅ [AUDIO_DEBUG] AUDIO ENVIADO EXITOSAMENTE');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('[AUDIO_DEBUG] WhatsApp Message ID:', result.messages?.[0]?.id);
-      console.log('[AUDIO_DEBUG] ⚠️  IMPORTANTE: Verificar en el teléfono');
-      console.log('[AUDIO_DEBUG] ⚠️  ¿Llegó el audio al WhatsApp del destinatario?');
-      console.log('[AUDIO_DEBUG] ⚠️  ¿Se puede reproducir correctamente?');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      if (!response.ok) throw new Error(result?.error?.message || "Error WhatsApp API");
 
-      // 4. Guardar en BD
-      console.log('💾 [AUDIO] Guardando en base de datos...');
-      await supabase.from('whatsapp_messages').insert({
+      // 4) Guardar BD
+      await supabase.from("whatsapp_messages").insert({
         phone_number: contact.phone_number,
-        message: 'Audio',
-        direction: 'outbound',
-        status: 'sent',
-        message_type: 'audio',
+        message: "Audio",
+        direction: "outbound",
+        status: "sent",
+        message_type: "audio",
         media_url: publicUrl,
-        media_mime_type: mimeTypeForApi, // Guardar el MIME type REAL
+        media_mime_type: mimeTypeForApi,
         media_filename: fileName,
         media_size: audioBlob.size,
         media_duration: duration,
-        whatsapp_message_id: result.messages?.[0]?.id,
-        platform_response: result
+        whatsapp_message_id: result?.messages?.[0]?.id ?? null,
+        platform_response: result,
       });
 
       await loadMessages();
-      console.log('✅ [AUDIO] Flujo completo exitoso');
     } catch (err) {
-      console.error('❌ [AUDIO] Error en flujo completo:', err);
-      alert(`Error al enviar audio: ${err.message}`);
+      console.error("❌ Error sending audio:", err);
+      alert("Error al enviar audio: " + (err?.message || String(err)));
       throw err;
     }
   }
@@ -316,92 +279,72 @@ export default function WhatsAppChatView({
     if (!connection) return;
 
     try {
-      // 1. Determinar tipo de mensaje
-      let messageType = 'document';
-      if (file.type.startsWith('image/')) messageType = 'image';
-      else if (file.type.startsWith('video/')) messageType = 'video';
+      let messageType = "document";
+      if (file.type.startsWith("image/")) messageType = "image";
+      else if (file.type.startsWith("video/")) messageType = "video";
 
-      // 2. Subir archivo a Supabase Storage
       const fileName = `${messageType}_${Date.now()}_${file.name}`;
-      const { data: uploadData, error: uploadError } = await supabase.storage
-        .from('whatsapp-media')
+
+      const { error: uploadError } = await supabase.storage
+        .from("whatsapp-media")
         .upload(fileName, file, {
           contentType: file.type,
-          upsert: false
+          upsert: false,
         });
 
       if (uploadError) throw uploadError;
 
-      // 3. Obtener URL pública
-      const { data: { publicUrl } } = supabase.storage
-        .from('whatsapp-media')
-        .getPublicUrl(fileName);
+      const {
+        data: { publicUrl },
+      } = supabase.storage.from("whatsapp-media").getPublicUrl(fileName);
 
-      // 4. Enviar por WhatsApp Cloud API
-      const cleanPhone = contact.phone_number.replace(/\D/g, '');
-      
+      const cleanPhone = normalizePhone(contact.phone_number);
+
       const payload = {
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
         to: cleanPhone,
         type: messageType,
-        [messageType]: { 
+        [messageType]: {
           link: publicUrl,
-          ...(caption && { caption })
-        }
+          ...(caption ? { caption } : {}),
+        },
       };
 
       const response = await fetch(
         `https://graph.facebook.com/v21.0/${connection.phone_number_id}/messages`,
         {
-          method: 'POST',
+          method: "POST",
           headers: {
-            'Authorization': `Bearer ${connection.access_token}`,
-            'Content-Type': 'application/json',
+            Authorization: `Bearer ${connection.access_token}`,
+            "Content-Type": "application/json",
           },
-          body: JSON.stringify(payload)
+          body: JSON.stringify(payload),
         }
       );
 
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error?.message);
+      if (!response.ok) throw new Error(result?.error?.message || "Error WhatsApp API");
 
-      // 5. Guardar en BD
-      await supabase.from('whatsapp_messages').insert({
+      await supabase.from("whatsapp_messages").insert({
         phone_number: contact.phone_number,
         message: caption || file.name,
-        direction: 'outbound',
-        status: 'sent',
+        direction: "outbound",
+        status: "sent",
         message_type: messageType,
         media_url: publicUrl,
         media_mime_type: file.type,
         media_filename: file.name,
         media_size: file.size,
         caption: caption || null,
-        whatsapp_message_id: result.messages?.[0]?.id,
-        platform_response: result
+        whatsapp_message_id: result?.messages?.[0]?.id ?? null,
+        platform_response: result,
       });
 
       await loadMessages();
     } catch (err) {
-      console.error('Error sending file:', err);
+      console.error("❌ Error sending file:", err);
       throw err;
-    }
-  }
-
-  function scrollToBottom() {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }
-
-  function getStatusIcon(status) {
-    switch (status) {
-      case 'read':
-      case 'delivered':
-        return <CheckCheck className="w-4 h-4 text-blue-400" />;
-      case 'sent':
-        return <CheckCheck className="w-4 h-4" />;
-      default:
-        return <Check className="w-4 h-4" />;
     }
   }
 
@@ -420,6 +363,7 @@ export default function WhatsAppChatView({
         <div className="w-10 h-10 rounded-full bg-green-500 flex items-center justify-center text-white">
           <User className="w-6 h-6" />
         </div>
+
         <div className="flex-1">
           <h3 className="font-semibold text-gray-900">
             {contact.contact_name || contact.phone_number}
@@ -434,10 +378,8 @@ export default function WhatsAppChatView({
             )}
           </div>
         </div>
-        <button
-          onClick={() => onShowClientInfo(contact)}
-          className="p-2 hover:bg-gray-100 rounded-full"
-        >
+
+        <button onClick={() => onShowClientInfo?.(contact)} className="p-2 hover:bg-gray-100 rounded-full">
           <Info className="w-5 h-5 text-gray-600" />
         </button>
       </div>
@@ -451,25 +393,22 @@ export default function WhatsAppChatView({
         ) : (
           messages.map((msg) => (
             <div
-              key={msg.id}
-              className={`flex ${msg.direction === 'outbound' ? 'justify-end' : 'justify-start'}`}
+              key={msg.id ?? msg.whatsapp_message_id ?? `${msg.phone_number}-${msg.created_at}`}
+              className={`flex ${msg.direction === "outbound" ? "justify-end" : "justify-start"}`}
             >
               <div
                 className={`max-w-md px-4 py-2 rounded-lg ${
-                  msg.direction === 'outbound'
-                    ? 'bg-[#d9fdd3]'
-                    : 'bg-white'
+                  msg.direction === "outbound" ? "bg-[#d9fdd3]" : "bg-white"
                 }`}
               >
                 <WhatsAppMediaMessage message={msg} />
                 <div className="flex items-center justify-end gap-1 mt-1">
                   <span className="text-[10px] text-gray-500">
-                    {new Date(msg.created_at).toLocaleTimeString('es-CL', {
-                      hour: '2-digit',
-                      minute: '2-digit'
-                    })}
+                    {msg.created_at
+                      ? new Date(msg.created_at).toLocaleTimeString("es-CL", { hour: "2-digit", minute: "2-digit" })
+                      : ""}
                   </span>
-                  {msg.direction === 'outbound' && getStatusIcon(msg.status)}
+                  {msg.direction === "outbound" && getStatusIcon(msg.status)}
                 </div>
               </div>
             </div>
@@ -481,39 +420,32 @@ export default function WhatsAppChatView({
       {/* Input */}
       <div className="bg-white border-t p-4">
         <div className="flex items-end gap-2 relative">
-          {/* Botón de adjuntar archivos */}
-          <WhatsAppFileAttachment
-            onSendFile={sendFile}
-            disabled={isSending}
-          />
+          <WhatsAppFileAttachment onSendFile={sendFile} disabled={isSending} />
 
           <textarea
             value={messageText}
             onChange={(e) => setMessageText(e.target.value)}
-            onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), sendMessage())}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+              }
+            }}
             placeholder="Escribe un mensaje..."
             rows={1}
             className="flex-1 px-4 py-2 border rounded-full resize-none focus:outline-none focus:ring-2 focus:ring-green-500"
           />
-          
-          {/* Mostrar micrófono cuando no hay texto, botón de enviar cuando hay texto */}
+
           {messageText.trim() ? (
             <button
               onClick={sendMessage}
               disabled={isSending}
               className="p-3 bg-green-500 text-white rounded-full hover:bg-green-600 disabled:bg-gray-300 disabled:cursor-not-allowed"
             >
-              {isSending ? (
-                <Loader className="w-5 h-5 animate-spin" />
-              ) : (
-                <Send className="w-5 h-5" />
-              )}
+              {isSending ? <Loader className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
             </button>
           ) : (
-            <WhatsAppVoiceRecorder
-              onSendAudio={sendAudio}
-              disabled={isSending}
-            />
+            <WhatsAppVoiceRecorder onSendAudio={sendAudio} disabled={isSending} />
           )}
         </div>
       </div>
