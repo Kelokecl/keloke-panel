@@ -59,13 +59,13 @@ export default function WhatsAppModule() {
   }
 
   function handleSaveContact() {
-    // Recargar contacto si es necesario
     if (selectedContact?.phone_number === modalContact?.phone_number) {
-      // Actualizar el contacto seleccionado con los nuevos datos
+      // si quieres, acá luego actualizamos el state del contacto seleccionado
     }
   }
 
   const isChatView = currentView === 'chat';
+  const isMobileChatOpen = isChatView && !!selectedContact; // si hay chat seleccionado, en móvil ocultamos header
 
   if (isLoading) {
     return (
@@ -91,8 +91,10 @@ export default function WhatsAppModule() {
 
   return (
     <div className="h-screen flex flex-col bg-gray-100">
-      {/* Header fijo */}
-      <div className="bg-green-600 text-white px-4 md:px-6 py-4 flex items-center justify-between shadow-md">
+      {/* HEADER VERDE:
+          - Desktop: siempre visible
+          - Móvil: se oculta cuando entras a un chat (selectedContact) */}
+      <div className={`${isMobileChatOpen ? 'hidden md:flex' : 'flex'} bg-green-600 text-white px-4 md:px-6 py-4 items-center justify-between shadow-md`}>
         <div className="flex items-center gap-3 min-w-0">
           <MessageCircle className="w-8 h-8 shrink-0" />
           <div className="min-w-0">
@@ -101,9 +103,7 @@ export default function WhatsAppModule() {
           </div>
         </div>
 
-        {/* Tabs y estado de IA */}
         <div className="flex items-center gap-3">
-          {/* Indicador de IA */}
           {aiConfig?.is_enabled && (
             <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-purple-500 rounded-lg">
               <Bot className="w-4 h-4" />
@@ -111,12 +111,10 @@ export default function WhatsAppModule() {
             </div>
           )}
 
-          {/* Tabs */}
           <div className="flex bg-green-700 rounded-lg p-1">
             <button
               onClick={() => {
                 setCurrentView('chat');
-                // opcional: si vuelves a chat en móvil, mantén selección
               }}
               className={`px-3 md:px-4 py-2 rounded-md text-sm font-medium transition-colors ${
                 currentView === 'chat' ? 'bg-white text-green-600' : 'text-white hover:bg-green-600'
@@ -129,8 +127,7 @@ export default function WhatsAppModule() {
             <button
               onClick={() => {
                 setCurrentView('ai-config');
-                // en móvil tiene sentido limpiar selección para no “quedar atrapado”
-                setSelectedContact(null);
+                setSelectedContact(null); // evitar “quedarse pegado” en chat al cambiar a IA
               }}
               className={`px-3 md:px-4 py-2 rounded-md text-sm font-medium transition-colors ${
                 currentView === 'ai-config' ? 'bg-white text-purple-600' : 'text-white hover:bg-green-600'
@@ -143,27 +140,24 @@ export default function WhatsAppModule() {
         </div>
       </div>
 
-      {/* Layout principal */}
+      {/* CONTENIDO */}
       {isChatView ? (
-        <div className="flex-1 flex overflow-hidden">
-          {/* LISTA (mobile: solo si NO hay contacto seleccionado) */}
-          <div
-            className={[
-              'w-full md:w-96 border-r bg-white',
-              selectedContact ? 'hidden md:block' : 'block',
-            ].join(' ')}
-          >
-            <WhatsAppConversationsList onSelectContact={setSelectedContact} selectedContact={selectedContact} />
+        <div className="flex-1 flex overflow-hidden relative">
+          {/* LISTA:
+              - Desktop: siempre visible
+              - Móvil: se oculta si hay chat seleccionado */}
+          <div className={`w-full md:w-96 border-r bg-white ${selectedContact ? 'hidden md:block' : 'block'}`}>
+            <WhatsAppConversationsList
+              onSelectContact={(c) => setSelectedContact(c)}
+              selectedContact={selectedContact}
+            />
           </div>
 
-          {/* CHAT (mobile: solo si hay contacto seleccionado) */}
-          <div
-            className={[
-              'flex-1 min-w-0 bg-white',
-              selectedContact ? 'block' : 'hidden md:block',
-            ].join(' ')}
-          >
-            {/* Header móvil para volver */}
+          {/* CHAT:
+              - Desktop: siempre visible (derecha)
+              - Móvil: visible solo si hay seleccionado */}
+          <div className={`flex-1 min-w-0 bg-white ${selectedContact ? 'block' : 'hidden md:block'} relative`}>
+            {/* Mini header SOLO móvil (para volver + nombre). Este sí queda, aunque el header verde se oculte */}
             <div className="md:hidden bg-white border-b px-3 py-2 flex items-center gap-2">
               <button
                 onClick={() => setSelectedContact(null)}
@@ -181,7 +175,24 @@ export default function WhatsAppModule() {
               </div>
             </div>
 
-            <WhatsAppChatView contact={selectedContact} connection={connection} onShowClientInfo={handleShowClientInfo} />
+            {/* Vista real del chat */}
+            <WhatsAppChatView
+              contact={selectedContact}
+              connection={connection}
+              onShowClientInfo={handleShowClientInfo}
+            />
+
+            {/* BOTÓN FLOTANTE TIPO WHATSAPP (solo móvil y solo cuando hay chat abierto) */}
+            {selectedContact && (
+              <button
+                onClick={() => setSelectedContact(null)}
+                className="md:hidden fixed bottom-5 left-5 z-50 w-12 h-12 rounded-full bg-green-600 text-white shadow-lg flex items-center justify-center active:scale-95"
+                aria-label="Volver a conversaciones"
+                title="Volver"
+              >
+                <ArrowLeft className="w-6 h-6" />
+              </button>
+            )}
           </div>
         </div>
       ) : (
@@ -190,7 +201,7 @@ export default function WhatsAppModule() {
         </div>
       )}
 
-      {/* Modal de datos del cliente */}
+      {/* Modal cliente */}
       {showClientModal && modalContact && (
         <WhatsAppClientModal contact={modalContact} onClose={handleCloseModal} onSave={handleSaveContact} />
       )}
