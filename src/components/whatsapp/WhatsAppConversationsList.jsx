@@ -60,11 +60,11 @@ export default function WhatsAppConversationsList({ onSelectContact, selectedCon
 
           // Mensajes no leídos (solo entrantes)
           const { count: unreadCount } = await supabase
-            .from('whatsapp_messages')
-            .select('*', { count: 'exact', head: true })
-            .eq('phone_number', contact.phone_number)
-            .eq('direction', 'inbound')
-            .eq('is_read', false);
+  .from('whatsapp_messages')
+  .select('id', { count: 'exact' })
+  .eq('phone_number', contact.phone_number)
+  .eq('direction', 'inbound')
+  .eq('is_read', false);
 
           return {
             contact,
