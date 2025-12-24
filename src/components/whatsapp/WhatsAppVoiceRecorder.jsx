@@ -2,12 +2,6 @@ import { useState, useRef, useEffect } from "react";
 import { Mic, Square, Play, Pause, X, Send, Loader } from "lucide-react";
 import OpusMediaRecorder from "opus-media-recorder";
 
-/**
- * WhatsAppVoiceRecorder (Nivel Dios)
- * - Graba en OGG/Opus usando opus-media-recorder (WASM) desde MISMA ORIGIN (/public)
- * - Evita SecurityError de Worker cross-origin (unpkg)
- * - Fallback a MediaRecorder nativo solo si es estrictamente necesario
- */
 export default function WhatsAppVoiceRecorder({ onSendAudio, disabled }) {
   const [isRecording, setIsRecording] = useState(false);
   const [audioBlob, setAudioBlob] = useState(null);
@@ -22,13 +16,13 @@ export default function WhatsAppVoiceRecorder({ onSendAudio, disabled }) {
   const timerRef = useRef(null);
   const audioRef = useRef(null);
 
-  const actualMimeTypeRef = useRef("audio/ogg"); // lo que realmente quedó
+  const actualMimeTypeRef = useRef("audio/ogg");
+  const isStoppingRef = useRef(false); // 🔒 evita doble stop
+  const isStartingRef = useRef(false); // 🔒 evita doble start
 
   useEffect(() => {
     return () => {
-      cleanupTimer();
-      cleanupAudioUrl();
-      stopStreamTracks();
+      safeCleanupAll();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -40,10 +34,6 @@ export default function WhatsAppVoiceRecorder({ onSendAudio, disabled }) {
     }
   }
 
-  function cleanupAudioUrl() {
-    if (audioUrl) URL.revokeObjectURL(audioUrl);
-  }
-
   function stopStreamTracks() {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
@@ -51,19 +41,41 @@ export default function WhatsAppVoiceRecorder({ onSendAudio, disabled }) {
     }
   }
 
+  function cleanupAudioUrl() {
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+  }
+
+  function safeCleanupAll() {
+    cleanupTimer();
+    cleanupAudioUrl();
+    stopStreamTracks();
+    chunksRef.current = [];
+    mediaRecorderRef.current = null;
+    isStoppingRef.current = false;
+    isStartingRef.current = false;
+  }
+
   async function startRecording() {
     if (disabled || isSending) return;
+    if (isRecording) return;
+    if (isStartingRef.current) return;
+
+    isStartingRef.current = true;
 
     try {
+      // reset estado anterior
       cleanupTimer();
       stopStreamTracks();
+      chunksRef.current = [];
+      cleanupAudioUrl();
+      setAudioBlob(null);
+      setAudioUrl(null);
+      setIsPlaying(false);
+      setRecordingTime(0);
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
-      chunksRef.current = [];
-      setRecordingTime(0);
 
-      // Worker/WASM desde tu dominio (Vercel) => /public/opus/*
       const workerOptions = {
         encoderWorkerFactory: () => new Worker("/opus/encoderWorker.umd.js"),
         OggOpusEncoderWasmPath: "/opus/OggOpusEncoder.wasm",
@@ -72,36 +84,41 @@ export default function WhatsAppVoiceRecorder({ onSendAudio, disabled }) {
 
       let recorder = null;
 
-      // Intento 1: OGG/Opus con opus-media-recorder (ideal)
+      // 1) Ideal: opus-media-recorder OGG
       try {
         recorder = new OpusMediaRecorder(stream, { mimeType: "audio/ogg" }, workerOptions);
         actualMimeTypeRef.current = "audio/ogg";
         console.log("✅ [VOICE] OpusMediaRecorder OK (audio/ogg)");
       } catch (e) {
-        console.warn("⚠️ [VOICE] OpusMediaRecorder falló, probando MediaRecorder nativo:", e);
+        console.warn("⚠️ [VOICE] OpusMediaRecorder falló, fallback nativo:", e);
 
-        // Intento 2: MediaRecorder nativo (si soporta OGG)
+        // 2) Nativo OGG si existe
         if (window.MediaRecorder && MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")) {
           recorder = new MediaRecorder(stream, { mimeType: "audio/ogg;codecs=opus" });
           actualMimeTypeRef.current = "audio/ogg";
           console.log("✅ [VOICE] MediaRecorder nativo OK (audio/ogg)");
         } else if (window.MediaRecorder && MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
-          // Último recurso: webm (NO ideal para WhatsApp Cloud API)
           recorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
           actualMimeTypeRef.current = "audio/webm";
-          console.warn("⚠️ [VOICE] Fallback WEBM (NO ideal para WhatsApp)");
+          console.warn("⚠️ [VOICE] Fallback WEBM (NO ideal para WhatsApp Cloud API)");
         } else {
-          throw new Error("Tu navegador no soporta grabación de audio (MediaRecorder no disponible).");
+          throw new Error("Este navegador no soporta grabación de audio.");
         }
       }
 
       mediaRecorderRef.current = recorder;
+      isStoppingRef.current = false;
 
       recorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+        if (e?.data && e.data.size > 0) chunksRef.current.push(e.data);
+      };
+
+      recorder.onerror = (e) => {
+        console.error("❌ [VOICE] recorder.onerror:", e);
       };
 
       recorder.onstop = () => {
+        // IMPORTANTE: se puede disparar aunque tú ya marcaste isRecording=false
         cleanupTimer();
 
         const mime = actualMimeTypeRef.current || "audio/ogg";
@@ -111,7 +128,6 @@ export default function WhatsAppVoiceRecorder({ onSendAudio, disabled }) {
           type: mime === "audio/ogg" ? "audio/ogg;codecs=opus" : "audio/webm;codecs=opus",
         });
 
-        // metadata para tu sendAudio() en ChatView
         blob.mimeTypeForApi = mime;
         blob.fileExtensionForApi = ext;
 
@@ -120,50 +136,82 @@ export default function WhatsAppVoiceRecorder({ onSendAudio, disabled }) {
 
         setAudioBlob(blob);
         setAudioUrl(url);
-        setIsRecording(false);
         setIsPlaying(false);
 
-        // ojo: NO detenemos tracks aquí si quieres seguir grabando rápido.
-        // pero para evitar mic “ocupado”, sí los detenemos.
+        // Para evitar “mic ocupado”
         stopStreamTracks();
+
+        // desbloqueo
+        isStoppingRef.current = false;
 
         console.log("✅ [VOICE] AUDIO LISTO", {
           size: blob.size,
           type: blob.type,
           mimeTypeForApi: blob.mimeTypeForApi,
           fileExtensionForApi: blob.fileExtensionForApi,
+          seconds: recordingTime,
         });
       };
 
-      recorder.start();
+      recorder.start(); // sin timeslice, para que el blob final se arme al stop
       setIsRecording(true);
 
       timerRef.current = setInterval(() => {
         setRecordingTime((prev) => prev + 1);
       }, 1000);
     } catch (err) {
-      console.error("❌ [VOICE] Error startRecording:", err);
+      console.error("❌ [VOICE] startRecording error:", err);
       alert("No se pudo iniciar el micrófono. Revisa permisos del navegador.");
       setIsRecording(false);
-      cleanupTimer();
-      stopStreamTracks();
+      safeCleanupAll();
+    } finally {
+      isStartingRef.current = false;
     }
   }
 
   function stopRecording() {
-    if (!mediaRecorderRef.current || !isRecording) return;
+    const recorder = mediaRecorderRef.current;
+    if (!recorder) return;
 
-    try {
-      mediaRecorderRef.current.stop();
-    } catch (e) {
-      console.error("❌ [VOICE] stopRecording error:", e);
+    // 🔒 evita doble stop
+    if (isStoppingRef.current) return;
+
+    // Si tu estado React aún dice “recording” pero el recorder ya está inactive -> no lo toques
+    const state = recorder.state; // opus-media-recorder y MediaRecorder lo exponen normalmente
+    if (state && state === "inactive") {
+      console.warn("⚠️ [VOICE] stop ignorado: recorder ya está inactive");
       setIsRecording(false);
       cleanupTimer();
+      isStoppingRef.current = false;
+      return;
+    }
+
+    isStoppingRef.current = true;
+
+    try {
+      // Detén UI y timer altiro (para que no quede pegado si stop tarda)
+      setIsRecording(false);
+      cleanupTimer();
+
+      // Algunos recorders requieren data final antes de stop (si existe requestData)
+      if (typeof recorder.requestData === "function") {
+        try {
+          recorder.requestData();
+        } catch (_) {}
+      }
+
+      recorder.stop();
+    } catch (e) {
+      console.error("❌ [VOICE] stopRecording error:", e);
+      // libera lock para poder reintentar
+      isStoppingRef.current = false;
+      // seguridad: libera mic
       stopStreamTracks();
     }
   }
 
   function cancelRecording() {
+    // Si está grabando, pedimos stop de forma segura (no doble stop)
     if (isRecording) stopRecording();
 
     if (audioRef.current) {
@@ -172,13 +220,10 @@ export default function WhatsAppVoiceRecorder({ onSendAudio, disabled }) {
     }
 
     cleanupAudioUrl();
-
     setAudioBlob(null);
     setAudioUrl(null);
     setRecordingTime(0);
     setIsPlaying(false);
-
-    // limpia chunks por si acaso
     chunksRef.current = [];
   }
 
@@ -206,10 +251,9 @@ export default function WhatsAppVoiceRecorder({ onSendAudio, disabled }) {
     setIsSending(true);
     try {
       await onSendAudio(audioBlob, recordingTime);
-      // solo limpiamos si el envío fue OK
       cancelRecording();
     } catch (err) {
-      console.error("❌ [VOICE] Error al enviar audio:", err);
+      console.error("❌ [VOICE] Error enviando audio:", err);
       alert("Error al enviar el audio. Revisa consola.");
     } finally {
       setIsSending(false);
