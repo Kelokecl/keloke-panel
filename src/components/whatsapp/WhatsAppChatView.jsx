@@ -199,119 +199,120 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
   }
 
   async function sendAudio(audioBlob, duration) {
-    if (!audioBlob || !connection || !contact?.phone_number) return;
+  if (!audioBlob || !connection || !contact?.phone_number) return;
 
-    setIsSending(true);
+  setIsSending(true);
 
-    const timeoutId = setTimeout(() => {
-      console.error('⚠️ Timeout al enviar audio, reseteando UI');
-      setIsSending(false);
-    }, 25000);
+  const timeoutId = setTimeout(() => {
+    console.error("⚠️ Timeout al enviar audio, reseteando UI");
+    setIsSending(false);
+  }, 30000);
 
-    try {
-      const cleanPhone = contact.phone_number.replace(/\D/g, '');
-      const phoneNumberId = connection.phone_number_id;
-      const accessToken = connection.access_token;
+  try {
+    const cleanPhone = contact.phone_number.replace(/\D/g, "");
+    const phoneNumberId = connection.phone_number_id;
+    const accessToken = connection.access_token;
 
-      if (!phoneNumberId || !accessToken) {
-        throw new Error('Falta phone_number_id o access_token en la conexión.');
-      }
-
-      // 1) Subir media a WhatsApp -> media_id
-      const mime = audioBlob.type || 'audio/ogg;codecs=opus';
-      const ext = mime.includes('webm') ? 'webm' : 'ogg';
-      const filename = `audio_out_${Date.now()}.${ext}`;
-
-      const form = new FormData();
-      form.append('messaging_product', 'whatsapp');
-      form.append('file', new File([audioBlob], filename, { type: mime }));
-
-      const mediaUploadRes = await fetch(
-        `https://graph.facebook.com/v21.0/${phoneNumberId}/media`,
-        {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${accessToken}` },
-          body: form,
-        }
-      );
-
-      const mediaUploadJson = await mediaUploadRes.json();
-      if (!mediaUploadRes.ok) {
-        console.error('❌ Error subiendo media:', mediaUploadJson);
-        throw new Error(mediaUploadJson?.error?.message || 'Error subiendo media a WhatsApp');
-      }
-
-      const mediaId = mediaUploadJson.id;
-      if (!mediaId) throw new Error('No se recibió media_id desde WhatsApp.');
-
-      // 2) Enviar mensaje audio con media_id
-      const msgRes = await fetch(
-        `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            messaging_product: 'whatsapp',
-            recipient_type: 'individual',
-            to: cleanPhone,
-            type: 'audio',
-            audio: { id: mediaId },
-          }),
-        }
-      );
-
-      const msgJson = await msgRes.json();
-      if (!msgRes.ok) {
-        console.error('❌ Error enviando mensaje audio:', msgJson);
-        throw new Error(msgJson?.error?.message || 'Error enviando audio por WhatsApp');
-      }
-
-      const whatsappMessageId = msgJson?.messages?.[0]?.id ?? null;
-
-      // 3) Guardar outbound en Supabase (para que aparezca en UI)
-      const outboundRow = {
-        phone_number: contact.phone_number,
-        direction: 'outbound',
-        status: 'sent',
-        message_type: 'audio',
-        message: '',
-        whatsapp_message_id: whatsappMessageId,
-
-        // opcionales (si existen columnas)
-        media_id: mediaId,
-        media_mime_type: mime,
-        media_filename: filename,
-        media_size: audioBlob.size,
-        duration_seconds: duration ?? null,
-
-        platform_response: {
-          media_upload: mediaUploadJson,
-          message_send: msgJson,
-        },
-      };
-
-      const { error: insertError } = await safeInsertWhatsAppMessage(outboundRow);
-
-      if (insertError) {
-        console.error('❌ Error guardando outbound audio en Supabase:', insertError);
-      }
-
-      // ✅ cuando envías audio: “modo abajo”
-      setIsNearBottom(true);
-
-      await loadMessages({ initial: false });
-      setTimeout(scrollToBottom, 50);
-    } catch (err) {
-      console.error('❌ [SEND_AUDIO_ERROR]', err);
-      alert('Error al enviar el audio: ' + (err?.message || err));
-    } finally {
-      clearTimeout(timeoutId);
-      setIsSending(false);
+    if (!phoneNumberId || !accessToken) {
+      throw new Error("Falta phone_number_id o access_token en la conexión.");
     }
+
+    // 1) Subir a Supabase Storage (para tener URL reproducible)
+    const mime = audioBlob.type || "audio/ogg;codecs=opus";
+    const ext = mime.includes("webm") ? "webm" : "ogg";
+    const path = `audio/out_${cleanPhone}_${Date.now()}.${ext}`;
+
+    const { error: upErr } = await supabase.storage
+      .from("whatsapp-media")
+      .upload(path, audioBlob, {
+        contentType: mime,
+        upsert: true,
+        cacheControl: "3600",
+      });
+
+    if (upErr) {
+      console.error("❌ Error subiendo a Supabase Storage:", upErr);
+      throw new Error("No se pudo subir el audio a Storage.");
+    }
+
+    const { data: pub } = supabase.storage
+      .from("whatsapp-media")
+      .getPublicUrl(path);
+
+    const publicUrl = pub?.publicUrl;
+    if (!publicUrl) throw new Error("No se pudo obtener publicUrl del audio.");
+
+    // 2) Enviar a WhatsApp usando LINK (más estable que /media desde browser)
+    const msgRes = await fetch(
+      `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          recipient_type: "individual",
+          to: cleanPhone,
+          type: "audio",
+          audio: {
+            link: publicUrl, // ✅ CLAVE
+          },
+        }),
+      }
+    );
+
+    const msgJson = await msgRes.json();
+    if (!msgRes.ok) {
+      console.error("❌ Error enviando audio por WhatsApp:", msgJson);
+      throw new Error(msgJson?.error?.message || "Error enviando audio por WhatsApp");
+    }
+
+    const whatsappMessageId = msgJson?.messages?.[0]?.id ?? null;
+
+    // 3) Guardar en DB para que aparezca y se reproduzca en tu chat (outbound)
+    const { error: insertError } = await supabase.from("whatsapp_messages").insert({
+      phone_number: contact.phone_number,
+      direction: "outbound",
+      status: "sent",
+      message_type: "audio",
+      message: "",
+
+      whatsapp_message_id: whatsappMessageId,
+
+      // ✅ para reproducir desde tu app
+      media_url: publicUrl,
+      media_mime_type: mime,
+      media_filename: path.split("/").pop(),
+      media_size: audioBlob.size,
+
+      platform_response: msgJson,
+
+      // si tu tabla NO tiene duration_seconds, bórralo (si la tiene, queda perfecto)
+      duration_seconds: duration ?? null,
+    });
+
+    if (insertError) {
+      console.error("❌ Error guardando outbound audio en Supabase:", insertError);
+      // NO lo consideramos fatal: WhatsApp pudo enviar igual
+    }
+
+    // 4) Mostrar al tiro en UI
+    setIsNearBottom(true);
+    await loadMessages({ initial: false });
+    setTimeout(scrollToBottom, 50);
+
+    return true;
+  } catch (err) {
+    console.error("❌ [SEND_AUDIO_ERROR]", err);
+    alert("Error al enviar el audio: " + (err?.message || err));
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+    setIsSending(false);
   }
+}
 
   async function sendFile(file, caption) {
     // Lo dejamos para después (pero el hook queda listo)
