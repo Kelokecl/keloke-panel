@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Send, User, Info, Loader, CheckCheck, Check } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import WhatsAppMediaMessage from './WhatsAppMediaMessage';
@@ -7,27 +7,40 @@ import WhatsAppFileAttachment from './WhatsAppFileAttachment';
 
 const WA_GRAPH_VERSION = 'v21.0';
 const STORAGE_BUCKET = 'whatsapp-media';
+const MAX_FILE_BYTES = 16 * 1024 * 1024; // 16MB
 
-function cleanPhoneNumber(raw) {
-  return String(raw || '').replace(/\D/g, '');
+function safeExtFromMime(mime = '') {
+  const m = mime.split(';')[0].trim().toLowerCase();
+  const map = {
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'video/mp4': 'mp4',
+    'video/quicktime': 'mov',
+    'application/pdf': 'pdf',
+    'text/plain': 'txt',
+    'application/msword': 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'application/vnd.ms-excel': 'xls',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+    'audio/ogg': 'ogg',
+    'audio/webm': 'webm',
+    'audio/mpeg': 'mp3',
+    'audio/mp4': 'm4a',
+  };
+  if (map[m]) return map[m];
+  const slash = m.indexOf('/');
+  if (slash > -1) return m.slice(slash + 1) || 'bin';
+  return 'bin';
 }
 
-function guessWhatsAppType(file) {
+function inferMessageTypeFromFile(file) {
   const t = (file?.type || '').toLowerCase();
-
   if (t.startsWith('image/')) return 'image';
   if (t.startsWith('video/')) return 'video';
-
-  // WhatsApp document soporta PDF, docx, xlsx, zip, etc.
+  // WhatsApp Cloud no soporta “text” como media; txt/pdf/doc van como document
   return 'document';
-}
-
-function safeJsonStringify(obj) {
-  try {
-    return obj;
-  } catch {
-    return null;
-  }
 }
 
 export default function WhatsAppChatView({ contact, connection, onShowClientInfo }) {
@@ -41,6 +54,10 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
   const listRef = useRef(null);
   const lastMessageIdRef = useRef(null);
   const [isNearBottom, setIsNearBottom] = useState(true);
+
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, []);
 
   useEffect(() => {
     if (!contact?.phone_number) return;
@@ -79,7 +96,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
 
   useEffect(() => {
     if (isNearBottom) scrollToBottom();
-  }, [messages, isNearBottom]);
+  }, [messages, isNearBottom, scrollToBottom]);
 
   async function loadMessages() {
     if (!contact?.phone_number) return;
@@ -138,7 +155,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
     }, 10000);
 
     try {
-      const cleanPhone = cleanPhoneNumber(contact.phone_number);
+      const cleanPhone = contact.phone_number.replace(/\D/g, '');
 
       const response = await fetch(
         `https://graph.facebook.com/${WA_GRAPH_VERSION}/${connection.phone_number_id}/messages`,
@@ -168,7 +185,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
         status: 'sent',
         message_type: 'text',
         whatsapp_message_id: result.messages?.[0]?.id ?? null,
-        platform_response: safeJsonStringify(result),
+        platform_response: result,
       });
 
       if (insertError) console.error('❌ Error guardando outbound:', insertError);
@@ -198,7 +215,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
     }, 25000);
 
     try {
-      const cleanPhone = cleanPhoneNumber(contact.phone_number);
+      const cleanPhone = contact.phone_number.replace(/\D/g, '');
       const phoneNumberId = connection.phone_number_id;
       const accessToken = connection.access_token;
 
@@ -206,59 +223,50 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
         throw new Error('Falta phone_number_id o access_token en la conexión.');
       }
 
-      // 0) Preparar nombre/metadata
+      if (audioBlob.size > MAX_FILE_BYTES) {
+        throw new Error('Audio demasiado grande. Máximo 16MB.');
+      }
+
       const mime = audioBlob.type || 'audio/ogg;codecs=opus';
       const ext = mime.includes('webm') ? 'webm' : 'ogg';
       const filename = `out_${cleanPhone}_${Date.now()}.${ext}`;
-      const storagePath = `out/audio/${filename}`;
+      const storagePath = `audio/${filename}`;
 
-      // 1) Subir a Supabase Storage
+      // 1) Storage (para reproducir en tu app)
       const { error: upErr } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, audioBlob, {
         contentType: mime,
         cacheControl: '3600',
         upsert: true,
       });
-
-      if (upErr) {
-        console.error('❌ Error subiendo a Supabase Storage:', upErr);
-        throw new Error('No se pudo subir el audio a Storage.');
-      }
+      if (upErr) throw new Error('No se pudo subir el audio a Storage.');
 
       const { data: pub } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(storagePath);
       const publicUrl = pub?.publicUrl || null;
 
-      // 2) Subir media a WhatsApp (media_id)
+      // 2) WhatsApp /media
       const form = new FormData();
       form.append('messaging_product', 'whatsapp');
       form.append('file', new File([audioBlob], filename, { type: mime }));
 
       const mediaUploadRes = await fetch(
         `https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/media`,
-        {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${accessToken}` },
-          body: form,
-        }
+        { method: 'POST', headers: { Authorization: `Bearer ${accessToken}` }, body: form }
       );
 
       const mediaUploadJson = await mediaUploadRes.json();
       if (!mediaUploadRes.ok) {
-        console.error('❌ Error subiendo media a WhatsApp:', mediaUploadJson);
         throw new Error(mediaUploadJson?.error?.message || 'Error subiendo media a WhatsApp');
       }
 
       const mediaId = mediaUploadJson?.id;
       if (!mediaId) throw new Error('No se recibió media_id desde WhatsApp.');
 
-      // 3) Enviar mensaje de audio
+      // 3) WhatsApp /messages
       const msgRes = await fetch(
         `https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/messages`,
         {
           method: 'POST',
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
             messaging_product: 'whatsapp',
             recipient_type: 'individual',
@@ -270,20 +278,18 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       );
 
       const msgJson = await msgRes.json();
-      if (!msgRes.ok) {
-        console.error('❌ Error enviando mensaje audio:', msgJson);
-        throw new Error(msgJson?.error?.message || 'Error enviando audio por WhatsApp');
-      }
+      if (!msgRes.ok) throw new Error(msgJson?.error?.message || 'Error enviando audio por WhatsApp');
 
       const whatsappMessageId = msgJson?.messages?.[0]?.id ?? null;
 
-      // 4) Guardar outbound en Supabase (sin duration_seconds)
+      // 4) DB
       const { error: insertError } = await supabase.from('whatsapp_messages').insert({
         phone_number: contact.phone_number,
         direction: 'outbound',
         status: 'sent',
         message_type: 'audio',
         message: '',
+
         whatsapp_message_id: whatsappMessageId,
 
         media_id: mediaId,
@@ -292,19 +298,16 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
         media_filename: filename,
         media_size: audioBlob.size,
 
-        platform_response: safeJsonStringify({
+        platform_response: {
           storage_path: storagePath,
           storage_public_url: publicUrl,
           media_upload: mediaUploadJson,
           message_send: msgJson,
           duration_seconds: durationSeconds ?? null,
-        }),
+        },
       });
 
-      if (insertError) {
-        console.error('❌ Error guardando outbound audio en Supabase:', insertError);
-        throw new Error(insertError.message);
-      }
+      if (insertError) throw new Error(insertError.message);
 
       setIsNearBottom(true);
       await loadMessages();
@@ -318,8 +321,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
     }
   }
 
-  // ✅ FILE OUTBOUND (Storage + WhatsApp media_id + insert DB)
-  // file: File, caption: string (opcional)
+  // ✅ FILE OUTBOUND (image/video/document)
   async function sendFile(file, caption = '') {
     if (!file || !connection || !contact?.phone_number) return;
 
@@ -331,7 +333,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
     }, 35000);
 
     try {
-      const cleanPhone = cleanPhoneNumber(contact.phone_number);
+      const cleanPhone = contact.phone_number.replace(/\D/g, '');
       const phoneNumberId = connection.phone_number_id;
       const accessToken = connection.access_token;
 
@@ -339,13 +341,20 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
         throw new Error('Falta phone_number_id o access_token en la conexión.');
       }
 
-      const waType = guessWhatsAppType(file); // image | video | document
-      const mime = file.type || 'application/octet-stream';
-      const filename = file.name || `${waType}_out_${Date.now()}`;
-      const safeFilename = filename.replace(/[^\w.\-() ]+/g, '_');
-      const storagePath = `out/${waType}/${cleanPhone}_${Date.now()}_${safeFilename}`;
+      if (file.size > MAX_FILE_BYTES) {
+        throw new Error('Archivo demasiado grande. Máximo 16MB.');
+      }
 
-      // 1) Subir a Supabase Storage (preview instantáneo en la app)
+      const messageType = inferMessageTypeFromFile(file);
+      const mime = file.type || 'application/octet-stream';
+      const ext = safeExtFromMime(mime);
+
+      // nombre estable (evita caracteres raros)
+      const safeName = (file.name || `file.${ext}`).replace(/[^\w.\-]+/g, '_');
+      const filename = `out_${cleanPhone}_${Date.now()}_${safeName}`;
+      const storagePath = `${messageType}/${filename}`;
+
+      // 1) Storage (para tu app)
       const { error: upErr } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, file, {
         contentType: mime,
         cacheControl: '3600',
@@ -353,119 +362,89 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       });
 
       if (upErr) {
-        console.error('❌ Error subiendo archivo a Supabase Storage:', upErr);
+        console.error('❌ Storage upload error:', upErr);
         throw new Error('No se pudo subir el archivo a Storage.');
       }
 
       const { data: pub } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(storagePath);
       const publicUrl = pub?.publicUrl || null;
 
-      // 2) Subir media a WhatsApp (/media)
+      // 2) WhatsApp /media
       const form = new FormData();
       form.append('messaging_product', 'whatsapp');
-      form.append('file', file, safeFilename);
+      form.append('file', new File([file], filename, { type: mime }));
 
       const mediaUploadRes = await fetch(
         `https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/media`,
-        {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${accessToken}` },
-          body: form,
-        }
+        { method: 'POST', headers: { Authorization: `Bearer ${accessToken}` }, body: form }
       );
-
       const mediaUploadJson = await mediaUploadRes.json();
       if (!mediaUploadRes.ok) {
-        console.error('❌ Error subiendo media a WhatsApp:', mediaUploadJson);
+        console.error('❌ WhatsApp media upload error:', mediaUploadJson);
         throw new Error(mediaUploadJson?.error?.message || 'Error subiendo media a WhatsApp');
       }
 
       const mediaId = mediaUploadJson?.id;
       if (!mediaId) throw new Error('No se recibió media_id desde WhatsApp.');
 
-      // 3) Enviar mensaje según tipo
-      const payloadBase = {
+      // 3) WhatsApp /messages según tipo
+      const body = {
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
         to: cleanPhone,
+        type: messageType,
       };
 
-      let body;
+      const cap = (caption || '').trim();
 
-      if (waType === 'image') {
-        body = {
-          ...payloadBase,
-          type: 'image',
-          image: { id: mediaId, ...(caption?.trim() ? { caption: caption.trim() } : {}) },
-        };
-      } else if (waType === 'video') {
-        body = {
-          ...payloadBase,
-          type: 'video',
-          video: { id: mediaId, ...(caption?.trim() ? { caption: caption.trim() } : {}) },
-        };
-      } else {
-        // document
-        body = {
-          ...payloadBase,
-          type: 'document',
-          document: {
-            id: mediaId,
-            filename: safeFilename,
-            ...(caption?.trim() ? { caption: caption.trim() } : {}),
-          },
-        };
+      if (messageType === 'image') body.image = cap ? { id: mediaId, caption: cap } : { id: mediaId };
+      if (messageType === 'video') body.video = cap ? { id: mediaId, caption: cap } : { id: mediaId };
+      if (messageType === 'document') {
+        // WhatsApp permite filename + caption (caption opcional)
+        body.document = cap ? { id: mediaId, caption: cap, filename: safeName } : { id: mediaId, filename: safeName };
       }
 
       const msgRes = await fetch(
         `https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/messages`,
         {
           method: 'POST',
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         }
       );
-
       const msgJson = await msgRes.json();
       if (!msgRes.ok) {
-        console.error('❌ Error enviando archivo por WhatsApp:', msgJson);
+        console.error('❌ WhatsApp send error:', msgJson);
         throw new Error(msgJson?.error?.message || 'Error enviando archivo por WhatsApp');
       }
 
       const whatsappMessageId = msgJson?.messages?.[0]?.id ?? null;
 
-      // 4) Insert DB para que aparezca en el chat al tiro
+      // 4) DB (usa message como caption para mantener compatibilidad con tu esquema)
       const { error: insertError } = await supabase.from('whatsapp_messages').insert({
         phone_number: contact.phone_number,
         direction: 'outbound',
         status: 'sent',
-        message_type: waType,
-        message: caption?.trim() || '',
+        message_type: messageType,
+        message: cap || '',
 
         whatsapp_message_id: whatsappMessageId,
 
         media_id: mediaId,
         media_url: publicUrl,
         media_mime_type: mime,
-        media_filename: safeFilename,
+        media_filename: safeName,
         media_size: file.size,
 
-        platform_response: safeJsonStringify({
+        platform_response: {
           storage_path: storagePath,
           storage_public_url: publicUrl,
           media_upload: mediaUploadJson,
           message_send: msgJson,
-          wa_payload: body,
-        }),
+        },
       });
 
-      if (insertError) {
-        console.error('❌ Error guardando outbound file en Supabase:', insertError);
-        throw new Error(insertError.message);
-      }
+      if (insertError) throw new Error(insertError.message);
 
       setIsNearBottom(true);
       await loadMessages();
@@ -477,10 +456,6 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       clearTimeout(timeoutId);
       setIsSending(false);
     }
-  }
-
-  function scrollToBottom() {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }
 
   function getStatusIcon(status) {
@@ -578,7 +553,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       {/* Input */}
       <div className="bg-white border-t p-4">
         <div className="flex items-end gap-2 relative">
-          {/* ✅ CLAVE: ahora sí envía archivo real */}
+          {/* ✅ ahora sí: sendFile real */}
           <WhatsAppFileAttachment onSendFile={sendFile} disabled={isSending} />
 
           <textarea
