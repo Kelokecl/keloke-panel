@@ -1,47 +1,80 @@
-import { useState, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Paperclip, X, Send, Loader, File, Image, Video } from 'lucide-react';
+
+const MAX_SIZE_BYTES = 16 * 1024 * 1024; // 16MB
 
 export default function WhatsAppFileAttachment({ onSendFile, disabled }) {
   const [selectedFile, setSelectedFile] = useState(null);
-  const [preview, setPreview] = useState(null);
+  const [preview, setPreview] = useState(null); // dataURL (img) o objectURL (video)
   const [caption, setCaption] = useState('');
   const [isSending, setIsSending] = useState(false);
   const fileInputRef = useRef(null);
+
+  const isBlocked = !!disabled || isSending;
+
+  // ✅ Cleanup de objectURL para evitar leaks
+  useEffect(() => {
+    return () => {
+      if (preview && typeof preview === 'string' && preview.startsWith('blob:')) {
+        URL.revokeObjectURL(preview);
+      }
+    };
+  }, [preview]);
+
+  function resetInput() {
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  function cancelSelection() {
+    // revoke si era blob:
+    if (preview && typeof preview === 'string' && preview.startsWith('blob:')) {
+      URL.revokeObjectURL(preview);
+    }
+    setSelectedFile(null);
+    setPreview(null);
+    setCaption('');
+    resetInput();
+  }
 
   function handleFileSelect(e) {
     const file = e.target.files?.[0];
     if (!file) return;
 
     // Validar tamaño (máx 16MB)
-    if (file.size > 16 * 1024 * 1024) {
+    if (file.size > MAX_SIZE_BYTES) {
       alert('El archivo es demasiado grande. Máximo 16MB.');
+      resetInput();
       return;
     }
 
+    // Si había un preview blob anterior, liberarlo antes
+    if (preview && typeof preview === 'string' && preview.startsWith('blob:')) {
+      URL.revokeObjectURL(preview);
+    }
+
     setSelectedFile(file);
+    setCaption('');
 
     // Crear preview si es imagen o video
     if (file.type.startsWith('image/')) {
       const reader = new FileReader();
-      reader.onload = (e) => setPreview(e.target.result);
+      reader.onload = (ev) => setPreview(ev.target?.result || null);
+      reader.onerror = () => setPreview(null);
       reader.readAsDataURL(file);
     } else if (file.type.startsWith('video/')) {
       const url = URL.createObjectURL(file);
       setPreview(url);
-    }
-  }
-
-  function cancelSelection() {
-    setSelectedFile(null);
-    setPreview(null);
-    setCaption('');
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+    } else {
+      setPreview(null);
     }
   }
 
   async function sendFile() {
-    if (!selectedFile) return;
+    if (!selectedFile || isBlocked) return;
+    if (typeof onSendFile !== 'function') {
+      alert('onSendFile no está configurado.');
+      return;
+    }
 
     setIsSending(true);
     try {
@@ -49,7 +82,7 @@ export default function WhatsAppFileAttachment({ onSendFile, disabled }) {
       cancelSelection();
     } catch (err) {
       console.error('Error al enviar archivo:', err);
-      alert('Error al enviar el archivo');
+      alert('Error al enviar el archivo: ' + (err?.message || err));
     } finally {
       setIsSending(false);
     }
@@ -57,7 +90,7 @@ export default function WhatsAppFileAttachment({ onSendFile, disabled }) {
 
   function getFileIcon() {
     if (!selectedFile) return <File className="w-12 h-12" />;
-    
+
     if (selectedFile.type.startsWith('image/')) {
       return <Image className="w-12 h-12 text-blue-500" />;
     } else if (selectedFile.type.startsWith('video/')) {
@@ -69,20 +102,24 @@ export default function WhatsAppFileAttachment({ onSendFile, disabled }) {
 
   // Vista: Archivo seleccionado
   if (selectedFile) {
+    const isImage = selectedFile.type.startsWith('image/');
+    const isVideo = selectedFile.type.startsWith('video/');
+
     return (
       <div className="absolute bottom-full left-0 right-0 mb-2 bg-white rounded-lg shadow-lg p-4 border">
         <div className="flex items-start gap-3">
           {/* Preview */}
           <div className="flex-shrink-0">
-            {preview && selectedFile.type.startsWith('image/') ? (
-              <img 
-                src={preview} 
-                alt="Preview" 
+            {preview && isImage ? (
+              <img
+                src={preview}
+                alt="Preview"
                 className="w-24 h-24 object-cover rounded-lg"
               />
-            ) : preview && selectedFile.type.startsWith('video/') ? (
-              <video 
-                src={preview} 
+            ) : preview && isVideo ? (
+              <video
+                src={preview}
+                controls
                 className="w-24 h-24 object-cover rounded-lg"
               />
             ) : (
@@ -101,14 +138,15 @@ export default function WhatsAppFileAttachment({ onSendFile, disabled }) {
               {(selectedFile.size / 1024).toFixed(0)} KB
             </p>
 
-            {/* Campo de caption (para imágenes/videos) */}
-            {(selectedFile.type.startsWith('image/') || selectedFile.type.startsWith('video/')) && (
+            {/* Caption (para imágenes/videos y también documentos si quieres) */}
+            {(isImage || isVideo) && (
               <input
                 type="text"
                 value={caption}
                 onChange={(e) => setCaption(e.target.value)}
                 placeholder="Agregar leyenda..."
-                className="w-full mt-2 px-2 py-1 text-sm border rounded focus:outline-none focus:ring-2 focus:ring-green-500"
+                disabled={isBlocked}
+                className="w-full mt-2 px-2 py-1 text-sm border rounded focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-60"
               />
             )}
           </div>
@@ -117,14 +155,16 @@ export default function WhatsAppFileAttachment({ onSendFile, disabled }) {
           <div className="flex gap-2">
             <button
               onClick={cancelSelection}
-              className="p-2 text-gray-500 hover:bg-gray-100 rounded-full"
+              disabled={isBlocked}
+              className="p-2 text-gray-500 hover:bg-gray-100 rounded-full disabled:opacity-50"
             >
               <X className="w-5 h-5" />
             </button>
             <button
               onClick={sendFile}
-              disabled={isSending}
-              className="p-2 bg-green-500 text-white rounded-full hover:bg-green-600 disabled:bg-gray-300"
+              disabled={isBlocked}
+              className="p-2 bg-green-500 text-white rounded-full hover:bg-green-600 disabled:bg-gray-300 disabled:cursor-not-allowed"
+              title="Enviar archivo"
             >
               {isSending ? (
                 <Loader className="w-5 h-5 animate-spin" />
@@ -150,8 +190,9 @@ export default function WhatsAppFileAttachment({ onSendFile, disabled }) {
       />
       <button
         onClick={() => fileInputRef.current?.click()}
-        disabled={disabled}
+        disabled={isBlocked}
         className="p-3 text-gray-600 hover:bg-gray-100 rounded-full disabled:opacity-50 disabled:cursor-not-allowed"
+        title="Adjuntar archivo"
       >
         <Paperclip className="w-5 h-5" />
       </button>
