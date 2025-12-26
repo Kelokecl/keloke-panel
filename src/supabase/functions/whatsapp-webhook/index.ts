@@ -10,9 +10,10 @@ const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
 };
 
-// ✅ Nerd (destino externo). OJO: si lo apuntas a ti mismo, lo saltamos para evitar loop.
+// ✅ Nerd (destino externo). Si lo apuntas a ti mismo, lo saltamos para evitar loop.
 const NERD_WEBHOOK_URL =
   "https://nffeqekvvqsqwbjrmkjs.supabase.co/functions/v1/whatsapp-webhook";
 
@@ -52,15 +53,114 @@ function mimeToExt(mimeRaw: string): string {
   return "bin";
 }
 
+function randomId() {
+  return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+/**
+ * =========================================================
+ *  IA SETTINGS (toggle + horario + contexto)
+ * =========================================================
+ *
+ * Tabla esperada: public.whatsapp_ai_settings (1 fila)
+ * Fallback: si no existe tabla o falla query -> se comporta como antes.
+ */
+type AiSettings = {
+  is_enabled: boolean;
+  only_outside_hours: boolean;
+  start_time: string | null; // "HH:MM:SS"
+  end_time: string | null;
+  days: number[] | null; // 1=Lun ... 7=Dom
+  training_context: string | null;
+  provider: string; // "openai" | "claude"
+  model: string; // "gpt-5-mini"
+};
+
+function isWithinScheduleLocal(
+  onlyOutside: boolean,
+  start: string | null,
+  end: string | null,
+  days: number[] | null,
+) {
+  // Nota: esto usa la hora local del runtime (Edge).
+  // Si quieres 100% Chile, se puede hacer con TZ fijo + librería, pero esto es suficiente para operar.
+  const now = new Date();
+  const dayJs = now.getDay(); // 0=Dom ... 6=Sab
+  const dayIso = dayJs === 0 ? 7 : dayJs; // 1=Lun ... 7=Dom
+
+  if (Array.isArray(days) && days.length > 0 && !days.includes(dayIso)) {
+    return false;
+  }
+
+  if (!start || !end) return true; // sin horario configurado => permitido
+
+  const [sh, sm] = start.split(":").map((x) => parseInt(x, 10));
+  const [eh, em] = end.split(":").map((x) => parseInt(x, 10));
+
+  const startMin = (sh || 0) * 60 + (sm || 0);
+  const endMin = (eh || 0) * 60 + (em || 0);
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+
+  const inRange = startMin <= endMin
+    ? (nowMin >= startMin && nowMin <= endMin)
+    : (nowMin >= startMin || nowMin <= endMin); // cruza medianoche
+
+  return onlyOutside ? !inRange : inRange;
+}
+
+async function loadAiSettings(
+  supabase: ReturnType<typeof createClient>,
+): Promise<{ settings: AiSettings; ok: boolean }> {
+  const fallback: AiSettings = {
+    is_enabled: true, // fallback para NO romper comportamiento anterior
+    only_outside_hours: false,
+    start_time: null,
+    end_time: null,
+    days: null,
+    training_context: null,
+    provider: (Deno.env.get("IA_PROVIDER") ?? "openai").toLowerCase(),
+    model: Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini",
+  };
+
+  try {
+    const { data, error } = await supabase
+      .from("whatsapp_ai_settings")
+      .select("*")
+      .order("id", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (error || !data) {
+      console.warn("⚠️ No se pudo leer whatsapp_ai_settings (fallback).", error);
+      return { settings: fallback, ok: false };
+    }
+
+    const settings: AiSettings = {
+      is_enabled: Boolean(data.is_enabled),
+      only_outside_hours: Boolean(data.only_outside_hours),
+      start_time: data.start_time ?? null,
+      end_time: data.end_time ?? null,
+      days: Array.isArray(data.days) ? data.days : null,
+      training_context: data.training_context ?? null,
+      provider: safeString(data.provider || fallback.provider).toLowerCase(),
+      model: safeString(data.model || fallback.model) || "gpt-5-mini",
+    };
+
+    return { settings, ok: true };
+  } catch (e) {
+    console.warn("⚠️ Excepción leyendo whatsapp_ai_settings (fallback).", e);
+    return { settings: fallback, ok: false };
+  }
+}
+
 /**
  * =========================================================
  *  IA: OpenAI (principal) + Claude (opcional)
  * =========================================================
  */
-
-async function generateOpenAIReply(userText: string): Promise<string> {
+async function generateOpenAIReply(userText: string, modelOverride?: string): Promise<string> {
   const apiKey = Deno.env.get("OPENAI_API_KEY");
-  const model = Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini";
+  const model = modelOverride || (Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini");
 
   if (!apiKey) {
     console.error("❌ No se encontró OPENAI_API_KEY en Secrets");
@@ -70,10 +170,12 @@ async function generateOpenAIReply(userText: string): Promise<string> {
   const system = [
     "Eres el asistente de soporte y ventas de la tienda online Keloke.cl.",
     "Responde en español chileno, cercano, breve (máx 3–4 líneas).",
-    "Haz 1–2 preguntas para entender necesidad (uso, presupuesto, envío/tiempo).",
+    "Haz 1–2 preguntas para entender necesidad (uso, presupuesto, comuna/envío/tiempo).",
     "Sugiere 1–2 opciones y ofrece mandar links de productos.",
-    "Si te piden 'qué venden' da categorías y pide qué busca.",
+    "Si te piden 'qué venden' da categorías y pregunta qué busca.",
     "No inventes stock específico si no se te dio; ofrece revisar y mandar links.",
+    "Si el cliente pide precio, da rango/estimación y ofrece link exacto.",
+    "Cierra con CTA suave: '¿Te mando links y opciones ahora?'",
   ].join(" ");
 
   try {
@@ -90,14 +192,14 @@ async function generateOpenAIReply(userText: string): Promise<string> {
           { role: "user", content: userText },
         ],
         reasoning: { effort: "low" },
-        max_output_tokens: 220,
+        max_output_tokens: 240,
       }),
     });
 
     const raw = await res.text();
     if (!res.ok) {
       console.error("❌ OpenAI error:", res.status, raw);
-      return "Te leo 🙌 ¿Me confirmas qué producto buscas y tu presupuesto aprox? y te mando opciones al tiro.";
+      return "Te leo 🙌 ¿Qué producto buscas y tu presupuesto aprox? y te mando opciones al tiro.";
     }
 
     const data = JSON.parse(raw);
@@ -113,8 +215,7 @@ async function generateOpenAIReply(userText: string): Promise<string> {
 
 async function generateClaudeReply(userText: string): Promise<string> {
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
-  const model = Deno.env.get("ANTHROPIC_MODEL") ??
-    "claude-3-5-sonnet-20240620";
+  const model = Deno.env.get("ANTHROPIC_MODEL") ?? "claude-3-5-sonnet-20240620";
 
   if (!apiKey) {
     console.error("❌ No se encontró ANTHROPIC_API_KEY en Secrets");
@@ -131,7 +232,7 @@ async function generateClaudeReply(userText: string): Promise<string> {
       },
       body: JSON.stringify({
         model,
-        max_tokens: 240,
+        max_tokens: 260,
         messages: [
           {
             role: "user",
@@ -153,18 +254,18 @@ async function generateClaudeReply(userText: string): Promise<string> {
 
     const data = JSON.parse(raw);
     const text = safeString(data?.content?.[0]?.text)?.trim();
-    return text ||
-      "Gracias por escribirnos 🙌 ¿Qué andas buscando? Si quieres te mando links al tiro.";
+    return text || "Gracias por escribirnos 🙌 ¿Qué andas buscando? Si quieres te mando links al tiro.";
   } catch (error) {
     console.error("❌ Error llamando a Claude:", error);
     return "Tu mensaje ya quedó registrado 🙌, pero tuve un problema con la IA. ¿Qué producto buscas?";
   }
 }
 
-async function generateAIReply(userText: string): Promise<string> {
-  const provider = (Deno.env.get("IA_PROVIDER") ?? "openai").toLowerCase();
-  if (provider === "claude") return await generateClaudeReply(userText);
-  return await generateOpenAIReply(userText);
+async function generateAIReply(userText: string, provider: string, model: string): Promise<string> {
+  const p = (provider || "openai").toLowerCase();
+  if (p === "claude") return await generateClaudeReply(userText);
+  // ✅ OpenAI por defecto, con modelo configurable (gpt-5-mini)
+  return await generateOpenAIReply(userText, model || "gpt-5-mini");
 }
 
 /**
@@ -262,11 +363,6 @@ async function downloadWhatsAppMediaBinary(
 
   const ab = await res.arrayBuffer();
   return new Uint8Array(ab);
-}
-
-function randomId() {
-  // simple random (evita colisiones de nombre)
-  return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
 async function uploadToStorageAndGetPublicUrl(
@@ -407,6 +503,18 @@ serve(async (req) => {
     const body = await req.json();
     console.log("📦 Body completo:", JSON.stringify(body, null, 2));
 
+    // 0) Cargar settings IA (si existe tabla)
+    const { settings: aiSettings, ok: aiSettingsOk } = await loadAiSettings(supabase);
+    if (aiSettingsOk) console.log("🤖 IA settings cargados desde DB");
+    else console.log("🤖 IA settings fallback (DB no disponible o sin tabla)");
+
+    const canAnswerBySchedule = isWithinScheduleLocal(
+      aiSettings.only_outside_hours,
+      aiSettings.start_time,
+      aiSettings.end_time,
+      aiSettings.days,
+    );
+
     // 1) Buscar conexión WhatsApp activa
     console.log("🟢 PASO 1: Buscando conexión de WhatsApp...");
     const { data: connection, error: connError } = await supabase
@@ -421,8 +529,7 @@ serve(async (req) => {
       console.error("❌ ERROR: No se encontró conexión WhatsApp activa");
       return jsonResponse(
         {
-          error:
-            "No WhatsApp connection found (platform=whatsapp, is_active=true)",
+          error: "No WhatsApp connection found (platform=whatsapp, is_active=true)",
           details: connError ?? null,
         },
         500,
@@ -582,7 +689,6 @@ serve(async (req) => {
                 }
               } catch (e) {
                 console.error("❌ [MEDIA] Error procesando media:", e);
-                // guardamos el inbound igual
                 messageData.message = `Mensaje de tipo ${messageType} recibido (media error)`;
               }
             }
@@ -599,14 +705,28 @@ serve(async (req) => {
               console.log("✅ Inbound guardado:", insertedInbound?.[0]?.id);
             }
 
-            // 2B) Responder SOLO si es texto y tiene contenido
+            // 2B) Responder SOLO si es texto, IA habilitada y horario permitido
             if (messageType === "text") {
               const userText = (messageData.message || "").trim();
-              console.log("🧠 Texto usuario:", userText);
               if (!userText) continue;
 
-              console.log("🤖 Llamando IA…");
-              const aiReply = await generateAIReply(userText);
+              if (!aiSettings.is_enabled) {
+                console.log("⏸️ IA desactivada (is_enabled=false). No respondo automático.");
+                continue;
+              }
+
+              if (!canAnswerBySchedule) {
+                console.log("🕒 Fuera de ventana configurada. No respondo automático.");
+                continue;
+              }
+
+              const training = (aiSettings.training_context || "").trim();
+              const prompt = training
+                ? `CONTEXTO DEL NEGOCIO:\n${training}\n\nMENSAJE CLIENTE:\n${userText}`
+                : userText;
+
+              console.log("🤖 Llamando IA…", { provider: aiSettings.provider, model: aiSettings.model });
+              const aiReply = await generateAIReply(prompt, aiSettings.provider, aiSettings.model);
               console.log("💬 IA Reply:", aiReply);
 
               const waResponse = await sendWhatsAppTextReply(
@@ -643,14 +763,10 @@ serve(async (req) => {
             const stVal = safeString(status?.status);
             if (!stId || !stVal) continue;
 
-            // ✅ Importante: NO pisa todo platform_response del mensaje original;
-            // dejamos status en platform_response_status
+            // ✅ No asumimos columnas extra: solo actualizamos "status"
             await supabase
               .from("whatsapp_messages")
-              .update({
-                status: stVal,
-                platform_response_status: status,
-              } as any)
+              .update({ status: stVal } as any)
               .eq("whatsapp_message_id", stId);
 
             console.log("📊 Status update:", stId, stVal);
@@ -663,14 +779,14 @@ serve(async (req) => {
     try {
       const forwarded = safeString(req.headers.get("X-Forwarded-From"));
 
-      // si NERD apunta a esta misma función (misma URL), no forward
-      const thisUrl = safeString(new URL(req.url).origin) +
-        safeString(new URL(req.url).pathname);
-      const nerdUrl = safeString(NERD_WEBHOOK_URL);
-      const sameUrl = nerdUrl && thisUrl && nerdUrl.includes(thisUrl);
+      const thisUrl = new URL(req.url);
+      const thisCanonical = `${thisUrl.origin}${thisUrl.pathname}`;
+      const nerdCanonical = safeString(NERD_WEBHOOK_URL);
 
-      if (!forwarded && !sameUrl) {
-        await fetch(NERD_WEBHOOK_URL, {
+      const sameUrl = nerdCanonical === thisCanonical;
+
+      if (!forwarded && !sameUrl && nerdCanonical) {
+        await fetch(nerdCanonical, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
