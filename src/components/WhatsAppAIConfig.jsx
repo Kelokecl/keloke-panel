@@ -1,511 +1,591 @@
 import { useState, useEffect } from 'react';
-import { supabase } from '../lib/supabase';
-import { 
-  Bot, 
-  Settings, 
-  Loader, 
-  Save, 
-  Plus, 
-  Trash2, 
+import { supabase } from '../../lib/supabase';
+import {
+  Bot,
+  Save,
   AlertCircle,
   CheckCircle,
-  MessageSquare,
+  Loader,
   Clock,
+  Zap,
+  Settings,
+  MessageSquare,
   Sparkles,
-  Package,
-  X
 } from 'lucide-react';
 
-export default function WhatsAppAIConfig() {
+/**
+ * WhatsAppAIConfig.jsx (Nivel Dios)
+ * - Soporta OpenAI (gpt-5-mini) y Claude
+ * - Compatible con esquema existente (ai_model)
+ * - Config "single row" con id=1 por defecto
+ */
+
+const DEFAULT_CONFIG = {
+  id: 1,
+
+  // Estado
+  is_enabled: false,
+
+  // Horario
+  auto_reply_when_offline: true, // "solo fuera de horario"
+  business_hours_start: '09:00',
+  business_hours_end: '18:00',
+  working_days: [1, 2, 3, 4, 5], // Lun-Vie
+
+  // Entrenamiento
+  training_context: '',
+  greeting_message:
+    'Hola! Gracias por contactarnos 🙌 Un agente te responderá pronto.',
+
+  // IA
+  ia_provider: 'openai', // openai | claude
+  ai_model: 'gpt-5-mini', // se mantiene por compatibilidad y como "modelo activo"
+  max_tokens: 220,
+  temperature: 0.7,
+
+  // (Opcional) futuros flags
+  updated_at: null,
+};
+
+const DAYS = [
+  { id: 1, name: 'Lun' },
+  { id: 2, name: 'Mar' },
+  { id: 3, name: 'Mié' },
+  { id: 4, name: 'Jue' },
+  { id: 5, name: 'Vie' },
+  { id: 6, name: 'Sáb' },
+  { id: 7, name: 'Dom' },
+];
+
+// Modelos sugeridos (puedes ajustar la lista cuando quieras)
+const OPENAI_MODELS = [
+  { value: 'gpt-5-mini', label: 'GPT-5 mini (Recomendado)' },
+  { value: 'gpt-4o-mini', label: 'GPT-4o mini (rápido/barato)' },
+  { value: 'gpt-4.1-mini', label: 'GPT-4.1 mini' },
+];
+
+const CLAUDE_MODELS = [
+  { value: 'claude-3-5-sonnet-20241022', label: 'Claude 3.5 Sonnet (Recomendado)' },
+  { value: 'claude-3-5-haiku-20241022', label: 'Claude 3.5 Haiku (Más rápido)' },
+];
+
+function normalizeConfig(raw) {
+  const cfg = { ...DEFAULT_CONFIG, ...(raw || {}) };
+
+  // Compatibilidad: si no existe ia_provider, inferimos por ai_model
+  if (!cfg.ia_provider) {
+    cfg.ia_provider = (cfg.ai_model || '').toLowerCase().includes('claude')
+      ? 'claude'
+      : 'openai';
+  }
+
+  // Si viene un modelo “viejo” de Claude por defecto, pero quieres OpenAI,
+  // lo respetamos solo si provider=claude. Si provider=openai y ai_model es claude => corregimos.
+  if (cfg.ia_provider === 'openai' && (cfg.ai_model || '').toLowerCase().includes('claude')) {
+    cfg.ai_model = 'gpt-5-mini';
+  }
+
+  if (cfg.ia_provider === 'claude' && (cfg.ai_model || '').toLowerCase().startsWith('gpt')) {
+    cfg.ai_model = 'claude-3-5-sonnet-20241022';
+  }
+
+  // Sanitizar arrays/strings
+  if (!Array.isArray(cfg.working_days)) cfg.working_days = DEFAULT_CONFIG.working_days;
+  cfg.working_days = [...new Set(cfg.working_days)].sort((a, b) => a - b);
+
+  cfg.training_context = String(cfg.training_context || '');
+  cfg.greeting_message = String(cfg.greeting_message || '');
+
+  // Números
+  cfg.max_tokens = Number.isFinite(Number(cfg.max_tokens)) ? Number(cfg.max_tokens) : DEFAULT_CONFIG.max_tokens;
+  cfg.max_tokens = Math.max(80, Math.min(1200, cfg.max_tokens));
+
+  cfg.temperature = Number.isFinite(Number(cfg.temperature)) ? Number(cfg.temperature) : DEFAULT_CONFIG.temperature;
+  cfg.temperature = Math.max(0, Math.min(1, cfg.temperature));
+
+  // Horas
+  cfg.business_hours_start = cfg.business_hours_start || DEFAULT_CONFIG.business_hours_start;
+  cfg.business_hours_end = cfg.business_hours_end || DEFAULT_CONFIG.business_hours_end;
+
+  // ID único
+  cfg.id = cfg.id || 1;
+
+  return cfg;
+}
+
+export default function WhatsAppAIConfig({ onConfigUpdate }) {
   const [config, setConfig] = useState(null);
-  const [products, setProducts] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
-  const [error, setError] = useState(null);
-  const [success, setSuccess] = useState(null);
-  const [showProductModal, setShowProductModal] = useState(false);
-  const [currentProduct, setCurrentProduct] = useState(null);
+  const [message, setMessage] = useState(null);
 
   useEffect(() => {
-    loadAIConfig();
-    loadProducts();
+    loadConfig();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function loadAIConfig() {
+  useEffect(() => {
+    if (!message) return;
+    const t = setTimeout(() => setMessage(null), 4500);
+    return () => clearTimeout(t);
+  }, [message]);
+
+  async function loadConfig() {
     try {
       setIsLoading(true);
+
+      // ✅ maybeSingle: no revienta si no hay filas
       const { data, error } = await supabase
         .from('whatsapp_ai_config')
         .select('*')
-        .single();
+        .limit(1)
+        .maybeSingle();
 
       if (error) throw error;
-      setConfig(data);
+
+      setConfig(normalizeConfig(data));
     } catch (err) {
-      console.error('Error loading AI config:', err);
-      setError('Error al cargar la configuración');
+      console.error('Error loading config:', err);
+      setConfig(normalizeConfig(null));
+      setMessage({
+        type: 'error',
+        text:
+          'No pude cargar la configuración (se aplicó una configuración por defecto). Revisa RLS/permisos si persiste.',
+      });
     } finally {
       setIsLoading(false);
     }
   }
 
-  async function loadProducts() {
-    try {
-      const { data, error } = await supabase
-        .from('whatsapp_ai_products')
-        .select('*')
-        .order('created_at', { ascending: false });
+  function validateConfig(cfg) {
+    if (!cfg) return 'Config vacía';
 
-      if (error) throw error;
-      setProducts(data || []);
-    } catch (err) {
-      console.error('Error loading products:', err);
+    // working_days no vacío
+    if (!cfg.working_days?.length) {
+      return 'Selecciona al menos 1 día de atención.';
     }
+
+    // validar rango de horas (simple)
+    const start = String(cfg.business_hours_start || '');
+    const end = String(cfg.business_hours_end || '');
+    if (!start.includes(':') || !end.includes(':')) {
+      return 'Horas inválidas (inicio/término).';
+    }
+
+    // modelo según proveedor
+    if (cfg.ia_provider === 'openai' && !String(cfg.ai_model || '').startsWith('gpt')) {
+      return 'El modelo seleccionado no parece de OpenAI.';
+    }
+    if (cfg.ia_provider === 'claude' && !String(cfg.ai_model || '').toLowerCase().includes('claude')) {
+      return 'El modelo seleccionado no parece de Claude.';
+    }
+
+    return null;
   }
 
   async function saveConfig() {
+    if (!config) return;
+
     setIsSaving(true);
-    setError(null);
-    setSuccess(null);
+    setMessage(null);
 
     try {
+      const cfg = normalizeConfig(config);
+      const validationError = validateConfig(cfg);
+      if (validationError) {
+        setMessage({ type: 'error', text: validationError });
+        setIsSaving(false);
+        return;
+      }
+
+      // ✅ Single-row config: forzamos id=1 si no existe
+      const payload = {
+        ...cfg,
+        updated_at: new Date().toISOString(),
+      };
+
       const { error } = await supabase
         .from('whatsapp_ai_config')
-        .update({
-          ...config,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', config.id);
+        .upsert(payload, { onConflict: 'id' });
 
       if (error) throw error;
 
-      setSuccess('Configuración guardada exitosamente');
-      setTimeout(() => setSuccess(null), 3000);
+      setConfig(cfg);
+      setMessage({ type: 'success', text: 'Configuración guardada exitosamente ✅' });
+
+      if (onConfigUpdate) onConfigUpdate();
     } catch (err) {
       console.error('Error saving config:', err);
-      setError('Error al guardar la configuración');
+      setMessage({
+        type: 'error',
+        text:
+          'Error al guardar la configuración. Si te pasa siempre: revisa RLS/policies de la tabla whatsapp_ai_config.',
+      });
     } finally {
       setIsSaving(false);
     }
   }
 
-  async function toggleAI() {
-    const newEnabled = !config.is_enabled;
-    
-    try {
-      const { error } = await supabase
-        .from('whatsapp_ai_config')
-        .update({ 
-          is_enabled: newEnabled,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', config.id);
+  function handleDayToggle(day) {
+    const days = config?.working_days || [];
+    const newWorkingDays = days.includes(day)
+      ? days.filter((d) => d !== day)
+      : [...days, day];
 
-      if (error) throw error;
-
-      setConfig({ ...config, is_enabled: newEnabled });
-      setSuccess(`IA ${newEnabled ? 'activada' : 'desactivada'} exitosamente`);
-      setTimeout(() => setSuccess(null), 3000);
-    } catch (err) {
-      console.error('Error toggling AI:', err);
-      setError('Error al cambiar el estado de la IA');
-    }
+    setConfig({ ...config, working_days: newWorkingDays.sort((a, b) => a - b) });
   }
 
-  async function saveProduct(productData) {
-    try {
-      if (currentProduct) {
-        // Actualizar producto existente
-        const { error } = await supabase
-          .from('whatsapp_ai_products')
-          .update({
-            ...productData,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', currentProduct.id);
-
-        if (error) throw error;
-      } else {
-        // Crear nuevo producto
-        const { error } = await supabase
-          .from('whatsapp_ai_products')
-          .insert(productData);
-
-        if (error) throw error;
-      }
-
-      await loadProducts();
-      setShowProductModal(false);
-      setCurrentProduct(null);
-      setSuccess('Producto guardado exitosamente');
-      setTimeout(() => setSuccess(null), 3000);
-    } catch (err) {
-      console.error('Error saving product:', err);
-      setError('Error al guardar el producto');
-    }
+  function setProvider(provider) {
+    // al cambiar provider, setear modelo coherente
+    const next = { ...config, ia_provider: provider };
+    if (provider === 'openai') next.ai_model = 'gpt-5-mini';
+    if (provider === 'claude') next.ai_model = 'claude-3-5-sonnet-20241022';
+    setConfig(next);
   }
 
-  async function deleteProduct(productId) {
-    if (!confirm('¿Estás seguro de eliminar este producto?')) return;
+  const providerLabel =
+    config?.ia_provider === 'openai' ? 'OpenAI' : 'Claude (Anthropic)';
 
-    try {
-      const { error } = await supabase
-        .from('whatsapp_ai_products')
-        .delete()
-        .eq('id', productId);
-
-      if (error) throw error;
-
-      await loadProducts();
-      setSuccess('Producto eliminado exitosamente');
-      setTimeout(() => setSuccess(null), 3000);
-    } catch (err) {
-      console.error('Error deleting product:', err);
-      setError('Error al eliminar el producto');
-    }
-  }
-
-  if (isLoading) {
+  if (isLoading || !config) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <Loader className="w-8 h-8 animate-spin text-blue-500" />
-      </div>
-    );
-  }
-
-  if (!config) {
-    return (
-      <div className="max-w-4xl mx-auto p-6">
-        <div className="bg-red-50 border border-red-200 rounded-lg p-6 text-center">
-          <AlertCircle className="w-12 h-12 text-red-600 mx-auto mb-4" />
-          <h2 className="text-xl font-semibold text-red-900 mb-2">
-            Error de configuración
-          </h2>
-          <p className="text-red-700">
-            No se pudo cargar la configuración de IA. Por favor, intenta nuevamente.
-          </p>
-        </div>
+      <div className="flex items-center justify-center min-h-[400px]">
+        <Loader className="w-8 h-8 animate-spin text-green-500" />
       </div>
     );
   }
 
   return (
-    <div className="max-w-6xl mx-auto p-6">
+    <div className="max-w-4xl mx-auto p-6 space-y-6">
       {/* Header */}
-      <div className="bg-gradient-to-r from-purple-500 to-blue-500 rounded-lg shadow-lg p-6 mb-6 text-white">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <div className="bg-white/20 p-3 rounded-lg">
-              <Bot className="w-8 h-8" />
-            </div>
+      <div className="bg-gradient-to-r from-purple-500 to-indigo-600 rounded-xl p-6 text-white">
+        <div className="flex items-center gap-4">
+          <div className="w-14 h-14 bg-white/20 rounded-xl flex items-center justify-center backdrop-blur-sm">
+            <Bot className="w-8 h-8" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold mb-1">IA para WhatsApp</h1>
+            <p className="text-white/90">
+              Respuestas automáticas con {providerLabel}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Message Alert */}
+      {message && (
+        <div
+          className={`p-4 rounded-lg flex items-center gap-3 ${
+            message.type === 'success'
+              ? 'bg-green-50 border border-green-200 text-green-700'
+              : 'bg-red-50 border border-red-200 text-red-700'
+          }`}
+        >
+          {message.type === 'success' ? (
+            <CheckCircle className="w-5 h-5 flex-shrink-0" />
+          ) : (
+            <AlertCircle className="w-5 h-5 flex-shrink-0" />
+          )}
+          <p className="text-sm font-medium">{message.text}</p>
+        </div>
+      )}
+
+      {/* Estado General */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <Zap className="w-6 h-6 text-purple-600" />
             <div>
-              <h1 className="text-2xl font-bold mb-1">
-                IA para WhatsApp
-              </h1>
-              <p className="text-purple-100">
-                Configura tu asistente virtual inteligente
+              <h2 className="text-lg font-semibold text-gray-900">
+                Estado de la IA
+              </h2>
+              <p className="text-sm text-gray-600">
+                Activar o desactivar respuestas automáticas
               </p>
             </div>
           </div>
-          
-          {/* Toggle IA */}
           <button
-            onClick={toggleAI}
-            className={`relative inline-flex h-12 w-24 items-center rounded-full transition-colors ${
-              config.is_enabled ? 'bg-green-500' : 'bg-gray-400'
+            onClick={() => setConfig({ ...config, is_enabled: !config.is_enabled })}
+            className={`relative inline-flex h-8 w-14 items-center rounded-full transition-colors ${
+              config.is_enabled ? 'bg-green-500' : 'bg-gray-300'
             }`}
           >
             <span
-              className={`inline-block h-10 w-10 transform rounded-full bg-white shadow-lg transition-transform ${
-                config.is_enabled ? 'translate-x-12' : 'translate-x-1'
+              className={`inline-block h-6 w-6 transform rounded-full bg-white shadow-lg transition-transform ${
+                config.is_enabled ? 'translate-x-7' : 'translate-x-1'
               }`}
             />
           </button>
         </div>
+
+        <div className="flex items-center gap-2 p-3 bg-purple-50 rounded-lg">
+          <Sparkles className="w-5 h-5 text-purple-600" />
+          <p className="text-sm text-purple-700">
+            {config.is_enabled
+              ? '✅ La IA responderá automáticamente según las reglas configuradas'
+              : '⏸️ La IA está pausada — no responderá automáticamente'}
+          </p>
+        </div>
       </div>
 
-      {/* Alertas */}
-      {error && (
-        <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3">
-          <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
-          <p className="text-sm text-red-700">{error}</p>
-          <button onClick={() => setError(null)} className="ml-auto">
-            <X className="w-5 h-5 text-red-500" />
-          </button>
-        </div>
-      )}
-
-      {success && (
-        <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3">
-          <CheckCircle className="w-5 h-5 text-green-500 flex-shrink-0" />
-          <p className="text-sm text-green-700">{success}</p>
-          <button onClick={() => setSuccess(null)} className="ml-auto">
-            <X className="w-5 h-5 text-green-500" />
-          </button>
-        </div>
-      )}
-
-      {/* Estado de la IA */}
-      <div className={`mb-6 p-6 rounded-lg border-2 ${
-        config.is_enabled 
-          ? 'bg-green-50 border-green-200' 
-          : 'bg-gray-50 border-gray-200'
-      }`}>
-        <div className="flex items-center gap-3 mb-2">
-          <div className={`w-3 h-3 rounded-full ${
-            config.is_enabled ? 'bg-green-500 animate-pulse' : 'bg-gray-400'
-          }`}></div>
-          <span className={`font-semibold ${
-            config.is_enabled ? 'text-green-900' : 'text-gray-600'
-          }`}>
-            {config.is_enabled ? '✓ IA Activa' : '○ IA Desactivada'}
-          </span>
-        </div>
-        <p className={`text-sm ${
-          config.is_enabled ? 'text-green-700' : 'text-gray-500'
-        }`}>
-          {config.is_enabled 
-            ? 'La IA está respondiendo automáticamente a los mensajes de WhatsApp'
-            : 'Activa la IA para comenzar a responder automáticamente'}
-        </p>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        {/* Configuración General */}
-        <div className="bg-white rounded-lg shadow-sm p-6">
-          <div className="flex items-center gap-3 mb-4">
-            <Settings className="w-5 h-5 text-gray-600" />
+      {/* Horario */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <div className="flex items-center gap-3 mb-6">
+          <Clock className="w-6 h-6 text-blue-600" />
+          <div>
             <h2 className="text-lg font-semibold text-gray-900">
-              Configuración General
+              Horario de Atención
             </h2>
+            <p className="text-sm text-gray-600">
+              Define cuándo la IA debe responder
+            </p>
           </div>
+        </div>
 
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Nombre de la IA
-              </label>
+        <div className="space-y-4">
+          <div>
+            <label className="flex items-center gap-2 mb-3">
               <input
-                type="text"
-                value={config.ai_name}
-                onChange={(e) => setConfig({ ...config, ai_name: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Ej: Asistente Virtual"
+                type="checkbox"
+                checked={!!config.auto_reply_when_offline}
+                onChange={(e) =>
+                  setConfig({ ...config, auto_reply_when_offline: e.target.checked })
+                }
+                className="w-4 h-4 text-purple-600 rounded focus:ring-2 focus:ring-purple-500"
               />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Tono de respuesta
-              </label>
-              <select
-                value={config.response_tone}
-                onChange={(e) => setConfig({ ...config, response_tone: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              >
-                <option value="professional">Profesional</option>
-                <option value="friendly">Amigable</option>
-                <option value="casual">Casual</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={config.always_active}
-                  onChange={(e) => setConfig({ ...config, always_active: e.target.checked })}
-                  className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
-                />
-                <span className="text-sm text-gray-700">
-                  Responder siempre (incluso en horario laboral)
-                </span>
-              </label>
-            </div>
-          </div>
-        </div>
-
-        {/* Horarios */}
-        <div className="bg-white rounded-lg shadow-sm p-6">
-          <div className="flex items-center gap-3 mb-4">
-            <Clock className="w-5 h-5 text-gray-600" />
-            <h2 className="text-lg font-semibold text-gray-900">
-              Horarios de Atención
-            </h2>
+              <span className="text-sm font-medium text-gray-700">
+                Solo responder fuera del horario de atención
+              </span>
+            </label>
+            <p className="text-xs text-gray-500 ml-6">
+              Si está marcado, la IA responde cuando estás “offline” (fuera del horario/días seleccionados).
+              Si no está marcado, la IA puede responder siempre (si está activada).
+            </p>
           </div>
 
-          <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 Hora de inicio
               </label>
               <input
                 type="time"
-                value={config.working_hours_start}
-                onChange={(e) => setConfig({ ...config, working_hours_start: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                value={config.business_hours_start}
+                onChange={(e) =>
+                  setConfig({ ...config, business_hours_start: e.target.value })
+                }
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
               />
             </div>
-
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 Hora de término
               </label>
               <input
                 type="time"
-                value={config.working_hours_end}
-                onChange={(e) => setConfig({ ...config, working_hours_end: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                value={config.business_hours_end}
+                onChange={(e) =>
+                  setConfig({ ...config, business_hours_end: e.target.value })
+                }
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
               />
             </div>
+          </div>
 
-            <div className="pt-2">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={config.auto_reply_outside_hours}
-                  onChange={(e) => setConfig({ ...config, auto_reply_outside_hours: e.target.checked })}
-                  className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
-                />
-                <span className="text-sm text-gray-700">
-                  Responder automáticamente fuera de horario
-                </span>
-              </label>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-3">
+              Días de atención
+            </label>
+            <div className="flex gap-2">
+              {DAYS.map((day) => (
+                <button
+                  key={day.id}
+                  onClick={() => handleDayToggle(day.id)}
+                  className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${
+                    config.working_days?.includes(day.id)
+                      ? 'bg-purple-500 text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  {day.name}
+                </button>
+              ))}
             </div>
           </div>
         </div>
       </div>
 
-      {/* Mensajes */}
-      <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
-        <div className="flex items-center gap-3 mb-4">
-          <MessageSquare className="w-5 h-5 text-gray-600" />
-          <h2 className="text-lg font-semibold text-gray-900">
-            Mensajes de la IA
-          </h2>
+      {/* Entrenamiento */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <div className="flex items-center gap-3 mb-6">
+          <MessageSquare className="w-6 h-6 text-green-600" />
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">
+              Entrenar la IA
+            </h2>
+            <p className="text-sm text-gray-600">
+              Contexto para vender y atender “nivel dios”
+            </p>
+          </div>
         </div>
 
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Mensaje de saludo
+              Contexto de entrenamiento
             </label>
             <textarea
+              value={config.training_context}
+              onChange={(e) =>
+                setConfig({ ...config, training_context: e.target.value })
+              }
+              placeholder={
+                "Ejemplo:\nSomos Keloke Chile. Vendemos productos para el hogar y gadgets.\n- Envíos: 24–72h RM, 2–5 días regiones.\n- Medios de pago: ...\n- Garantía/devolución: ...\n- Preguntas clave: presupuesto, comuna, uso.\n- Estilo: chileno, cercano, directo.\n"
+              }
+              rows={9}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent resize-none"
+            />
+            <p className="text-xs text-gray-500 mt-2">
+              Mientras más claro (precios, despacho, garantías, tono y preguntas), mejor vende la IA.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Mensaje de bienvenida (opcional)
+            </label>
+            <input
+              type="text"
               value={config.greeting_message}
-              onChange={(e) => setConfig({ ...config, greeting_message: e.target.value })}
-              rows={3}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-              placeholder="Ej: ¡Hola! Soy tu asistente virtual..."
+              onChange={(e) =>
+                setConfig({ ...config, greeting_message: e.target.value })
+              }
+              placeholder="Hola! Gracias por contactarnos..."
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
             />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Descripción del negocio
-            </label>
-            <textarea
-              value={config.business_description || ''}
-              onChange={(e) => setConfig({ ...config, business_description: e.target.value })}
-              rows={3}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-              placeholder="Describe tu negocio para que la IA pueda responder mejor..."
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Mensaje fuera de horario
-            </label>
-            <textarea
-              value={config.outside_hours_message}
-              onChange={(e) => setConfig({ ...config, outside_hours_message: e.target.value })}
-              rows={2}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-              placeholder="Mensaje cuando contacten fuera del horario..."
-            />
+            <p className="text-xs text-gray-500 mt-1">
+              Se usa como mensaje inicial cuando corresponde (según tu lógica del webhook).
+            </p>
           </div>
         </div>
       </div>
 
-      {/* Productos para entrenamiento */}
-      <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <Package className="w-5 h-5 text-gray-600" />
+      {/* Configuración Avanzada */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <div className="flex items-center gap-3 mb-6">
+          <Settings className="w-6 h-6 text-gray-600" />
+          <div>
             <h2 className="text-lg font-semibold text-gray-900">
-              Productos y Servicios
+              Configuración Avanzada
             </h2>
-          </div>
-          <button
-            onClick={() => {
-              setCurrentProduct(null);
-              setShowProductModal(true);
-            }}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            Agregar Producto
-          </button>
-        </div>
-
-        {products.length === 0 ? (
-          <div className="text-center py-12">
-            <Package className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-            <p className="text-gray-500 mb-2">No hay productos configurados</p>
-            <p className="text-sm text-gray-400">
-              Agrega productos para que la IA pueda venderlos
+            <p className="text-sm text-gray-600">
+              Proveedor, modelo y ajustes del motor
             </p>
           </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {products.map((product) => (
-              <div
-                key={product.id}
-                className="border border-gray-200 rounded-lg p-4 hover:border-blue-300 transition-colors"
-              >
-                <div className="flex items-start justify-between mb-2">
-                  <h3 className="font-semibold text-gray-900">{product.product_name}</h3>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => {
-                        setCurrentProduct(product);
-                        setShowProductModal(true);
-                      }}
-                      className="text-blue-600 hover:text-blue-700"
-                    >
-                      <Settings className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => deleteProduct(product.id)}
-                      className="text-red-600 hover:text-red-700"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-                <p className="text-sm text-gray-600 mb-2">{product.product_description}</p>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-blue-600">{product.price}</span>
-                  <span className={`px-2 py-1 rounded text-xs font-medium ${
-                    product.is_active 
-                      ? 'bg-green-100 text-green-700' 
-                      : 'bg-gray-100 text-gray-600'
-                  }`}>
-                    {product.is_active ? 'Activo' : 'Inactivo'}
-                  </span>
-                </div>
-              </div>
-            ))}
+        </div>
+
+        <div className="space-y-4">
+          {/* Proveedor */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Proveedor de IA
+            </label>
+            <select
+              value={config.ia_provider}
+              onChange={(e) => setProvider(e.target.value)}
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+            >
+              <option value="openai">OpenAI</option>
+              <option value="claude">Claude (Anthropic)</option>
+            </select>
+            <p className="text-xs text-gray-500 mt-1">
+              Esto debe calzar con lo que tu webhook lee (IA_PROVIDER / ai_model).
+            </p>
           </div>
-        )}
+
+          {/* Modelo */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Modelo de IA
+            </label>
+
+            {config.ia_provider === 'openai' ? (
+              <select
+                value={config.ai_model}
+                onChange={(e) => setConfig({ ...config, ai_model: e.target.value })}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+              >
+                {OPENAI_MODELS.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <select
+                value={config.ai_model}
+                onChange={(e) => setConfig({ ...config, ai_model: e.target.value })}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+              >
+                {CLAUDE_MODELS.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            <p className="text-xs text-gray-500 mt-1">
+              OpenAI recomendado: <b>gpt-5-mini</b> para ventas rápidas y buenas.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            {/* Tokens */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Tokens máximos
+              </label>
+              <input
+                type="number"
+                value={config.max_tokens}
+                onChange={(e) =>
+                  setConfig({ ...config, max_tokens: parseInt(e.target.value || '0', 10) })
+                }
+                min="80"
+                max="1200"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+              />
+              <p className="text-xs text-gray-500 mt-1">Largo máximo de respuesta</p>
+            </div>
+
+            {/* Temperatura */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Temperatura ({config.temperature})
+              </label>
+              <input
+                type="range"
+                value={config.temperature}
+                onChange={(e) =>
+                  setConfig({ ...config, temperature: parseFloat(e.target.value) })
+                }
+                min="0"
+                max="1"
+                step="0.1"
+                className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+              />
+              <p className="text-xs text-gray-500 mt-1">Creatividad / variación</p>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Botón Guardar */}
-      <div className="flex justify-end">
+      <div className="sticky bottom-6">
         <button
           onClick={saveConfig}
           disabled={isSaving}
-          className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+          className="w-full flex items-center justify-center gap-2 px-6 py-4 bg-gradient-to-r from-purple-500 to-indigo-600 text-white font-medium rounded-xl hover:from-purple-600 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg hover:shadow-xl"
         >
           {isSaving ? (
             <>
@@ -521,212 +601,38 @@ export default function WhatsAppAIConfig() {
         </button>
       </div>
 
-      {/* Modal de Producto */}
-      {showProductModal && (
-        <ProductModal
-          product={currentProduct}
-          onSave={saveProduct}
-          onClose={() => {
-            setShowProductModal(false);
-            setCurrentProduct(null);
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-function ProductModal({ product, onSave, onClose }) {
-  const [formData, setFormData] = useState(product || {
-    product_name: '',
-    product_description: '',
-    price: '',
-    category: '',
-    features: [],
-    sales_pitch: '',
-    stock_status: 'available',
-    is_active: true
-  });
-
-  const [featureInput, setFeatureInput] = useState('');
-
-  function addFeature() {
-    if (featureInput.trim()) {
-      setFormData({
-        ...formData,
-        features: [...(formData.features || []), featureInput.trim()]
-      });
-      setFeatureInput('');
-    }
-  }
-
-  function removeFeature(index) {
-    setFormData({
-      ...formData,
-      features: formData.features.filter((_, i) => i !== index)
-    });
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-        <div className="sticky top-0 bg-white border-b border-gray-200 p-6 flex items-center justify-between">
-          <h3 className="text-xl font-semibold text-gray-900">
-            {product ? 'Editar Producto' : 'Nuevo Producto'}
-          </h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
-            <X className="w-6 h-6" />
-          </button>
-        </div>
-
-        <div className="p-6 space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Nombre del producto *
-            </label>
-            <input
-              type="text"
-              value={formData.product_name}
-              onChange={(e) => setFormData({ ...formData, product_name: e.target.value })}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder="Ej: Automatización de WhatsApp"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Descripción *
-            </label>
-            <textarea
-              value={formData.product_description}
-              onChange={(e) => setFormData({ ...formData, product_description: e.target.value })}
-              rows={3}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-              placeholder="Describe el producto..."
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Precio
-              </label>
-              <input
-                type="text"
-                value={formData.price}
-                onChange={(e) => setFormData({ ...formData, price: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Ej: $99.990 CLP"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Categoría
-              </label>
-              <input
-                type="text"
-                value={formData.category}
-                onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Ej: Automatización"
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Características
-            </label>
-            <div className="flex gap-2 mb-2">
-              <input
-                type="text"
-                value={featureInput}
-                onChange={(e) => setFeatureInput(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && addFeature()}
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Agrega una característica..."
-              />
-              <button
-                onClick={addFeature}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-              >
-                <Plus className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="space-y-2">
-              {(formData.features || []).map((feature, index) => (
-                <div key={index} className="flex items-center gap-2 bg-gray-50 p-2 rounded">
-                  <span className="flex-1 text-sm text-gray-700">{feature}</span>
-                  <button
-                    onClick={() => removeFeature(index)}
-                    className="text-red-600 hover:text-red-700"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Pitch de ventas
-            </label>
-            <textarea
-              value={formData.sales_pitch}
-              onChange={(e) => setFormData({ ...formData, sales_pitch: e.target.value })}
-              rows={3}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-              placeholder="Mensaje de venta específico para este producto..."
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Estado de stock
-              </label>
-              <select
-                value={formData.stock_status}
-                onChange={(e) => setFormData({ ...formData, stock_status: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              >
-                <option value="available">Disponible</option>
-                <option value="limited">Stock limitado</option>
-                <option value="out_of_stock">Sin stock</option>
-              </select>
-            </div>
-
-            <div className="flex items-end">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={formData.is_active}
-                  onChange={(e) => setFormData({ ...formData, is_active: e.target.checked })}
-                  className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
-                />
-                <span className="text-sm text-gray-700">Producto activo</span>
-              </label>
-            </div>
-          </div>
-        </div>
-
-        <div className="sticky bottom-0 bg-gray-50 border-t border-gray-200 p-6 flex justify-end gap-3">
-          <button
-            onClick={onClose}
-            className="px-6 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-100 transition-colors"
-          >
-            Cancelar
-          </button>
-          <button
-            onClick={() => onSave(formData)}
-            disabled={!formData.product_name || !formData.product_description}
-            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
-          >
-            Guardar Producto
-          </button>
-        </div>
+      {/* Info Card */}
+      <div className="bg-gradient-to-br from-purple-50 to-indigo-50 border border-purple-200 rounded-xl p-6">
+        <h3 className="text-sm font-semibold text-purple-900 mb-3 flex items-center gap-2">
+          <Sparkles className="w-4 h-4" />
+          ¿Cómo funciona la IA?
+        </h3>
+        <ul className="space-y-2 text-sm text-purple-800">
+          <li className="flex items-start gap-2">
+            <CheckCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <span>
+              La IA responde automáticamente según <b>estado</b> + <b>horario</b> + <b>días</b>.
+            </span>
+          </li>
+          <li className="flex items-start gap-2">
+            <CheckCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <span>
+              Usa tu <b>contexto de entrenamiento</b> para vender mejor y resolver dudas (sin inventar stock).
+            </span>
+          </li>
+          <li className="flex items-start gap-2">
+            <CheckCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <span>
+              Proveedor actual: <b>{providerLabel}</b> — Modelo: <b>{config.ai_model}</b>
+            </span>
+          </li>
+          <li className="flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <span>
+              Ojo: el webhook debe <b>leer esta config</b> para aplicar proveedor/modelo (si no, solo cambia la UI).
+            </span>
+          </li>
+        </ul>
       </div>
     </div>
   );
