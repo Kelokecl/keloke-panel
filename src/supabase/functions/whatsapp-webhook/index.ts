@@ -12,10 +12,11 @@ const corsHeaders: Record<string, string> = {
     "authorization, x-client-info, apikey, content-type",
 };
 
+// ✅ Nerd (destino externo). OJO: si lo apuntas a ti mismo, lo saltamos para evitar loop.
 const NERD_WEBHOOK_URL =
-  "https://nffeqekvvqsqwbjrmkjs.supabase.co/functions/v1/whatsapp-webhook"; // OJO: hoy está apuntando a la MISMA function
+  "https://nffeqekvvqsqwbjrmkjs.supabase.co/functions/v1/whatsapp-webhook";
 
-const STORAGE_BUCKET = "whatsapp-media"; // tu bucket público
+const STORAGE_BUCKET = "whatsapp-media"; // bucket público
 const WA_GRAPH_VERSION = "v21.0";
 
 function jsonResponse(data: unknown, status = 200) {
@@ -27,10 +28,6 @@ function jsonResponse(data: unknown, status = 200) {
 
 function safeString(v: unknown) {
   return typeof v === "string" ? v : "";
-}
-
-function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null;
 }
 
 function mimeToExt(mimeRaw: string): string {
@@ -116,7 +113,8 @@ async function generateOpenAIReply(userText: string): Promise<string> {
 
 async function generateClaudeReply(userText: string): Promise<string> {
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
-  const model = Deno.env.get("ANTHROPIC_MODEL") ?? "claude-3-5-sonnet-20240620";
+  const model = Deno.env.get("ANTHROPIC_MODEL") ??
+    "claude-3-5-sonnet-20240620";
 
   if (!apiKey) {
     console.error("❌ No se encontró ANTHROPIC_API_KEY en Secrets");
@@ -155,7 +153,8 @@ async function generateClaudeReply(userText: string): Promise<string> {
 
     const data = JSON.parse(raw);
     const text = safeString(data?.content?.[0]?.text)?.trim();
-    return text || "Gracias por escribirnos 🙌 ¿Qué andas buscando? Si quieres te mando links al tiro.";
+    return text ||
+      "Gracias por escribirnos 🙌 ¿Qué andas buscando? Si quieres te mando links al tiro.";
   } catch (error) {
     console.error("❌ Error llamando a Claude:", error);
     return "Tu mensaje ya quedó registrado 🙌, pero tuve un problema con la IA. ¿Qué producto buscas?";
@@ -170,7 +169,7 @@ async function generateAIReply(userText: string): Promise<string> {
 
 /**
  * =========================================================
- *  WhatsApp send
+ *  WhatsApp send (texto)
  * =========================================================
  */
 async function sendWhatsAppTextReply(
@@ -179,7 +178,8 @@ async function sendWhatsAppTextReply(
   accessToken: string,
   phoneNumberId: string,
 ) {
-  const url = `https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/messages`;
+  const url =
+    `https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/messages`;
 
   const body = {
     messaging_product: "whatsapp",
@@ -218,7 +218,7 @@ async function sendWhatsAppTextReply(
 
 /**
  * =========================================================
- *  MEDIA (INBOUND): media_id -> URL temporal -> binario -> Storage -> public URL
+ *  MEDIA (INBOUND): media_id -> meta(url) -> binary -> Storage -> publicUrl
  * =========================================================
  */
 async function fetchWhatsAppMediaMeta(mediaId: string, accessToken: string) {
@@ -227,6 +227,7 @@ async function fetchWhatsAppMediaMeta(mediaId: string, accessToken: string) {
     method: "GET",
     headers: { Authorization: `Bearer ${accessToken}` },
   });
+
   const raw = await res.text();
   let json: any = null;
   try {
@@ -244,23 +245,33 @@ async function fetchWhatsAppMediaMeta(mediaId: string, accessToken: string) {
   return json;
 }
 
-async function downloadWhatsAppMediaBinary(mediaUrl: string, accessToken: string) {
+async function downloadWhatsAppMediaBinary(
+  mediaUrl: string,
+  accessToken: string,
+) {
   const res = await fetch(mediaUrl, {
     method: "GET",
     headers: { Authorization: `Bearer ${accessToken}` },
   });
+
   if (!res.ok) {
     const t = await res.text().catch(() => "");
     console.error("❌ [MEDIA_BIN] Error:", res.status, t);
     throw new Error(`Media binary download failed ${res.status}`);
   }
+
   const ab = await res.arrayBuffer();
   return new Uint8Array(ab);
 }
 
+function randomId() {
+  // simple random (evita colisiones de nombre)
+  return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
 async function uploadToStorageAndGetPublicUrl(
   supabase: ReturnType<typeof createClient>,
-  fileName: string,
+  filePath: string,
   bytes: Uint8Array,
   mimeType: string,
 ) {
@@ -268,7 +279,7 @@ async function uploadToStorageAndGetPublicUrl(
 
   const { error: upErr } = await supabase.storage
     .from(STORAGE_BUCKET)
-    .upload(fileName, blob, {
+    .upload(filePath, blob, {
       contentType: mimeType,
       upsert: false,
     });
@@ -280,7 +291,7 @@ async function uploadToStorageAndGetPublicUrl(
 
   const { data: pub } = supabase.storage
     .from(STORAGE_BUCKET)
-    .getPublicUrl(fileName);
+    .getPublicUrl(filePath);
 
   const publicUrl = pub?.publicUrl;
   if (!publicUrl) throw new Error("No se pudo obtener publicUrl");
@@ -318,10 +329,13 @@ async function handleInboundMedia(
 
   const bytes = await downloadWhatsAppMediaBinary(mediaUrl, accessToken);
 
-  const fileName = `${messageType}_in_${Date.now()}_${mediaId}.${ext}`;
+  // ✅ ordenado por carpetas
+  const fileName = `${messageType}_in_${randomId()}_${mediaId}.${ext}`;
+  const filePath = `${messageType}/inbound/${fileName}`;
+
   const publicUrl = await uploadToStorageAndGetPublicUrl(
     supabase,
-    fileName,
+    filePath,
     bytes,
     mimeType,
   );
@@ -407,7 +421,8 @@ serve(async (req) => {
       console.error("❌ ERROR: No se encontró conexión WhatsApp activa");
       return jsonResponse(
         {
-          error: "No WhatsApp connection found (platform=whatsapp, is_active=true)",
+          error:
+            "No WhatsApp connection found (platform=whatsapp, is_active=true)",
           details: connError ?? null,
         },
         500,
@@ -448,7 +463,7 @@ serve(async (req) => {
 
             if (!fromPhone || !messageId || !messageType) continue;
 
-            // Idempotencia: si ya guardamos este inbound, no lo procesamos de nuevo
+            // ✅ Idempotencia: si ya guardamos este inbound, saltar
             const { data: existingMsg } = await supabase
               .from("whatsapp_messages")
               .select("id")
@@ -517,16 +532,15 @@ serve(async (req) => {
             if (messageType === "text") {
               messageData.message = safeString(message.text?.body) || "";
             } else {
-              // Media + otros
+              // caption si aplica
               let caption = "";
               if (messageType === "image") caption = safeString(message?.image?.caption);
               if (messageType === "video") caption = safeString(message?.video?.caption);
               if (messageType === "document") caption = safeString(message?.document?.caption);
-
               messageData.message = caption || `Mensaje de tipo ${messageType} recibido`;
             }
 
-            // 🔥 NUEVO: si es media soportado, bajar + subir + guardar url
+            // ✅ MEDIA inbound completo
             if (
               messageType === "audio" ||
               messageType === "image" ||
@@ -536,6 +550,7 @@ serve(async (req) => {
             ) {
               try {
                 console.log("🎯 [MEDIA] Detectado tipo:", messageType);
+
                 const media = await handleInboundMedia(
                   supabase,
                   accessToken,
@@ -548,8 +563,8 @@ serve(async (req) => {
                   messageData.media_mime_type = media.mimeType;
                   messageData.media_filename = media.fileName;
                   messageData.media_size = media.size;
+                  messageData.media_id = media.mediaId;
 
-                  // Guardar info útil en platform_response también
                   messageData.platform_response = {
                     ...messageData.platform_response,
                     _media: {
@@ -567,7 +582,7 @@ serve(async (req) => {
                 }
               } catch (e) {
                 console.error("❌ [MEDIA] Error procesando media:", e);
-                // Igual guardamos el inbound aunque falle el media
+                // guardamos el inbound igual
                 messageData.message = `Mensaje de tipo ${messageType} recibido (media error)`;
               }
             }
@@ -615,11 +630,8 @@ serve(async (req) => {
                 .from("whatsapp_messages")
                 .insert(outboundData);
 
-              if (outboundErr) {
-                console.error("❌ Error guardando outbound:", outboundErr);
-              } else {
-                console.log("✅ Outbound guardado");
-              }
+              if (outboundErr) console.error("❌ Error guardando outbound:", outboundErr);
+              else console.log("✅ Outbound guardado");
             }
           }
         }
@@ -631,12 +643,14 @@ serve(async (req) => {
             const stVal = safeString(status?.status);
             if (!stId || !stVal) continue;
 
+            // ✅ Importante: NO pisa todo platform_response del mensaje original;
+            // dejamos status en platform_response_status
             await supabase
               .from("whatsapp_messages")
               .update({
                 status: stVal,
-                platform_response: status,
-              })
+                platform_response_status: status,
+              } as any)
               .eq("whatsapp_message_id", stId);
 
             console.log("📊 Status update:", stId, stVal);
@@ -645,12 +659,16 @@ serve(async (req) => {
       }
     }
 
-    // 3) Reenvío silencioso a Nerd (paralelo) - PROTEGIDO contra loop infinito
+    // 3) Forward a Nerd (sin loop infinito)
     try {
       const forwarded = safeString(req.headers.get("X-Forwarded-From"));
-      const sameUrl = NERD_WEBHOOK_URL === req.url;
 
-      // Si ya viene reenviado o si apunta a sí mismo, NO reenviar (evita recursión infinita)
+      // si NERD apunta a esta misma función (misma URL), no forward
+      const thisUrl = safeString(new URL(req.url).origin) +
+        safeString(new URL(req.url).pathname);
+      const nerdUrl = safeString(NERD_WEBHOOK_URL);
+      const sameUrl = nerdUrl && thisUrl && nerdUrl.includes(thisUrl);
+
       if (!forwarded && !sameUrl) {
         await fetch(NERD_WEBHOOK_URL, {
           method: "POST",
@@ -662,7 +680,7 @@ serve(async (req) => {
         });
         console.log("✓ Webhook reenviado a Nerd correctamente");
       } else {
-        console.log("⏭️ Skip forward to Nerd (evitando loop):", { forwarded, sameUrl });
+        console.log("⏭️ Skip forward a Nerd (evitando loop)", { forwarded, sameUrl });
       }
     } catch (error) {
       console.error("❌ Error reenviando webhook a Nerd:", error);
