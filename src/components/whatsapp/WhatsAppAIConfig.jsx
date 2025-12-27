@@ -53,98 +53,97 @@ export default function WhatsAppAIConfig({ onConfigUpdate }) {
   }, []);
 
   async function loadConfig() {
-    setIsLoading(true);
-    setMessage(null);
+  setIsLoading(true);
+  setMessage(null);
 
-    try {
-      // Traemos la primera fila (singleton)
-      const { data, error } = await supabase
+  try {
+    const { data, error } = await supabase
+      .from('whatsapp_ai_config')
+      .select('*')
+      .order('id', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    // Si no existe fila, creamos una (SIN id)
+    if (!data) {
+      const { error: insErr } = await supabase.from('whatsapp_ai_config').insert({
+        ...DEFAULTS,
+        updated_at: new Date().toISOString(),
+      });
+      if (insErr) throw insErr;
+
+      const { data: data2, error: err2 } = await supabase
         .from('whatsapp_ai_config')
         .select('*')
         .order('id', { ascending: true })
         .limit(1)
         .maybeSingle();
 
-      if (error) throw error;
+      if (err2) throw err2;
 
-      // Si no existe, creamos una SIN id y volvemos a leer
-      if (!data) {
-        const { error: insErr } = await supabase.from('whatsapp_ai_config').insert({
-          ...DEFAULTS,
-          updated_at: new Date().toISOString(),
-        });
-        if (insErr) throw insErr;
-
-        const { data: data2, error: err2 } = await supabase
-          .from('whatsapp_ai_config')
-          .select('*')
-          .order('id', { ascending: true })
-          .limit(1)
-          .maybeSingle();
-
-        if (err2) throw err2;
-
-        setRowId(data2?.id ?? null);
-        setConfig({ ...DEFAULTS, ...(data2 ?? {}) });
-        return;
-      }
-
-      setRowId(data.id);
-      setConfig({ ...DEFAULTS, ...data });
-    } catch (err) {
-      console.error('Error loading config:', err);
-      setMessage({ type: 'error', text: 'Error al cargar la configuración (revisa consola/Supabase).' });
-    } finally {
-      setIsLoading(false);
+      const { id, ...rest2 } = data2 || {};
+      setRowId(id ?? null);
+      setConfig({ ...DEFAULTS, ...rest2 }); // ✅ sin id
+      return;
     }
+
+    const { id, ...rest } = data;
+    setRowId(id);
+    setConfig({ ...DEFAULTS, ...rest }); // ✅ sin id
+  } catch (err) {
+    console.error('Error loading config:', err);
+    setMessage({ type: 'error', text: 'Error al cargar la configuración (revisa consola/Supabase).' });
+  } finally {
+    setIsLoading(false);
   }
+}
+
 
   async function saveConfig() {
-    setIsSaving(true);
-    setMessage(null);
+  setIsSaving(true);
+  setMessage(null);
 
-    try {
-      const payload = {
-        ...config,
-        // nunca intentamos setear id en insert/update
-        updated_at: new Date().toISOString(),
-      };
+  try {
+    // ✅ sacamos id del payload SÍ o SÍ
+    const { id: _ignore, ...safeConfig } = (config || {});
 
-      let error = null;
+    const payload = {
+      ...safeConfig,
+      updated_at: new Date().toISOString(),
+    };
 
-      if (rowId) {
-        const res = await supabase
-          .from('whatsapp_ai_config')
-          .update(payload)
-          .eq('id', rowId);
+    let error = null;
 
-        error = res.error;
-      } else {
-        const res = await supabase
-          .from('whatsapp_ai_config')
-          .insert(payload);
-
-        error = res.error;
-      }
-
-      if (error) throw error;
-
-      setMessage({ type: 'success', text: 'Configuración guardada ✅' });
-
-      // re-cargar para asegurar rowId / estado
-      await loadConfig();
-
-      if (onConfigUpdate) onConfigUpdate();
-    } catch (err) {
-      console.error('Error saving config:', err);
-      setMessage({
-        type: 'error',
-        text: 'Error al guardar. Si persiste: revisa que existan columnas (SQL) y permisos/RLS.',
-      });
-    } finally {
-      setIsSaving(false);
+    if (rowId) {
+      const res = await supabase
+        .from('whatsapp_ai_config')
+        .update(payload)
+        .eq('id', rowId);
+      error = res.error;
+    } else {
+      const res = await supabase
+        .from('whatsapp_ai_config')
+        .insert(payload);
+      error = res.error;
     }
+
+    if (error) throw error;
+
+    setMessage({ type: 'success', text: 'Configuración guardada ✅' });
+    await loadConfig(); // recarga para confirmar
+    if (onConfigUpdate) onConfigUpdate();
+  } catch (err) {
+    console.error('Error saving config:', err);
+    setMessage({
+      type: 'error',
+      text: 'Error al guardar. (Este error era por id; si persiste, revisamos RLS/permisos)',
+    });
+  } finally {
+    setIsSaving(false);
   }
+}
 
   function toggleDay(dayId) {
     const cur = new Set(config.days_enabled || []);
