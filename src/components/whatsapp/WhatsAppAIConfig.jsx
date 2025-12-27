@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { supabase } from "../../lib/supabase";
+import { useEffect, useMemo, useState } from 'react';
+import { supabase } from '../../lib/supabase';
 import {
   Bot,
   Save,
@@ -11,55 +11,38 @@ import {
   Settings,
   MessageSquare,
   Sparkles,
-} from "lucide-react";
-
-/**
- * Este componente está adaptado a TU tabla real `whatsapp_ai_config`:
- * - id (identity)
- * - auto_reply_enabled (bool)
- * - reply_outside_schedule (bool)
- * - start_time (text)
- * - end_time (text)
- * - days_enabled (_text)  <-- guardamos '1'..'7'
- * - training_data (text)
- * - greeting_message (text)
- * - ai_provider (text) default 'openai'
- * - ai_model (text) default 'gpt-5-mini'
- * - max_tokens (int) default 220
- * - temperature (numeric) default 0.7
- * - updated_at (timestamptz)
- */
+} from 'lucide-react';
 
 const DEFAULTS = {
   auto_reply_enabled: false,
   reply_outside_schedule: true,
-  start_time: "09:00",
-  end_time: "18:00",
-  days_enabled: ["1", "2", "3", "4", "5"], // Lun..Vie
-  training_data: "",
-  greeting_message: "Hola! 👋 Soy la asistente de Keloke. ¿Qué producto buscas y para qué uso?",
-  ai_provider: "openai",
-  ai_model: "gpt-5-mini",
+  start_time: '09:00',
+  end_time: '18:00',
+  days_enabled: ['1', '2', '3', '4', '5'],
+  training_data: '',
+  greeting_message: 'Hola! Gracias por contactarnos 🙌 ¿Qué producto buscas y para qué uso?',
+  provider: 'openai',
+  ai_model: 'gpt-5-mini',
   max_tokens: 220,
   temperature: 0.7,
 };
 
 export default function WhatsAppAIConfig({ onConfigUpdate }) {
-  const [config, setConfig] = useState(null);
-  const [rowId, setRowId] = useState(null); // importante: NO insertar id
+  const [rowId, setRowId] = useState(null); // id existente (si hay fila)
+  const [config, setConfig] = useState(DEFAULTS);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState(null);
 
   const days = useMemo(
     () => [
-      { id: "1", name: "Lun" },
-      { id: "2", name: "Mar" },
-      { id: "3", name: "Mié" },
-      { id: "4", name: "Jue" },
-      { id: "5", name: "Vie" },
-      { id: "6", name: "Sáb" },
-      { id: "7", name: "Dom" },
+      { id: '1', name: 'Lun' },
+      { id: '2', name: 'Mar' },
+      { id: '3', name: 'Mié' },
+      { id: '4', name: 'Jue' },
+      { id: '5', name: 'Vie' },
+      { id: '6', name: 'Sáb' },
+      { id: '7', name: 'Dom' },
     ],
     []
   );
@@ -70,112 +53,110 @@ export default function WhatsAppAIConfig({ onConfigUpdate }) {
   }, []);
 
   async function loadConfig() {
-    try {
-      setIsLoading(true);
-      setMessage(null);
+    setMessage(null);
+    setIsLoading(true);
 
+    try {
+      // Tomamos la PRIMERA fila (singleton pattern)
       const { data, error } = await supabase
-        .from("whatsapp_ai_config")
-        .select("*")
-        .order("id", { ascending: true })
+        .from('whatsapp_ai_config')
+        .select('*')
+        .order('id', { ascending: true })
         .limit(1)
         .maybeSingle();
 
       if (error) throw error;
 
-      if (data?.id) {
-        setRowId(data.id);
-        setConfig({
-          ...DEFAULTS,
-          ...data,
-          // normalizar days_enabled a array de strings
-          days_enabled: Array.isArray(data.days_enabled)
-            ? data.days_enabled.map(String)
-            : DEFAULTS.days_enabled,
-        });
-      } else {
-        // si no hay fila, usamos defaults (y al guardar insertaremos sin id)
+      if (!data) {
+        // no hay fila: usamos defaults
         setRowId(null);
-        setConfig({ ...DEFAULTS });
+        setConfig(DEFAULTS);
+      } else {
+        setRowId(data.id ?? null);
+
+        setConfig({
+          auto_reply_enabled: data.auto_reply_enabled ?? DEFAULTS.auto_reply_enabled,
+          reply_outside_schedule:
+            data.reply_outside_schedule ?? DEFAULTS.reply_outside_schedule,
+          start_time: data.start_time ?? DEFAULTS.start_time,
+          end_time: data.end_time ?? DEFAULTS.end_time,
+          days_enabled: Array.isArray(data.days_enabled) ? data.days_enabled : DEFAULTS.days_enabled,
+          training_data: data.training_data ?? DEFAULTS.training_data,
+          greeting_message: data.greeting_message ?? DEFAULTS.greeting_message,
+          provider: data.provider ?? DEFAULTS.provider,
+          ai_model: data.ai_model ?? DEFAULTS.ai_model,
+          max_tokens: Number.isFinite(data.max_tokens) ? data.max_tokens : DEFAULTS.max_tokens,
+          temperature:
+            typeof data.temperature === 'number' ? data.temperature : DEFAULTS.temperature,
+        });
       }
     } catch (err) {
-      console.error("Error loading config:", err);
-      setMessage({ type: "error", text: "Error al cargar la configuración" });
-      setConfig({ ...DEFAULTS });
-      setRowId(null);
+      console.error('Error loading config:', err);
+      setMessage({ type: 'error', text: 'Error al cargar la configuración (ver consola).' });
     } finally {
       setIsLoading(false);
     }
   }
 
   async function saveConfig() {
-    if (!config) return;
     setIsSaving(true);
     setMessage(null);
 
-    // payload sin id (clave para no romper identity GENERATED ALWAYS)
-    const payload = {
-      auto_reply_enabled: !!config.auto_reply_enabled,
-      reply_outside_schedule: !!config.reply_outside_schedule,
-      start_time: config.start_time || "09:00",
-      end_time: config.end_time || "18:00",
-      days_enabled: Array.isArray(config.days_enabled)
-        ? config.days_enabled.map(String)
-        : DEFAULTS.days_enabled,
-      training_data: config.training_data || "",
-      greeting_message: config.greeting_message || DEFAULTS.greeting_message,
-      ai_provider: config.ai_provider || "openai",
-      ai_model: config.ai_model || "gpt-5-mini",
-      max_tokens: Number.isFinite(config.max_tokens) ? Number(config.max_tokens) : 220,
-      temperature: Number.isFinite(config.temperature) ? Number(config.temperature) : 0.7,
-      updated_at: new Date().toISOString(),
-    };
-
     try {
+      const payload = {
+        ...config,
+        updated_at: new Date().toISOString(),
+      };
+
+      let res;
       if (rowId) {
-        // UPDATE (no toca id)
-        const { error } = await supabase
-          .from("whatsapp_ai_config")
+        // ✅ UPDATE (no toca id)
+        res = await supabase
+          .from('whatsapp_ai_config')
           .update(payload)
-          .eq("id", rowId);
-
-        if (error) throw error;
+          .eq('id', rowId)
+          .select()
+          .maybeSingle();
       } else {
-        // INSERT (sin id)
-        const { data, error } = await supabase
-          .from("whatsapp_ai_config")
+        // ✅ INSERT (no manda id)
+        res = await supabase
+          .from('whatsapp_ai_config')
           .insert(payload)
-          .select("id")
-          .single();
-
-        if (error) throw error;
-        setRowId(data?.id ?? null);
+          .select()
+          .maybeSingle();
       }
 
-      setMessage({ type: "success", text: "Configuración guardada exitosamente" });
+      const { data, error } = res;
+      if (error) throw error;
+
+      // Si insertó, guardamos el id
+      if (data?.id) setRowId(data.id);
+
+      setMessage({ type: 'success', text: 'Configuración guardada exitosamente ✅' });
 
       if (onConfigUpdate) onConfigUpdate();
     } catch (err) {
-      console.error("Error saving config:", err);
+      console.error('Error saving config:', err);
       setMessage({
-        type: "error",
+        type: 'error',
         text:
-          "Error al guardar la configuración. Revisa consola (puede ser columnas faltantes o permisos).",
+          'Error al guardar la configuración. Si persiste: revisa que corriste el SQL y luego revisa RLS/policies.',
       });
     } finally {
       setIsSaving(false);
     }
   }
 
-  function toggleDay(dayId) {
-    const current = new Set((config?.days_enabled || []).map(String));
-    if (current.has(dayId)) current.delete(dayId);
-    else current.add(dayId);
-    const sorted = Array.from(current).sort((a, b) => Number(a) - Number(b));
-    setConfig((c) => ({ ...c, days_enabled: sorted }));
+  function handleDayToggle(dayId) {
+    const current = Array.isArray(config.days_enabled) ? config.days_enabled : [];
+    const next = current.includes(dayId)
+      ? current.filter((d) => d !== dayId)
+      : [...current, dayId];
+    next.sort((a, b) => Number(a) - Number(b));
+    setConfig({ ...config, days_enabled: next });
   }
 
-  if (isLoading || !config) {
+  if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
         <Loader className="w-8 h-8 animate-spin text-green-500" />
@@ -193,21 +174,21 @@ export default function WhatsAppAIConfig({ onConfigUpdate }) {
           </div>
           <div>
             <h1 className="text-2xl font-bold mb-1">IA para WhatsApp</h1>
-            <p className="text-white/90">Respuestas automáticas con OpenAI (GPT-5 mini)</p>
+            <p className="text-white/90">Respuestas automáticas con OpenAI (gpt-5-mini)</p>
           </div>
         </div>
       </div>
 
-      {/* Alert */}
+      {/* Message Alert */}
       {message && (
         <div
           className={`p-4 rounded-lg flex items-center gap-3 ${
-            message.type === "success"
-              ? "bg-green-50 border border-green-200 text-green-700"
-              : "bg-red-50 border border-red-200 text-red-700"
+            message.type === 'success'
+              ? 'bg-green-50 border border-green-200 text-green-700'
+              : 'bg-red-50 border border-red-200 text-red-700'
           }`}
         >
-          {message.type === "success" ? (
+          {message.type === 'success' ? (
             <CheckCircle className="w-5 h-5 flex-shrink-0" />
           ) : (
             <AlertCircle className="w-5 h-5 flex-shrink-0" />
@@ -216,28 +197,25 @@ export default function WhatsAppAIConfig({ onConfigUpdate }) {
         </div>
       )}
 
-      {/* Estado */}
+      {/* Estado General */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
             <Zap className="w-6 h-6 text-purple-600" />
             <div>
               <h2 className="text-lg font-semibold text-gray-900">Estado de la IA</h2>
-              <p className="text-sm text-gray-600">Activar o pausar respuestas automáticas</p>
+              <p className="text-sm text-gray-600">Activar o desactivar respuestas automáticas</p>
             </div>
           </div>
-
           <button
-            onClick={() =>
-              setConfig((c) => ({ ...c, auto_reply_enabled: !c.auto_reply_enabled }))
-            }
+            onClick={() => setConfig({ ...config, auto_reply_enabled: !config.auto_reply_enabled })}
             className={`relative inline-flex h-8 w-14 items-center rounded-full transition-colors ${
-              config.auto_reply_enabled ? "bg-green-500" : "bg-gray-300"
+              config.auto_reply_enabled ? 'bg-green-500' : 'bg-gray-300'
             }`}
           >
             <span
               className={`inline-block h-6 w-6 transform rounded-full bg-white shadow-lg transition-transform ${
-                config.auto_reply_enabled ? "translate-x-7" : "translate-x-1"
+                config.auto_reply_enabled ? 'translate-x-7' : 'translate-x-1'
               }`}
             />
           </button>
@@ -247,8 +225,8 @@ export default function WhatsAppAIConfig({ onConfigUpdate }) {
           <Sparkles className="w-5 h-5 text-purple-600" />
           <p className="text-sm text-purple-700">
             {config.auto_reply_enabled
-              ? "✅ La IA responderá automáticamente según las reglas"
-              : "⏸️ La IA está pausada (no responderá sola)"}
+              ? '✅ La IA responderá automáticamente según las reglas configuradas'
+              : '⏸️ La IA está pausada — no responderá automáticamente'}
           </p>
         </div>
       </div>
@@ -264,65 +242,68 @@ export default function WhatsAppAIConfig({ onConfigUpdate }) {
         </div>
 
         <div className="space-y-4">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={!!config.reply_outside_schedule}
-              onChange={(e) =>
-                setConfig((c) => ({ ...c, reply_outside_schedule: e.target.checked }))
-              }
-              className="w-4 h-4 text-purple-600 rounded focus:ring-2 focus:ring-purple-500"
-            />
-            <span className="text-sm font-medium text-gray-700">
-              Solo responder fuera del horario de atención
-            </span>
-          </label>
-          <p className="text-xs text-gray-500 -mt-2">
-            Si está marcado, la IA responde cuando estás “offline” (fuera del horario/días).
-            Si no, puede responder siempre (si está activada).
-          </p>
+          <div>
+            <label className="flex items-center gap-2 mb-3">
+              <input
+                type="checkbox"
+                checked={config.reply_outside_schedule}
+                onChange={(e) =>
+                  setConfig({ ...config, reply_outside_schedule: e.target.checked })
+                }
+                className="w-4 h-4 text-purple-600 rounded focus:ring-2 focus:ring-purple-500"
+              />
+              <span className="text-sm font-medium text-gray-700">
+                Solo responder fuera del horario de atención
+              </span>
+            </label>
+            <p className="text-xs text-gray-500 ml-6">
+              Si está marcado, la IA solo responde cuando estás “offline” (fuera del horario/días).
+            </p>
+          </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Hora de inicio</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Hora de inicio
+              </label>
               <input
                 type="time"
-                value={config.start_time || "09:00"}
-                onChange={(e) => setConfig((c) => ({ ...c, start_time: e.target.value }))}
+                value={config.start_time}
+                onChange={(e) => setConfig({ ...config, start_time: e.target.value })}
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
               />
             </div>
-
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Hora de término</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Hora de término
+              </label>
               <input
                 type="time"
-                value={config.end_time || "18:00"}
-                onChange={(e) => setConfig((c) => ({ ...c, end_time: e.target.value }))}
+                value={config.end_time}
+                onChange={(e) => setConfig({ ...config, end_time: e.target.value })}
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-3">Días de atención</label>
+            <label className="block text-sm font-medium text-gray-700 mb-3">
+              Días de atención
+            </label>
             <div className="flex gap-2">
-              {days.map((d) => {
-                const active = (config.days_enabled || []).map(String).includes(d.id);
-                return (
-                  <button
-                    key={d.id}
-                    onClick={() => toggleDay(d.id)}
-                    className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${
-                      active
-                        ? "bg-purple-500 text-white"
-                        : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-                    }`}
-                  >
-                    {d.name}
-                  </button>
-                );
-              })}
+              {days.map((d) => (
+                <button
+                  key={d.id}
+                  onClick={() => handleDayToggle(d.id)}
+                  className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${
+                    config.days_enabled?.includes(d.id)
+                      ? 'bg-purple-500 text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  {d.name}
+                </button>
+              ))}
             </div>
           </div>
         </div>
@@ -344,11 +325,11 @@ export default function WhatsAppAIConfig({ onConfigUpdate }) {
               Contexto de entrenamiento
             </label>
             <textarea
-              value={config.training_data || ""}
-              onChange={(e) => setConfig((c) => ({ ...c, training_data: e.target.value }))}
+              value={config.training_data}
+              onChange={(e) => setConfig({ ...config, training_data: e.target.value })}
               rows={10}
-              placeholder="Describe tu negocio, productos, despacho, garantías, estilo de atención, preguntas clave..."
               className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent resize-none"
+              placeholder="Describe tu negocio, despacho, garantías, objeciones, tono, etc."
             />
             <p className="text-xs text-gray-500 mt-2">
               Mientras más claro (precios, despacho, garantías, tono y preguntas), mejor vende la IA.
@@ -361,8 +342,8 @@ export default function WhatsAppAIConfig({ onConfigUpdate }) {
             </label>
             <input
               type="text"
-              value={config.greeting_message || ""}
-              onChange={(e) => setConfig((c) => ({ ...c, greeting_message: e.target.value }))}
+              value={config.greeting_message}
+              onChange={(e) => setConfig({ ...config, greeting_message: e.target.value })}
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
             />
           </div>
@@ -375,72 +356,75 @@ export default function WhatsAppAIConfig({ onConfigUpdate }) {
           <Settings className="w-6 h-6 text-gray-600" />
           <div>
             <h2 className="text-lg font-semibold text-gray-900">Configuración Avanzada</h2>
-            <p className="text-sm text-gray-600">Proveedor, modelo y ajustes del motor</p>
+            <p className="text-sm text-gray-600">Proveedor/modelo y ajustes</p>
           </div>
         </div>
 
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Proveedor de IA</label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Proveedor</label>
             <select
-              value={config.ai_provider || "openai"}
-              onChange={(e) => setConfig((c) => ({ ...c, ai_provider: e.target.value }))}
+              value={config.provider}
+              onChange={(e) => setConfig({ ...config, provider: e.target.value })}
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
             >
               <option value="openai">OpenAI</option>
               <option value="claude">Claude (Anthropic)</option>
             </select>
-            <p className="text-xs text-gray-500 mt-1">
-              Debe calzar con lo que tu webhook lee (ai_provider/ai_model).
-            </p>
           </div>
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Modelo</label>
             <select
-              value={config.ai_model || "gpt-5-mini"}
-              onChange={(e) => setConfig((c) => ({ ...c, ai_model: e.target.value }))}
+              value={config.ai_model}
+              onChange={(e) => setConfig({ ...config, ai_model: e.target.value })}
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
             >
-              {/* OpenAI */}
-              <option value="gpt-5-mini">GPT-5 mini (recomendado)</option>
-
-              {/* Claude (si lo usas) */}
-              <option value="claude-3-5-sonnet-20240620">Claude 3.5 Sonnet</option>
-              <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku</option>
+              {config.provider === 'openai' ? (
+                <>
+                  <option value="gpt-5-mini">GPT-5 mini (Recomendado)</option>
+                  <option value="gpt-4.1-mini">GPT-4.1 mini</option>
+                </>
+              ) : (
+                <>
+                  <option value="claude-3-5-sonnet">Claude 3.5 Sonnet</option>
+                  <option value="claude-3-5-haiku">Claude 3.5 Haiku</option>
+                </>
+              )}
             </select>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Tokens máximos</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Tokens máximos
+              </label>
               <input
                 type="number"
-                value={config.max_tokens ?? 220}
-                onChange={(e) =>
-                  setConfig((c) => ({ ...c, max_tokens: parseInt(e.target.value || "220", 10) }))
-                }
+                value={config.max_tokens}
+                onChange={(e) => setConfig({ ...config, max_tokens: Number(e.target.value) })}
                 min="80"
-                max="1200"
+                max="800"
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
               />
+              <p className="text-xs text-gray-500 mt-1">Largo máximo de respuesta</p>
             </div>
-
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Temperatura ({Number(config.temperature ?? 0.7).toFixed(1)})
+                Temperatura ({config.temperature})
               </label>
               <input
                 type="range"
-                value={config.temperature ?? 0.7}
+                value={config.temperature}
                 onChange={(e) =>
-                  setConfig((c) => ({ ...c, temperature: parseFloat(e.target.value) }))
+                  setConfig({ ...config, temperature: Number(e.target.value) })
                 }
                 min="0"
                 max="1"
                 step="0.1"
                 className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
               />
+              <p className="text-xs text-gray-500 mt-1">Creatividad/variación</p>
             </div>
           </div>
         </div>
