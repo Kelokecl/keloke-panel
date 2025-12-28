@@ -19,6 +19,7 @@ const NERD_WEBHOOK_URL =
 
 const STORAGE_BUCKET = "whatsapp-media"; // bucket público
 const WA_GRAPH_VERSION = "v21.0";
+const CHILE_TZ = "America/Santiago";
 
 function jsonResponse(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -59,124 +60,174 @@ function randomId() {
 
 /**
  * =========================================================
- *  IA SETTINGS (toggle + horario + contexto)
+ *  IA CONFIG (tu tabla real: whatsapp_ai_config)
  * =========================================================
- *
- * Tabla esperada: public.whatsapp_ai_settings (1 fila)
- * Fallback: si no existe tabla o falla query -> se comporta como antes.
  */
-type AiSettings = {
-  is_enabled: boolean;
-  only_outside_hours: boolean;
-  start_time: string | null; // "HH:MM:SS"
-  end_time: string | null;
-  days: number[] | null; // 1=Lun ... 7=Dom
-  training_context: string | null;
-  provider: string; // "openai" | "claude"
-  model: string; // "gpt-5-mini"
+type WhatsAppAIConfig = {
+  id: number;
+  auto_reply_enabled: boolean;
+  reply_outside_schedule: boolean;
+  start_time: string | null; // "HH:MM"
+  end_time: string | null;   // "HH:MM"
+  days_enabled: string[] | null; // ["1".."7"]
+  training_data: string | null;
+  updated_at: string | null;
 };
 
-function isWithinScheduleLocal(
-  onlyOutside: boolean,
-  start: string | null,
-  end: string | null,
-  days: number[] | null,
-) {
-  // Nota: esto usa la hora local del runtime (Edge).
-  // Si quieres 100% Chile, se puede hacer con TZ fijo + librería, pero esto es suficiente para operar.
-  const now = new Date();
-  const dayJs = now.getDay(); // 0=Dom ... 6=Sab
-  const dayIso = dayJs === 0 ? 7 : dayJs; // 1=Lun ... 7=Dom
+const AI_FALLBACK: Omit<WhatsAppAIConfig, "id"> = {
+  auto_reply_enabled: false,
+  reply_outside_schedule: true,
+  start_time: "09:00",
+  end_time: "18:00",
+  days_enabled: ["1", "2", "3", "4", "5"],
+  training_data: "",
+  updated_at: null,
+};
 
-  if (Array.isArray(days) && days.length > 0 && !days.includes(dayIso)) {
-    return false;
-  }
-
-  if (!start || !end) return true; // sin horario configurado => permitido
-
-  const [sh, sm] = start.split(":").map((x) => parseInt(x, 10));
-  const [eh, em] = end.split(":").map((x) => parseInt(x, 10));
-
-  const startMin = (sh || 0) * 60 + (sm || 0);
-  const endMin = (eh || 0) * 60 + (em || 0);
-  const nowMin = now.getHours() * 60 + now.getMinutes();
-
-  const inRange = startMin <= endMin
-    ? (nowMin >= startMin && nowMin <= endMin)
-    : (nowMin >= startMin || nowMin <= endMin); // cruza medianoche
-
-  return onlyOutside ? !inRange : inRange;
-}
-
-async function loadAiSettings(
+async function loadWhatsAppAIConfig(
   supabase: ReturnType<typeof createClient>,
-): Promise<{ settings: AiSettings; ok: boolean }> {
-  const fallback: AiSettings = {
-    is_enabled: true, // fallback para NO romper comportamiento anterior
-    only_outside_hours: false,
-    start_time: null,
-    end_time: null,
-    days: null,
-    training_context: null,
-    provider: (Deno.env.get("IA_PROVIDER") ?? "openai").toLowerCase(),
-    model: Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini",
-  };
-
+): Promise<{ cfg: (WhatsAppAIConfig | null); ok: boolean }> {
   try {
     const { data, error } = await supabase
-      .from("whatsapp_ai_settings")
+      .from("whatsapp_ai_config")
       .select("*")
       .order("id", { ascending: true })
       .limit(1)
       .maybeSingle();
 
-    if (error || !data) {
-      console.warn("⚠️ No se pudo leer whatsapp_ai_settings (fallback).", error);
-      return { settings: fallback, ok: false };
+    if (error) {
+      console.error("❌ Error leyendo whatsapp_ai_config:", error);
+      return { cfg: null, ok: false };
+    }
+    if (!data) {
+      console.warn("⚠️ No hay fila en whatsapp_ai_config (cfg=null).");
+      return { cfg: null, ok: false };
     }
 
-    const settings: AiSettings = {
-      is_enabled: Boolean(data.is_enabled),
-      only_outside_hours: Boolean(data.only_outside_hours),
-      start_time: data.start_time ?? null,
-      end_time: data.end_time ?? null,
-      days: Array.isArray(data.days) ? data.days : null,
-      training_context: data.training_context ?? null,
-      provider: safeString(data.provider || fallback.provider).toLowerCase(),
-      model: safeString(data.model || fallback.model) || "gpt-5-mini",
+    const cfg: WhatsAppAIConfig = {
+      id: Number(data.id),
+      auto_reply_enabled: Boolean(data.auto_reply_enabled),
+      reply_outside_schedule: Boolean(data.reply_outside_schedule),
+      start_time: safeString(data.start_time) || null,
+      end_time: safeString(data.end_time) || null,
+      days_enabled: Array.isArray(data.days_enabled) ? data.days_enabled : null,
+      training_data: safeString(data.training_data) || null,
+      updated_at: data.updated_at ?? null,
     };
 
-    return { settings, ok: true };
+    return { cfg, ok: true };
   } catch (e) {
-    console.warn("⚠️ Excepción leyendo whatsapp_ai_settings (fallback).", e);
-    return { settings: fallback, ok: false };
+    console.error("❌ Excepción leyendo whatsapp_ai_config:", e);
+    return { cfg: null, ok: false };
   }
 }
 
 /**
+ * Retorna { hhmm, dayId } en TZ Chile.
+ * dayId: "1"=Lun .. "7"=Dom
+ */
+function getChileTimeParts() {
+  const now = new Date();
+
+  const hhmm = new Intl.DateTimeFormat("en-GB", {
+    timeZone: CHILE_TZ,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(now);
+
+  const wk = new Intl.DateTimeFormat("en-US", {
+    timeZone: CHILE_TZ,
+    weekday: "short",
+  }).format(now);
+
+  const map: Record<string, string> = {
+    Mon: "1",
+    Tue: "2",
+    Wed: "3",
+    Thu: "4",
+    Fri: "5",
+    Sat: "6",
+    Sun: "7",
+  };
+
+  return { hhmm, dayId: map[wk] ?? "1" };
+}
+
+/**
+ * Decide si debe responder automáticamente según config.
+ *
+ * - auto_reply_enabled debe ser true
+ * - Si reply_outside_schedule = false => responde SIEMPRE (cuando enabled)
+ * - Si reply_outside_schedule = true => responde SOLO FUERA del horario/días configurados
+ */
+function shouldAutoReplyNow(cfg: WhatsAppAIConfig | null): boolean {
+  if (!cfg) return false;
+
+  if (!cfg.auto_reply_enabled) return false;
+
+  // Si no es "solo fuera del horario", responde siempre
+  if (!cfg.reply_outside_schedule) return true;
+
+  // Si es "solo fuera del horario":
+  const { hhmm, dayId } = getChileTimeParts();
+
+  const start = (cfg.start_time || "09:00").slice(0, 5);
+  const end = (cfg.end_time || "18:00").slice(0, 5);
+
+  const days = Array.isArray(cfg.days_enabled) && cfg.days_enabled.length > 0
+    ? cfg.days_enabled
+    : ["1", "2", "3", "4", "5"];
+
+  const inEnabledDay = days.includes(dayId);
+
+  // si no es día habilitado => consideramos "fuera" => responder
+  if (!inEnabledDay) return true;
+
+  // compara HH:MM lexicográficamente (funciona por ser 2-digit)
+  const insideHours = (hhmm >= start && hhmm <= end);
+
+  // “solo fuera del horario”: responde si NO está dentro de horas
+  return !insideHours;
+}
+
+/**
  * =========================================================
- *  IA: OpenAI (principal) + Claude (opcional)
+ *  IA: OpenAI (Responses API)
  * =========================================================
  */
-async function generateOpenAIReply(userText: string, modelOverride?: string): Promise<string> {
+function buildSystemPrompt(training: string) {
+  // Prompt base + training_data (si viene)
+  const base = [
+    "Eres el asistente de ventas y soporte de Keloke.cl (Chile).",
+    "Objetivo: convertir conversaciones en ventas y resolver dudas rápido.",
+    "Tono: español chileno, cercano y profesional (sin flaitería).",
+    "Formato: respuestas cortas (máx 3–5 líneas).",
+    "Siempre haz 1–2 preguntas para calificar: (qué busca/uso) + (comuna/envío) + (presupuesto si aplica).",
+    "No inventes stock ni tiempos exactos si no los tienes; ofrece enviar link oficial y confirmar.",
+    "Si preguntan precio: da rango orientativo + ofrece mandar link con precio actualizado.",
+    "Cierra con CTA suave: '¿Te mando links y opciones ahora?'",
+  ].join(" ");
+
+  const extra = (training || "").trim();
+  if (!extra) return base;
+
+  return `${base}\n\nCONTEXTO DE ENTRENAMIENTO (usar como guía, sin contradecir):\n${extra}`;
+}
+
+async function generateOpenAIReply(
+  userText: string,
+  training: string,
+): Promise<string> {
   const apiKey = Deno.env.get("OPENAI_API_KEY");
-  const model = modelOverride || (Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini");
+  const model = Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini";
 
   if (!apiKey) {
     console.error("❌ No se encontró OPENAI_API_KEY en Secrets");
-    return "Pucha 😅 tuve un tema técnico. ¿Me dices qué producto buscas y te ayudo al tiro?";
+    return "Pucha 😅 tuve un tema técnico. ¿Me dices qué producto buscas y tu comuna para enviarte opciones?";
   }
 
-  const system = [
-    "Eres el asistente de soporte y ventas de la tienda online Keloke.cl.",
-    "Responde en español chileno, cercano, breve (máx 3–4 líneas).",
-    "Haz 1–2 preguntas para entender necesidad (uso, presupuesto, comuna/envío/tiempo).",
-    "Sugiere 1–2 opciones y ofrece mandar links de productos.",
-    "Si te piden 'qué venden' da categorías y pregunta qué busca.",
-    "No inventes stock específico si no se te dio; ofrece revisar y mandar links.",
-    "Si el cliente pide precio, da rango/estimación y ofrece link exacto.",
-    "Cierra con CTA suave: '¿Te mando links y opciones ahora?'",
-  ].join(" ");
+  const system = buildSystemPrompt(training);
 
   try {
     const res = await fetch("https://api.openai.com/v1/responses", {
@@ -192,80 +243,25 @@ async function generateOpenAIReply(userText: string, modelOverride?: string): Pr
           { role: "user", content: userText },
         ],
         reasoning: { effort: "low" },
-        max_output_tokens: 240,
+        max_output_tokens: 260,
       }),
     });
 
     const raw = await res.text();
     if (!res.ok) {
       console.error("❌ OpenAI error:", res.status, raw);
-      return "Te leo 🙌 ¿Qué producto buscas y tu presupuesto aprox? y te mando opciones al tiro.";
+      return "Te leo 🙌 ¿Qué producto buscas, para qué uso y en qué comuna estás? y te mando opciones al tiro.";
     }
 
     const data = JSON.parse(raw);
     const text = safeString(data?.output_text)?.trim();
     if (text) return text;
 
-    return "Ya bacán 🙌 ¿Qué producto andas buscando (y para qué uso)? Si quieres te mando links al tiro.";
+    return "Ya bacán 🙌 ¿Qué producto andas buscando y para qué uso? ¿En qué comuna estás?";
   } catch (err) {
     console.error("❌ Error llamando OpenAI:", err);
     return "Tu mensaje quedó registrado 🙌 pero tuve un drama con la IA. ¿Qué producto buscas y en qué comuna estás?";
   }
-}
-
-async function generateClaudeReply(userText: string): Promise<string> {
-  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
-  const model = Deno.env.get("ANTHROPIC_MODEL") ?? "claude-3-5-sonnet-20240620";
-
-  if (!apiKey) {
-    console.error("❌ No se encontró ANTHROPIC_API_KEY en Secrets");
-    return "Pucha 😅 tuve un tema técnico. ¿Qué producto buscas y te ayudo al tiro?";
-  }
-
-  try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 260,
-        messages: [
-          {
-            role: "user",
-            content:
-              `Eres el asistente de soporte y ventas de la tienda online Keloke.cl. ` +
-              `Responde en español chileno, cercano, breve (máx 3-4 líneas), ` +
-              `haz 1-2 preguntas para entender y ofrece mandar links.\n\n` +
-              `Mensaje del cliente (WhatsApp): "${userText}"`,
-          },
-        ],
-      }),
-    });
-
-    const raw = await response.text();
-    if (!response.ok) {
-      console.error("❌ Error respuesta Claude:", response.status, raw);
-      return "Te leo 🙌 ¿Me dices qué producto buscas y tu presupuesto aprox? y te mando opciones.";
-    }
-
-    const data = JSON.parse(raw);
-    const text = safeString(data?.content?.[0]?.text)?.trim();
-    return text || "Gracias por escribirnos 🙌 ¿Qué andas buscando? Si quieres te mando links al tiro.";
-  } catch (error) {
-    console.error("❌ Error llamando a Claude:", error);
-    return "Tu mensaje ya quedó registrado 🙌, pero tuve un problema con la IA. ¿Qué producto buscas?";
-  }
-}
-
-async function generateAIReply(userText: string, provider: string, model: string): Promise<string> {
-  const p = (provider || "openai").toLowerCase();
-  if (p === "claude") return await generateClaudeReply(userText);
-  // ✅ OpenAI por defecto, con modelo configurable (gpt-5-mini)
-  return await generateOpenAIReply(userText, model || "gpt-5-mini");
 }
 
 /**
@@ -503,17 +499,20 @@ serve(async (req) => {
     const body = await req.json();
     console.log("📦 Body completo:", JSON.stringify(body, null, 2));
 
-    // 0) Cargar settings IA (si existe tabla)
-    const { settings: aiSettings, ok: aiSettingsOk } = await loadAiSettings(supabase);
-    if (aiSettingsOk) console.log("🤖 IA settings cargados desde DB");
-    else console.log("🤖 IA settings fallback (DB no disponible o sin tabla)");
-
-    const canAnswerBySchedule = isWithinScheduleLocal(
-      aiSettings.only_outside_hours,
-      aiSettings.start_time,
-      aiSettings.end_time,
-      aiSettings.days,
-    );
+    // 0) Cargar config IA real
+    const { cfg: aiCfg, ok: aiOk } = await loadWhatsAppAIConfig(supabase);
+    if (aiOk) {
+      console.log("🤖 whatsapp_ai_config cargado:", {
+        id: aiCfg?.id,
+        auto_reply_enabled: aiCfg?.auto_reply_enabled,
+        reply_outside_schedule: aiCfg?.reply_outside_schedule,
+        start_time: aiCfg?.start_time,
+        end_time: aiCfg?.end_time,
+        days_enabled: aiCfg?.days_enabled,
+      });
+    } else {
+      console.log("⚠️ No se pudo cargar whatsapp_ai_config (o no hay fila).");
+    }
 
     // 1) Buscar conexión WhatsApp activa
     console.log("🟢 PASO 1: Buscando conexión de WhatsApp...");
@@ -705,28 +704,45 @@ serve(async (req) => {
               console.log("✅ Inbound guardado:", insertedInbound?.[0]?.id);
             }
 
-            // 2B) Responder SOLO si es texto, IA habilitada y horario permitido
+            /**
+             * 2B) Responder SOLO si:
+             * - es texto
+             * - cfg auto_reply_enabled=true
+             * - y cumple regla de horario según reply_outside_schedule
+             */
             if (messageType === "text") {
               const userText = (messageData.message || "").trim();
               if (!userText) continue;
 
-              if (!aiSettings.is_enabled) {
-                console.log("⏸️ IA desactivada (is_enabled=false). No respondo automático.");
+              // Fallback si no hay config: NO respondemos automático
+              const effectiveCfg: WhatsAppAIConfig = aiCfg ?? {
+                id: 0,
+                ...AI_FALLBACK,
+              };
+
+              const canReply = shouldAutoReplyNow(effectiveCfg);
+
+              if (!effectiveCfg.auto_reply_enabled) {
+                console.log("⏸️ IA desactivada (auto_reply_enabled=false). No respondo automático.");
                 continue;
               }
 
-              if (!canAnswerBySchedule) {
-                console.log("🕒 Fuera de ventana configurada. No respondo automático.");
+              if (!canReply) {
+                const { hhmm, dayId } = getChileTimeParts();
+                console.log("🕒 Dentro de horario/día configurado (reply_outside_schedule=true). No respondo automático.", {
+                  chile_time: hhmm,
+                  chile_day: dayId,
+                  start_time: effectiveCfg.start_time,
+                  end_time: effectiveCfg.end_time,
+                  days_enabled: effectiveCfg.days_enabled,
+                });
                 continue;
               }
 
-              const training = (aiSettings.training_context || "").trim();
-              const prompt = training
-                ? `CONTEXTO DEL NEGOCIO:\n${training}\n\nMENSAJE CLIENTE:\n${userText}`
-                : userText;
+              const training = (effectiveCfg.training_data || "").trim();
 
-              console.log("🤖 Llamando IA…", { provider: aiSettings.provider, model: aiSettings.model });
-              const aiReply = await generateAIReply(prompt, aiSettings.provider, aiSettings.model);
+              console.log("🤖 Llamando OpenAI…", { model: Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini" });
+              const aiReply = await generateOpenAIReply(userText, training);
               console.log("💬 IA Reply:", aiReply);
 
               const waResponse = await sendWhatsAppTextReply(
@@ -763,7 +779,6 @@ serve(async (req) => {
             const stVal = safeString(status?.status);
             if (!stId || !stVal) continue;
 
-            // ✅ No asumimos columnas extra: solo actualizamos "status"
             await supabase
               .from("whatsapp_messages")
               .update({ status: stVal } as any)
