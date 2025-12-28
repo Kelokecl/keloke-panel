@@ -165,7 +165,10 @@ function buildSystemPrompt(training: string) {
   return base + ctx;
 }
 
-async function generateOpenAIReply(userText: string, modelOverride?: string): Promise<string> {
+async function generateOpenAIReply(
+  userText: string,
+  modelOverride?: string,
+): Promise<string> {
   const apiKey = Deno.env.get("OPENAI_API_KEY");
   const model = modelOverride || (Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini");
 
@@ -174,13 +177,13 @@ async function generateOpenAIReply(userText: string, modelOverride?: string): Pr
     return "Pucha 😅 tuve un tema técnico. ¿Me dices qué producto buscas y te ayudo al tiro?";
   }
 
-  const instructions = [
+  const system = [
     "Eres el asistente de soporte y ventas de la tienda online Keloke.cl (Chile).",
     "Responde en español chileno, cercano, breve (máx 3–4 líneas).",
     "Haz 1–2 preguntas para entender necesidad (uso, presupuesto, comuna/envío).",
-    "Sugiere 1–2 opciones y ofrece mandar links de productos.",
-    "No inventes stock específico si no se te dio; ofrece revisar y mandar links.",
-    "Cierra con CTA suave: '¿Te mando links y opciones ahora?'"
+    "Sugiere 1–2 opciones y ofrece mandar links.",
+    "No inventes stock ni precios exactos si no los tienes; ofrece mandar link con precio real.",
+    "Cierra con CTA suave: '¿Te mando 2 links ahora?'",
   ].join(" ");
 
   try {
@@ -192,37 +195,56 @@ async function generateOpenAIReply(userText: string, modelOverride?: string): Pr
       },
       body: JSON.stringify({
         model,
-        // ✅ En Responses API el parámetro correcto es ESTE:
-        max_output_tokens: 240, // <-- NO max_tokens, NO max_completion_tokens
-        instructions,
+        // ✅ En Responses API, usa "instructions" + "input"
+        instructions: system,
         input: userText,
-        // Opcional: para que no se ponga a “pensar” de más
+
+        // ✅ ESTE es el parámetro correcto (no max_tokens, no max_completion_tokens)
+        max_output_tokens: 240,
+
+        // Opcional
         reasoning: { effort: "low" },
+        temperature: 0.7,
       }),
     });
 
     const raw = await res.text();
+
     if (!res.ok) {
       console.error("❌ OpenAI error:", res.status, raw);
-      return "Te leo 🙌 ¿Me dices cuántas personas son, presupuesto aprox y tu comuna? y te mando 2 opciones con link.";
+      return "Te leo 🙌 ¿Qué producto buscas y tu presupuesto aprox? y te mando 2 opciones con link.";
     }
 
     const data = JSON.parse(raw);
 
-    // ✅ extracción robusta (cambia según versión, así que cubrimos varias)
-    const t1 = typeof data?.output_text === "string" ? data.output_text : "";
-    const t2 =
-      data?.output?.find?.((x: any) => x?.type === "message")?.content?.find?.((c: any) => c?.type === "output_text")?.text ?? "";
-    const text = (t1 || t2 || "").trim();
+    // ✅ Parse robusto (sin depender de output_text “SDK-only”)
+    const text =
+      (typeof data?.output_text === "string" && data.output_text.trim()) ||
+      (() => {
+        const out = Array.isArray(data?.output) ? data.output : [];
+        for (const item of out) {
+          const content = item?.content;
+          if (Array.isArray(content)) {
+            for (const c of content) {
+              if (c?.type === "output_text" && typeof c?.text === "string") {
+                const t = c.text.trim();
+                if (t) return t;
+              }
+            }
+          }
+        }
+        return "";
+      })();
 
     if (text) return text;
 
-    return "Ya bacán 🙌 ¿Qué producto andas buscando y para qué uso? ¿En qué comuna estás?";
+    return "Ya bacán 🙌 ¿Qué producto andas buscando y en qué comuna estás? Te mando 2 links al tiro.";
   } catch (err) {
     console.error("❌ Error llamando OpenAI:", err);
     return "Tu mensaje quedó registrado 🙌 pero tuve un drama con la IA. ¿Qué producto buscas y en qué comuna estás?";
   }
 }
+
 
 /**
  * =========================================================
