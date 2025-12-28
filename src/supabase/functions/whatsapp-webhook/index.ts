@@ -165,23 +165,29 @@ function buildSystemPrompt(training: string) {
   return base + ctx;
 }
 
-async function generateOpenAIReply(args: {
-  system: string;
-  conversation: { role: "user" | "assistant"; content: string }[];
-  model?: string;
-  maxTokens?: number;
-  temperature?: number;
-}): Promise<string> {
+async function generateOpenAIReply(
+  userText: string,
+  modelOverride?: string,
+): Promise<string> {
   const apiKey = Deno.env.get("OPENAI_API_KEY");
-  const model = args.model || (Deno.env.get("OPENAI_MODEL") ?? "gpt-4o-mini");
+  const model = modelOverride || "gpt-5-mini";
 
   if (!apiKey) {
-    console.error("❌ Falta OPENAI_API_KEY en Supabase Secrets");
-    return "Pucha 😅 tuve un tema técnico. ¿Me dices qué modelo de freidora buscas (tamaño/personas) y tu comuna?";
+    console.error("❌ No OPENAI_API_KEY");
+    return "Pucha 😅 tuvimos un problema técnico. ¿Qué producto buscas?";
   }
 
+  const systemPrompt = `
+Eres el asistente de ventas y soporte de Keloke.cl (Chile).
+- Español chileno, cercano.
+- Máx 3–4 líneas.
+- Haz 1–2 preguntas.
+- Sugiere productos reales.
+- Cierra con CTA suave.
+`;
+
   try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    const res = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -189,27 +195,38 @@ async function generateOpenAIReply(args: {
       },
       body: JSON.stringify({
         model,
-        messages: [
-          { role: "system", content: args.system },
-          ...args.conversation,
+        input: [
+          {
+            role: "system",
+            content: systemPrompt,
+          },
+          {
+            role: "user",
+            content: userText,
+          },
         ],
-        temperature: typeof args.temperature === "number" ? args.temperature : 0.6,
-        max_tokens: args.maxTokens ?? 260,
+        max_completion_tokens: 220, // ✅ ESTE ES EL FIX CLAVE
       }),
     });
 
     const raw = await res.text();
+
     if (!res.ok) {
-      console.error("❌ OpenAI error:", res.status, raw);
-      return "Te leo 🙌 ¿Cuántas personas son y qué presupuesto aprox? así te mando 2 opciones con link.";
+      console.error("❌ OpenAI error:", raw);
+      return "Te leo 🙌 ¿Qué producto buscas y en qué comuna estás?";
     }
 
     const data = JSON.parse(raw);
-    const text = safeString(data?.choices?.[0]?.message?.content)?.trim();
-    return text || "Ya bacán 🙌 ¿Cuántas personas son y tu presupuesto aprox? así te mando opciones con link.";
-  } catch (e) {
-    console.error("❌ Error llamando OpenAI:", e);
-    return "Tu mensaje quedó 🙌 pero tuve un drama con la IA. ¿Cuántas personas son y tu comuna?";
+    const text = data?.output_text?.trim();
+
+    if (!text) {
+      return "Buenísimo 🙌 ¿Qué producto estás buscando?";
+    }
+
+    return text;
+  } catch (err) {
+    console.error("❌ OpenAI exception:", err);
+    return "Tu mensaje llegó 🙌 ¿Qué producto buscas?";
   }
 }
 
