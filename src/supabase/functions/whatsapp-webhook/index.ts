@@ -70,7 +70,7 @@ type AiConfig = {
 };
 
 const DEFAULT_AI_CONFIG: AiConfig = {
-  auto_reply_enabled: false,
+  auto_reply_enabled: true,
   reply_outside_schedule: true,
   start_time: "09:00",
   end_time: "18:00",
