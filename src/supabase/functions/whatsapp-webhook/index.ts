@@ -13,13 +13,14 @@ const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
 };
 
-// ✅ Nerd (destino externo). Si lo apuntas a ti mismo, lo saltamos para evitar loop.
-const NERD_WEBHOOK_URL =
-  "https://nffeqekvvqsqwbjrmkjs.supabase.co/functions/v1/whatsapp-webhook";
-
-const STORAGE_BUCKET = "whatsapp-media"; // bucket público
 const WA_GRAPH_VERSION = "v21.0";
-const CHILE_TZ = "America/Santiago";
+const STORAGE_BUCKET = "whatsapp-media";
+
+/**
+ * (Dejamos Nerd para después)
+ * Si quieres activar forwarding luego, pon una URL real aquí.
+ */
+const NERD_WEBHOOK_URL = ""; // e.g. "https://nerd.../functions/v1/whatsapp-webhook"
 
 function jsonResponse(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -27,11 +28,13 @@ function jsonResponse(data: unknown, status = 200) {
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
 }
-
 function safeString(v: unknown) {
   return typeof v === "string" ? v : "";
 }
-
+function safeNumber(v: unknown, d = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+}
 function mimeToExt(mimeRaw: string): string {
   const mime = (mimeRaw || "").split(";")[0].trim().toLowerCase();
   const map: Record<string, string> = {
@@ -53,40 +56,63 @@ function mimeToExt(mimeRaw: string): string {
   if (slash > -1) return mime.slice(slash + 1) || "bin";
   return "bin";
 }
-
 function randomId() {
   return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
 /**
  * =========================================================
- *  IA CONFIG (tu tabla real: whatsapp_ai_config)
+ *  IA SETTINGS (tu tabla real: whatsapp_ai_config)
  * =========================================================
  */
-type WhatsAppAIConfig = {
-  id: number;
+type AiConfig = {
   auto_reply_enabled: boolean;
   reply_outside_schedule: boolean;
   start_time: string | null; // "HH:MM"
   end_time: string | null;   // "HH:MM"
-  days_enabled: string[] | null; // ["1".."7"]
+  days_enabled: string[] | null; // ["1","2","3"...] 1=Lun ... 7=Dom
   training_data: string | null;
-  updated_at: string | null;
 };
 
-const AI_FALLBACK: Omit<WhatsAppAIConfig, "id"> = {
+const DEFAULT_AI_CONFIG: AiConfig = {
   auto_reply_enabled: false,
   reply_outside_schedule: true,
   start_time: "09:00",
   end_time: "18:00",
   days_enabled: ["1", "2", "3", "4", "5"],
   training_data: "",
-  updated_at: null,
 };
 
-async function loadWhatsAppAIConfig(
-  supabase: ReturnType<typeof createClient>,
-): Promise<{ cfg: (WhatsAppAIConfig | null); ok: boolean }> {
+function isWithinScheduleLocal(cfg: AiConfig): boolean {
+  // day: 1=Lun ... 7=Dom
+  const now = new Date();
+  const dayJs = now.getDay(); // 0=Dom..6=Sab
+  const dayIso = dayJs === 0 ? 7 : dayJs;
+
+  if (Array.isArray(cfg.days_enabled) && cfg.days_enabled.length > 0) {
+    if (!cfg.days_enabled.includes(String(dayIso))) return false;
+  }
+
+  const start = cfg.start_time;
+  const end = cfg.end_time;
+  if (!start || !end) return true;
+
+  const [sh, sm] = start.split(":").map((x) => parseInt(x, 10));
+  const [eh, em] = end.split(":").map((x) => parseInt(x, 10));
+
+  const startMin = (sh || 0) * 60 + (sm || 0);
+  const endMin = (eh || 0) * 60 + (em || 0);
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+
+  const inRange = startMin <= endMin
+    ? (nowMin >= startMin && nowMin <= endMin)
+    : (nowMin >= startMin || nowMin <= endMin);
+
+  // Si reply_outside_schedule=true => responde fuera del horario
+  return cfg.reply_outside_schedule ? !inRange : inRange;
+}
+
+async function loadAiConfig(supabase: ReturnType<typeof createClient>): Promise<AiConfig> {
   try {
     const { data, error } = await supabase
       .from("whatsapp_ai_config")
@@ -95,142 +121,67 @@ async function loadWhatsAppAIConfig(
       .limit(1)
       .maybeSingle();
 
-    if (error) {
-      console.error("❌ Error leyendo whatsapp_ai_config:", error);
-      return { cfg: null, ok: false };
-    }
-    if (!data) {
-      console.warn("⚠️ No hay fila en whatsapp_ai_config (cfg=null).");
-      return { cfg: null, ok: false };
+    if (error || !data) {
+      console.warn("⚠️ No pude leer whatsapp_ai_config, uso defaults.", error);
+      return { ...DEFAULT_AI_CONFIG };
     }
 
-    const cfg: WhatsAppAIConfig = {
-      id: Number(data.id),
+    return {
       auto_reply_enabled: Boolean(data.auto_reply_enabled),
       reply_outside_schedule: Boolean(data.reply_outside_schedule),
-      start_time: safeString(data.start_time) || null,
-      end_time: safeString(data.end_time) || null,
-      days_enabled: Array.isArray(data.days_enabled) ? data.days_enabled : null,
-      training_data: safeString(data.training_data) || null,
-      updated_at: data.updated_at ?? null,
+      start_time: data.start_time ?? DEFAULT_AI_CONFIG.start_time,
+      end_time: data.end_time ?? DEFAULT_AI_CONFIG.end_time,
+      days_enabled: Array.isArray(data.days_enabled) ? data.days_enabled : DEFAULT_AI_CONFIG.days_enabled,
+      training_data: data.training_data ?? DEFAULT_AI_CONFIG.training_data,
     };
-
-    return { cfg, ok: true };
   } catch (e) {
-    console.error("❌ Excepción leyendo whatsapp_ai_config:", e);
-    return { cfg: null, ok: false };
+    console.warn("⚠️ Excepción leyendo whatsapp_ai_config, uso defaults.", e);
+    return { ...DEFAULT_AI_CONFIG };
   }
 }
 
 /**
- * Retorna { hhmm, dayId } en TZ Chile.
- * dayId: "1"=Lun .. "7"=Dom
- */
-function getChileTimeParts() {
-  const now = new Date();
-
-  const hhmm = new Intl.DateTimeFormat("en-GB", {
-    timeZone: CHILE_TZ,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(now);
-
-  const wk = new Intl.DateTimeFormat("en-US", {
-    timeZone: CHILE_TZ,
-    weekday: "short",
-  }).format(now);
-
-  const map: Record<string, string> = {
-    Mon: "1",
-    Tue: "2",
-    Wed: "3",
-    Thu: "4",
-    Fri: "5",
-    Sat: "6",
-    Sun: "7",
-  };
-
-  return { hhmm, dayId: map[wk] ?? "1" };
-}
-
-/**
- * Decide si debe responder automáticamente según config.
- *
- * - auto_reply_enabled debe ser true
- * - Si reply_outside_schedule = false => responde SIEMPRE (cuando enabled)
- * - Si reply_outside_schedule = true => responde SOLO FUERA del horario/días configurados
- */
-function shouldAutoReplyNow(cfg: WhatsAppAIConfig | null): boolean {
-  if (!cfg) return false;
-
-  if (!cfg.auto_reply_enabled) return false;
-
-  // Si no es "solo fuera del horario", responde siempre
-  if (!cfg.reply_outside_schedule) return true;
-
-  // Si es "solo fuera del horario":
-  const { hhmm, dayId } = getChileTimeParts();
-
-  const start = (cfg.start_time || "09:00").slice(0, 5);
-  const end = (cfg.end_time || "18:00").slice(0, 5);
-
-  const days = Array.isArray(cfg.days_enabled) && cfg.days_enabled.length > 0
-    ? cfg.days_enabled
-    : ["1", "2", "3", "4", "5"];
-
-  const inEnabledDay = days.includes(dayId);
-
-  // si no es día habilitado => consideramos "fuera" => responder
-  if (!inEnabledDay) return true;
-
-  // compara HH:MM lexicográficamente (funciona por ser 2-digit)
-  const insideHours = (hhmm >= start && hhmm <= end);
-
-  // “solo fuera del horario”: responde si NO está dentro de horas
-  return !insideHours;
-}
-
-/**
  * =========================================================
- *  IA: OpenAI (Responses API)
+ *  OpenAI (Chat Completions) + contexto con historial
  * =========================================================
  */
 function buildSystemPrompt(training: string) {
-  // Prompt base + training_data (si viene)
-  const base = [
-    "Eres el asistente de ventas y soporte de Keloke.cl (Chile).",
-    "Objetivo: convertir conversaciones en ventas y resolver dudas rápido.",
-    "Tono: español chileno, cercano y profesional (sin flaitería).",
-    "Formato: respuestas cortas (máx 3–5 líneas).",
-    "Siempre haz 1–2 preguntas para calificar: (qué busca/uso) + (comuna/envío) + (presupuesto si aplica).",
-    "No inventes stock ni tiempos exactos si no los tienes; ofrece enviar link oficial y confirmar.",
-    "Si preguntan precio: da rango orientativo + ofrece mandar link con precio actualizado.",
-    "Cierra con CTA suave: '¿Te mando links y opciones ahora?'",
-  ].join(" ");
+  const base =
+    [
+      "Eres el asistente de ventas y soporte de Keloke.cl (Chile).",
+      "Hablas en español chileno, cercano y profesional.",
+      "Respondes corto y útil (máx 4-6 líneas), sin textos eternos.",
+      "Tu objetivo: convertir la conversación en venta y resolver dudas rápido.",
+      "Haz 1-2 preguntas SOLO si faltan datos clave (capacidad, presupuesto, comuna, urgencia).",
+      "Si ya te dieron comuna/producto, NO vuelvas a pedir lo mismo: avanza.",
+      "No inventes stock ni promesas raras; ofrece links y confirmación.",
+      "Siempre cierra con CTA suave.",
+    ].join(" ");
 
-  const extra = (training || "").trim();
-  if (!extra) return base;
+  const ctx = training?.trim()
+    ? `\n\nCONTEXTO DEL NEGOCIO (para usar en respuestas):\n${training.trim()}`
+    : "";
 
-  return `${base}\n\nCONTEXTO DE ENTRENAMIENTO (usar como guía, sin contradecir):\n${extra}`;
+  return base + ctx;
 }
 
-async function generateOpenAIReply(
-  userText: string,
-  training: string,
-): Promise<string> {
+async function generateOpenAIReply(args: {
+  system: string;
+  conversation: { role: "user" | "assistant"; content: string }[];
+  model?: string;
+  maxTokens?: number;
+  temperature?: number;
+}): Promise<string> {
   const apiKey = Deno.env.get("OPENAI_API_KEY");
-  const model = Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini";
+  const model = args.model || (Deno.env.get("OPENAI_MODEL") ?? "gpt-4o-mini");
 
   if (!apiKey) {
-    console.error("❌ No se encontró OPENAI_API_KEY en Secrets");
-    return "Pucha 😅 tuve un tema técnico. ¿Me dices qué producto buscas y tu comuna para enviarte opciones?";
+    console.error("❌ Falta OPENAI_API_KEY en Supabase Secrets");
+    return "Pucha 😅 tuve un tema técnico. ¿Me dices qué modelo de freidora buscas (tamaño/personas) y tu comuna?";
   }
 
-  const system = buildSystemPrompt(training);
-
   try {
-    const res = await fetch("https://api.openai.com/v1/responses", {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -238,29 +189,27 @@ async function generateOpenAIReply(
       },
       body: JSON.stringify({
         model,
-        input: [
-          { role: "developer", content: system },
-          { role: "user", content: userText },
+        messages: [
+          { role: "system", content: args.system },
+          ...args.conversation,
         ],
-        reasoning: { effort: "low" },
-        max_output_tokens: 260,
+        temperature: typeof args.temperature === "number" ? args.temperature : 0.6,
+        max_tokens: args.maxTokens ?? 260,
       }),
     });
 
     const raw = await res.text();
     if (!res.ok) {
       console.error("❌ OpenAI error:", res.status, raw);
-      return "Te leo 🙌 ¿Qué producto buscas, para qué uso y en qué comuna estás? y te mando opciones al tiro.";
+      return "Te leo 🙌 ¿Cuántas personas son y qué presupuesto aprox? así te mando 2 opciones con link.";
     }
 
     const data = JSON.parse(raw);
-    const text = safeString(data?.output_text)?.trim();
-    if (text) return text;
-
-    return "Ya bacán 🙌 ¿Qué producto andas buscando y para qué uso? ¿En qué comuna estás?";
-  } catch (err) {
-    console.error("❌ Error llamando OpenAI:", err);
-    return "Tu mensaje quedó registrado 🙌 pero tuve un drama con la IA. ¿Qué producto buscas y en qué comuna estás?";
+    const text = safeString(data?.choices?.[0]?.message?.content)?.trim();
+    return text || "Ya bacán 🙌 ¿Cuántas personas son y tu presupuesto aprox? así te mando opciones con link.";
+  } catch (e) {
+    console.error("❌ Error llamando OpenAI:", e);
+    return "Tu mensaje quedó 🙌 pero tuve un drama con la IA. ¿Cuántas personas son y tu comuna?";
   }
 }
 
@@ -285,8 +234,6 @@ async function sendWhatsAppTextReply(
     text: { body: text },
   };
 
-  console.log("📤 Enviando respuesta a WhatsApp:", JSON.stringify(body));
-
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -297,70 +244,34 @@ async function sendWhatsAppTextReply(
   });
 
   const raw = await res.text();
-
   if (!res.ok) {
     console.error("❌ Error enviando WhatsApp:", res.status, raw);
     throw new Error(`WhatsApp send failed: ${res.status} ${raw}`);
   }
 
-  try {
-    const json = JSON.parse(raw);
-    console.log("✅ Respuesta WhatsApp OK:", json);
-    return json;
-  } catch {
-    console.log("✅ Respuesta WhatsApp (texto plano):", raw);
-    return null;
-  }
+  try { return JSON.parse(raw); } catch { return null; }
 }
 
 /**
  * =========================================================
- *  MEDIA (INBOUND): media_id -> meta(url) -> binary -> Storage -> publicUrl
+ *  MEDIA (INBOUND)
  * =========================================================
  */
 async function fetchWhatsAppMediaMeta(mediaId: string, accessToken: string) {
   const url = `https://graph.facebook.com/${WA_GRAPH_VERSION}/${mediaId}`;
-  const res = await fetch(url, {
-    method: "GET",
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
   const raw = await res.text();
-  let json: any = null;
-  try {
-    json = JSON.parse(raw);
-  } catch {
-    // ignore
-  }
-
-  if (!res.ok) {
-    console.error("❌ [MEDIA_META] Error:", res.status, raw);
-    throw new Error(json?.error?.message || `Media meta failed ${res.status}`);
-  }
-
+  const json = (() => { try { return JSON.parse(raw); } catch { return null; } })();
+  if (!res.ok) throw new Error(json?.error?.message || `Media meta failed ${res.status}`);
   if (!json?.url) throw new Error("Media meta sin url");
   return json;
 }
-
-async function downloadWhatsAppMediaBinary(
-  mediaUrl: string,
-  accessToken: string,
-) {
-  const res = await fetch(mediaUrl, {
-    method: "GET",
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    console.error("❌ [MEDIA_BIN] Error:", res.status, t);
-    throw new Error(`Media binary download failed ${res.status}`);
-  }
-
+async function downloadWhatsAppMediaBinary(mediaUrl: string, accessToken: string) {
+  const res = await fetch(mediaUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+  if (!res.ok) throw new Error(`Media binary download failed ${res.status}`);
   const ab = await res.arrayBuffer();
   return new Uint8Array(ab);
 }
-
 async function uploadToStorageAndGetPublicUrl(
   supabase: ReturnType<typeof createClient>,
   filePath: string,
@@ -368,77 +279,79 @@ async function uploadToStorageAndGetPublicUrl(
   mimeType: string,
 ) {
   const blob = new Blob([bytes], { type: mimeType });
-
-  const { error: upErr } = await supabase.storage
+  const { error } = await supabase.storage
     .from(STORAGE_BUCKET)
-    .upload(filePath, blob, {
-      contentType: mimeType,
-      upsert: false,
-    });
+    .upload(filePath, blob, { contentType: mimeType, upsert: false });
+  if (error) throw new Error("No se pudo subir a storage");
 
-  if (upErr) {
-    console.error("❌ [STORAGE] Upload error:", upErr);
-    throw new Error("No se pudo subir a storage");
-  }
-
-  const { data: pub } = supabase.storage
-    .from(STORAGE_BUCKET)
-    .getPublicUrl(filePath);
-
-  const publicUrl = pub?.publicUrl;
-  if (!publicUrl) throw new Error("No se pudo obtener publicUrl");
-  return publicUrl;
+  const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(filePath);
+  if (!data?.publicUrl) throw new Error("No se pudo obtener publicUrl");
+  return data.publicUrl;
 }
-
-type MediaResult = {
-  publicUrl: string;
-  mimeType: string;
-  fileName: string;
-  size: number;
-  mediaId: string;
-};
-
 async function handleInboundMedia(
   supabase: ReturnType<typeof createClient>,
   accessToken: string,
   messageType: string,
   message: any,
-): Promise<MediaResult | null> {
+) {
   let mediaId = "";
-
   if (messageType === "audio") mediaId = safeString(message?.audio?.id);
   else if (messageType === "image") mediaId = safeString(message?.image?.id);
   else if (messageType === "video") mediaId = safeString(message?.video?.id);
   else if (messageType === "document") mediaId = safeString(message?.document?.id);
   else if (messageType === "sticker") mediaId = safeString(message?.sticker?.id);
-
   if (!mediaId) return null;
 
   const meta = await fetchWhatsAppMediaMeta(mediaId, accessToken);
   const mediaUrl = safeString(meta?.url);
   const mimeType = safeString(meta?.mime_type) || "application/octet-stream";
   const ext = mimeToExt(mimeType);
-
   const bytes = await downloadWhatsAppMediaBinary(mediaUrl, accessToken);
 
-  // ✅ ordenado por carpetas
   const fileName = `${messageType}_in_${randomId()}_${mediaId}.${ext}`;
   const filePath = `${messageType}/inbound/${fileName}`;
+  const publicUrl = await uploadToStorageAndGetPublicUrl(supabase, filePath, bytes, mimeType);
 
-  const publicUrl = await uploadToStorageAndGetPublicUrl(
-    supabase,
-    filePath,
-    bytes,
-    mimeType,
-  );
+  return { publicUrl, mimeType, fileName, size: bytes.length, mediaId };
+}
 
-  return {
-    publicUrl,
-    mimeType,
-    fileName,
-    size: bytes.length,
-    mediaId,
-  };
+/**
+ * =========================================================
+ *  Historial para que NO repita
+ * =========================================================
+ */
+async function buildConversationFromDB(
+  supabase: ReturnType<typeof createClient>,
+  phone: string,
+  userText: string,
+) {
+  // Traemos últimos N mensajes para dar contexto (evita “reinicio”)
+  const { data } = await supabase
+    .from("whatsapp_messages")
+    .select("direction,message,created_at")
+    .eq("phone_number", phone)
+    .order("created_at", { ascending: false })
+    .limit(12);
+
+  const ordered = (data || []).slice().reverse();
+
+  const conversation: { role: "user" | "assistant"; content: string }[] = [];
+  for (const row of ordered) {
+    const dir = safeString(row.direction);
+    const msg = safeString(row.message);
+    if (!msg) continue;
+    conversation.push({
+      role: dir === "outbound" ? "assistant" : "user",
+      content: msg,
+    });
+  }
+
+  // Asegura que el último input sea el del usuario actual (por si DB demora)
+  if (!conversation.length || conversation[conversation.length - 1].role !== "user") {
+    conversation.push({ role: "user", content: userText });
+  }
+
+  return conversation;
 }
 
 /**
@@ -447,75 +360,39 @@ async function handleInboundMedia(
  * =========================================================
  */
 serve(async (req) => {
-  // CORS preflight
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
-  }
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
-  // GET verify token (Meta)
+  // Verify (Meta)
   if (req.method === "GET") {
-    try {
-      const url = new URL(req.url);
-      const mode = url.searchParams.get("hub.mode");
-      const token = url.searchParams.get("hub.verify_token");
-      const challenge = url.searchParams.get("hub.challenge");
+    const url = new URL(req.url);
+    const mode = url.searchParams.get("hub.mode");
+    const token = url.searchParams.get("hub.verify_token");
+    const challenge = url.searchParams.get("hub.challenge");
+    const VERIFY_TOKEN = Deno.env.get("WHATSAPP_VERIFY_TOKEN") ?? "keloke_webhook_token";
 
-      const VERIFY_TOKEN =
-        Deno.env.get("WHATSAPP_VERIFY_TOKEN") ?? "keloke_webhook_token";
-
-      if (mode === "subscribe" && token === VERIFY_TOKEN) {
-        console.log("✅ Webhook verificado correctamente");
-        return new Response(challenge ?? "", {
-          status: 200,
-          headers: { "Content-Type": "text/plain" },
-        });
-      }
-      return new Response("Forbidden", { status: 403 });
-    } catch (e) {
-      console.error("❌ Error GET verification:", e);
-      return new Response("Error in GET verification", { status: 500 });
+    if (mode === "subscribe" && token === VERIFY_TOKEN) {
+      return new Response(challenge ?? "", { status: 200, headers: { "Content-Type": "text/plain" } });
     }
+    return new Response("Forbidden", { status: 403 });
   }
 
-  // POST webhook
-  if (req.method !== "POST") {
-    return new Response("Method not allowed", { status: 405 });
-  }
+  if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
 
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
     if (!supabaseUrl || !supabaseServiceKey) {
-      console.error("❌ Falta SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY");
       return jsonResponse({ error: "Missing Supabase secrets" }, 500);
     }
-
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("📥 WEBHOOK RECIBIDO - INICIO PROCESAMIENTO");
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
     const body = await req.json();
-    console.log("📦 Body completo:", JSON.stringify(body, null, 2));
 
-    // 0) Cargar config IA real
-    const { cfg: aiCfg, ok: aiOk } = await loadWhatsAppAIConfig(supabase);
-    if (aiOk) {
-      console.log("🤖 whatsapp_ai_config cargado:", {
-        id: aiCfg?.id,
-        auto_reply_enabled: aiCfg?.auto_reply_enabled,
-        reply_outside_schedule: aiCfg?.reply_outside_schedule,
-        start_time: aiCfg?.start_time,
-        end_time: aiCfg?.end_time,
-        days_enabled: aiCfg?.days_enabled,
-      });
-    } else {
-      console.log("⚠️ No se pudo cargar whatsapp_ai_config (o no hay fila).");
-    }
+    // 0) Config IA (tu tabla)
+    const aiCfg = await loadAiConfig(supabase);
+    const canAnswerBySchedule = isWithinScheduleLocal(aiCfg);
 
-    // 1) Buscar conexión WhatsApp activa
-    console.log("🟢 PASO 1: Buscando conexión de WhatsApp...");
+    // 1) Conexión WhatsApp activa
     const { data: connection, error: connError } = await supabase
       .from("social_connections")
       .select("*")
@@ -525,34 +402,16 @@ serve(async (req) => {
       .maybeSingle();
 
     if (connError || !connection) {
-      console.error("❌ ERROR: No se encontró conexión WhatsApp activa");
-      return jsonResponse(
-        {
-          error: "No WhatsApp connection found (platform=whatsapp, is_active=true)",
-          details: connError ?? null,
-        },
-        500,
-      );
+      return jsonResponse({ error: "No WhatsApp connection found", details: connError ?? null }, 500);
     }
 
     const accessToken = safeString(connection.access_token);
     const phoneNumberId = safeString(connection.phone_number_id);
-
     if (!accessToken || !phoneNumberId) {
-      console.error("❌ Conexión incompleta: falta access_token o phone_number_id");
-      return jsonResponse(
-        { error: "WhatsApp connection missing access_token/phone_number_id" },
-        500,
-      );
+      return jsonResponse({ error: "WhatsApp connection missing access_token/phone_number_id" }, 500);
     }
 
-    console.log("✅ Conexión encontrada:", {
-      id: connection.id,
-      platform: connection.platform,
-      is_active: connection.is_active,
-    });
-
-    // 2) Procesar entradas
+    // 2) Procesar cambios
     for (const entry of body.entry || []) {
       for (const change of entry.changes || []) {
         const value = change.value;
@@ -560,16 +419,14 @@ serve(async (req) => {
         // 2A) Mensajes entrantes
         if (value?.messages) {
           for (const message of value.messages) {
-            console.log("📨 Procesando mensaje:", message);
-
             const fromPhone = safeString(message.from);
             const messageType = safeString(message.type);
             const messageId = safeString(message.id);
             const timestamp = safeString(message.timestamp);
 
-            if (!fromPhone || !messageId || !messageType) continue;
+            if (!fromPhone || !messageType || !messageId) continue;
 
-            // ✅ Idempotencia: si ya guardamos este inbound, saltar
+            // Idempotencia inbound
             const { data: existingMsg } = await supabase
               .from("whatsapp_messages")
               .select("id")
@@ -578,53 +435,31 @@ serve(async (req) => {
               .limit(1)
               .maybeSingle();
 
-            if (existingMsg?.id) {
-              console.log("⏭️ Ya existe inbound, salto:", messageId);
-              continue;
-            }
+            if (existingMsg?.id) continue;
 
-            // Contacto
             const lastMessageAt = timestamp
               ? new Date(parseInt(timestamp) * 1000).toISOString()
               : new Date().toISOString();
 
-            const { data: existingContact, error: contactSelectError } =
-              await supabase
-                .from("whatsapp_contacts")
-                .select("*")
-                .eq("phone_number", fromPhone)
-                .maybeSingle();
-
-            if (contactSelectError) {
-              console.error("❌ Error buscando contacto:", contactSelectError);
-            }
+            // Contacto upsert simple (sin tocar id identity)
+            const { data: existingContact } = await supabase
+              .from("whatsapp_contacts")
+              .select("id")
+              .eq("phone_number", fromPhone)
+              .maybeSingle();
 
             if (!existingContact) {
-              const name =
-                safeString(value?.contacts?.[0]?.profile?.name) || fromPhone;
-              const { error: insertContactError } = await supabase
-                .from("whatsapp_contacts")
-                .insert({
-                  phone_number: fromPhone,
-                  contact_name: name,
-                  last_message_at: lastMessageAt,
-                });
-
-              if (insertContactError) {
-                console.error("❌ Error creando contacto:", insertContactError);
-              }
+              const name = safeString(value?.contacts?.[0]?.profile?.name) || fromPhone;
+              await supabase.from("whatsapp_contacts").insert({
+                phone_number: fromPhone,
+                contact_name: name,
+                last_message_at: lastMessageAt,
+              });
             } else {
-              const { error: updateContactError } = await supabase
-                .from("whatsapp_contacts")
-                .update({ last_message_at: lastMessageAt })
+              await supabase.from("whatsapp_contacts").update({ last_message_at: lastMessageAt })
                 .eq("phone_number", fromPhone);
-
-              if (updateContactError) {
-                console.error("❌ Error actualizando contacto:", updateContactError);
-              }
             }
 
-            // Construir data inbound base
             const messageData: any = {
               phone_number: fromPhone,
               direction: "inbound",
@@ -634,11 +469,9 @@ serve(async (req) => {
               platform_response: message,
             };
 
-            // Texto
             if (messageType === "text") {
               messageData.message = safeString(message.text?.body) || "";
             } else {
-              // caption si aplica
               let caption = "";
               if (messageType === "image") caption = safeString(message?.image?.caption);
               if (messageType === "video") caption = safeString(message?.video?.caption);
@@ -646,113 +479,56 @@ serve(async (req) => {
               messageData.message = caption || `Mensaje de tipo ${messageType} recibido`;
             }
 
-            // ✅ MEDIA inbound completo
-            if (
-              messageType === "audio" ||
-              messageType === "image" ||
-              messageType === "video" ||
-              messageType === "document" ||
-              messageType === "sticker"
-            ) {
+            // Media inbound
+            if (["audio", "image", "video", "document", "sticker"].includes(messageType)) {
               try {
-                console.log("🎯 [MEDIA] Detectado tipo:", messageType);
-
-                const media = await handleInboundMedia(
-                  supabase,
-                  accessToken,
-                  messageType,
-                  message,
-                );
-
+                const media = await handleInboundMedia(supabase, accessToken, messageType, message);
                 if (media) {
                   messageData.media_url = media.publicUrl;
                   messageData.media_mime_type = media.mimeType;
                   messageData.media_filename = media.fileName;
                   messageData.media_size = media.size;
                   messageData.media_id = media.mediaId;
-
-                  messageData.platform_response = {
-                    ...messageData.platform_response,
-                    _media: {
-                      media_id: media.mediaId,
-                      public_url: media.publicUrl,
-                      mime_type: media.mimeType,
-                      filename: media.fileName,
-                      size: media.size,
-                    },
-                  };
-
-                  console.log("✅ [MEDIA] Subido OK:", media.publicUrl);
-                } else {
-                  console.warn("⚠️ [MEDIA] No se encontró media_id en payload");
                 }
               } catch (e) {
-                console.error("❌ [MEDIA] Error procesando media:", e);
-                messageData.message = `Mensaje de tipo ${messageType} recibido (media error)`;
+                console.error("❌ Media error:", e);
               }
             }
 
             // Guardar inbound
-            const { data: insertedInbound, error: inboundErr } = await supabase
-              .from("whatsapp_messages")
-              .insert(messageData)
-              .select();
+            await supabase.from("whatsapp_messages").insert(messageData);
 
-            if (inboundErr) {
-              console.error("❌ Error guardando inbound:", inboundErr);
-            } else {
-              console.log("✅ Inbound guardado:", insertedInbound?.[0]?.id);
-            }
-
-            /**
-             * 2B) Responder SOLO si:
-             * - es texto
-             * - cfg auto_reply_enabled=true
-             * - y cumple regla de horario según reply_outside_schedule
-             */
+            // 2B) Auto-reply IA SOLO si text + enabled + schedule ok
             if (messageType === "text") {
               const userText = (messageData.message || "").trim();
               if (!userText) continue;
 
-              // Fallback si no hay config: NO respondemos automático
-              const effectiveCfg: WhatsAppAIConfig = aiCfg ?? {
-                id: 0,
-                ...AI_FALLBACK,
-              };
-
-              const canReply = shouldAutoReplyNow(effectiveCfg);
-
-              if (!effectiveCfg.auto_reply_enabled) {
-                console.log("⏸️ IA desactivada (auto_reply_enabled=false). No respondo automático.");
+              if (!aiCfg.auto_reply_enabled) {
+                console.log("⏸️ IA apagada (auto_reply_enabled=false)");
                 continue;
               }
 
-              if (!canReply) {
-                const { hhmm, dayId } = getChileTimeParts();
-                console.log("🕒 Dentro de horario/día configurado (reply_outside_schedule=true). No respondo automático.", {
-                  chile_time: hhmm,
-                  chile_day: dayId,
-                  start_time: effectiveCfg.start_time,
-                  end_time: effectiveCfg.end_time,
-                  days_enabled: effectiveCfg.days_enabled,
-                });
+              if (!canAnswerBySchedule) {
+                console.log("🕒 Según config, no corresponde responder ahora.");
                 continue;
               }
 
-              const training = (effectiveCfg.training_data || "").trim();
+              // HISTORIAL para que no repita:
+              const conversation = await buildConversationFromDB(supabase, fromPhone, userText);
 
-              console.log("🤖 Llamando OpenAI…", { model: Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini" });
-              const aiReply = await generateOpenAIReply(userText, training);
-              console.log("💬 IA Reply:", aiReply);
+              const system = buildSystemPrompt(aiCfg.training_data || "");
+              const aiReply = await generateOpenAIReply({
+                system,
+                conversation,
+                model: Deno.env.get("OPENAI_MODEL") ?? "gpt-4o-mini",
+                maxTokens: 260,
+                temperature: 0.6,
+              });
 
-              const waResponse = await sendWhatsAppTextReply(
-                fromPhone,
-                aiReply,
-                accessToken,
-                phoneNumberId,
-              );
+              const waResponse = await sendWhatsAppTextReply(fromPhone, aiReply, accessToken, phoneNumberId);
 
-              const outboundData: any = {
+              // Guardar outbound
+              await supabase.from("whatsapp_messages").insert({
                 phone_number: fromPhone,
                 direction: "outbound",
                 status: "sent",
@@ -760,61 +536,40 @@ serve(async (req) => {
                 message_type: "text",
                 message: aiReply,
                 platform_response: waResponse,
-              };
-
-              const { error: outboundErr } = await supabase
-                .from("whatsapp_messages")
-                .insert(outboundData);
-
-              if (outboundErr) console.error("❌ Error guardando outbound:", outboundErr);
-              else console.log("✅ Outbound guardado");
+              });
             }
           }
         }
 
-        // 2C) Status updates (delivered, read, etc.)
+        // Status updates
         if (value?.statuses) {
           for (const status of value.statuses) {
             const stId = safeString(status?.id);
             const stVal = safeString(status?.status);
             if (!stId || !stVal) continue;
 
-            await supabase
-              .from("whatsapp_messages")
+            await supabase.from("whatsapp_messages")
               .update({ status: stVal } as any)
               .eq("whatsapp_message_id", stId);
-
-            console.log("📊 Status update:", stId, stVal);
           }
         }
       }
     }
 
-    // 3) Forward a Nerd (sin loop infinito)
-    try {
-      const forwarded = safeString(req.headers.get("X-Forwarded-From"));
-
-      const thisUrl = new URL(req.url);
-      const thisCanonical = `${thisUrl.origin}${thisUrl.pathname}`;
-      const nerdCanonical = safeString(NERD_WEBHOOK_URL);
-
-      const sameUrl = nerdCanonical === thisCanonical;
-
-      if (!forwarded && !sameUrl && nerdCanonical) {
-        await fetch(nerdCanonical, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Forwarded-From": "keloke-panel",
-          },
-          body: JSON.stringify(body),
-        });
-        console.log("✓ Webhook reenviado a Nerd correctamente");
-      } else {
-        console.log("⏭️ Skip forward a Nerd (evitando loop)", { forwarded, sameUrl });
+    // Forward a Nerd (desactivado por ahora)
+    if (NERD_WEBHOOK_URL) {
+      try {
+        const forwarded = safeString(req.headers.get("X-Forwarded-From"));
+        if (!forwarded) {
+          await fetch(NERD_WEBHOOK_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Forwarded-From": "keloke-panel" },
+            body: JSON.stringify(body),
+          });
+        }
+      } catch (e) {
+        console.error("❌ Nerd forward error:", e);
       }
-    } catch (error) {
-      console.error("❌ Error reenviando webhook a Nerd:", error);
     }
 
     return jsonResponse({ success: true }, 200);
