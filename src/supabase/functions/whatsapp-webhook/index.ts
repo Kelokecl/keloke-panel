@@ -170,21 +170,18 @@ async function generateOpenAIReply(
   modelOverride?: string,
 ): Promise<string> {
   const apiKey = Deno.env.get("OPENAI_API_KEY");
-  const model = modelOverride || (Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini");
+  const model = modelOverride || "gpt-5-mini";
 
   if (!apiKey) {
-    console.error("❌ No se encontró OPENAI_API_KEY en Secrets");
-    return "Pucha 😅 tuve un tema técnico. ¿Me dices qué producto buscas y te ayudo al tiro?";
+    console.error("❌ OPENAI_API_KEY missing");
+    return "Pucha 😅 tuve un tema técnico. ¿Qué producto buscas?";
   }
 
-  const system = [
-    "Eres el asistente de soporte y ventas de la tienda online Keloke.cl (Chile).",
-    "Responde en español chileno, cercano, breve (máx 3–4 líneas).",
-    "Haz 1–2 preguntas para entender necesidad (uso, presupuesto, comuna/envío).",
-    "Sugiere 1–2 opciones y ofrece mandar links.",
-    "No inventes stock ni precios exactos si no los tienes; ofrece mandar link con precio real.",
-    "Cierra con CTA suave: '¿Te mando 2 links ahora?'",
-  ].join(" ");
+  const systemPrompt =
+    "Eres el asistente de ventas de Keloke.cl (Chile). " +
+    "Responde en español chileno, cercano, claro y breve (máx 3–4 líneas). " +
+    "Haz 1–2 preguntas para entender uso, presupuesto y comuna. " +
+    "Sugiere opciones y ofrece mandar links.";
 
   try {
     const res = await fetch("https://api.openai.com/v1/responses", {
@@ -195,15 +192,9 @@ async function generateOpenAIReply(
       },
       body: JSON.stringify({
         model,
-        // ✅ En Responses API, usa "instructions" + "input"
-        instructions: system,
-        input: userText,
-
-        // ✅ ESTE es el parámetro correcto (no max_tokens, no max_completion_tokens)
+        // 🔑 CLAVE: input ES STRING, NO OBJETO
+        input: `${systemPrompt}\n\nMensaje cliente:\n${userText}`,
         max_output_tokens: 240,
-
-        // Opcional
-        reasoning: { effort: "low" },
         temperature: 0.7,
       }),
     });
@@ -212,36 +203,22 @@ async function generateOpenAIReply(
 
     if (!res.ok) {
       console.error("❌ OpenAI error:", res.status, raw);
-      return "Te leo 🙌 ¿Qué producto buscas y tu presupuesto aprox? y te mando 2 opciones con link.";
+      return "Te leo 🙌 ¿Qué producto buscas y tu presupuesto aprox?";
     }
 
     const data = JSON.parse(raw);
 
-    // ✅ Parse robusto (sin depender de output_text “SDK-only”)
+    // Parse robusto (Responses API)
     const text =
-      (typeof data?.output_text === "string" && data.output_text.trim()) ||
-      (() => {
-        const out = Array.isArray(data?.output) ? data.output : [];
-        for (const item of out) {
-          const content = item?.content;
-          if (Array.isArray(content)) {
-            for (const c of content) {
-              if (c?.type === "output_text" && typeof c?.text === "string") {
-                const t = c.text.trim();
-                if (t) return t;
-              }
-            }
-          }
-        }
-        return "";
-      })();
+      data?.output_text ||
+      data?.output?.[0]?.content?.[0]?.text ||
+      "";
 
-    if (text) return text;
-
-    return "Ya bacán 🙌 ¿Qué producto andas buscando y en qué comuna estás? Te mando 2 links al tiro.";
+    return text.trim() ||
+      "Ya bacán 🙌 ¿Qué producto buscas y en qué comuna estás?";
   } catch (err) {
-    console.error("❌ Error llamando OpenAI:", err);
-    return "Tu mensaje quedó registrado 🙌 pero tuve un drama con la IA. ¿Qué producto buscas y en qué comuna estás?";
+    console.error("❌ OpenAI fetch error:", err);
+    return "Tu mensaje quedó registrado 🙌 ¿Qué producto buscas?";
   }
 }
 
