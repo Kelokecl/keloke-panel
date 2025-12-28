@@ -165,26 +165,23 @@ function buildSystemPrompt(training: string) {
   return base + ctx;
 }
 
-async function generateOpenAIReply(
-  userText: string,
-  modelOverride?: string,
-): Promise<string> {
+async function generateOpenAIReply(userText: string, modelOverride?: string): Promise<string> {
   const apiKey = Deno.env.get("OPENAI_API_KEY");
-  const model = modelOverride || "gpt-5-mini";
+  const model = modelOverride || (Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini");
 
   if (!apiKey) {
-    console.error("❌ No OPENAI_API_KEY");
-    return "Pucha 😅 tuvimos un problema técnico. ¿Qué producto buscas?";
+    console.error("❌ No se encontró OPENAI_API_KEY en Secrets");
+    return "Pucha 😅 tuve un tema técnico. ¿Me dices qué producto buscas y te ayudo al tiro?";
   }
 
-  const systemPrompt = `
-Eres el asistente de ventas y soporte de Keloke.cl (Chile).
-- Español chileno, cercano.
-- Máx 3–4 líneas.
-- Haz 1–2 preguntas.
-- Sugiere productos reales.
-- Cierra con CTA suave.
-`;
+  const instructions = [
+    "Eres el asistente de soporte y ventas de la tienda online Keloke.cl (Chile).",
+    "Responde en español chileno, cercano, breve (máx 3–4 líneas).",
+    "Haz 1–2 preguntas para entender necesidad (uso, presupuesto, comuna/envío).",
+    "Sugiere 1–2 opciones y ofrece mandar links de productos.",
+    "No inventes stock específico si no se te dio; ofrece revisar y mandar links.",
+    "Cierra con CTA suave: '¿Te mando links y opciones ahora?'"
+  ].join(" ");
 
   try {
     const res = await fetch("https://api.openai.com/v1/responses", {
@@ -195,38 +192,35 @@ Eres el asistente de ventas y soporte de Keloke.cl (Chile).
       },
       body: JSON.stringify({
         model,
-        input: [
-          {
-            role: "system",
-            content: systemPrompt,
-          },
-          {
-            role: "user",
-            content: userText,
-          },
-        ],
-        max_completion_tokens: 220, // ✅ ESTE ES EL FIX CLAVE
+        // ✅ En Responses API el parámetro correcto es ESTE:
+        max_output_tokens: 240, // <-- NO max_tokens, NO max_completion_tokens
+        instructions,
+        input: userText,
+        // Opcional: para que no se ponga a “pensar” de más
+        reasoning: { effort: "low" },
       }),
     });
 
     const raw = await res.text();
-
     if (!res.ok) {
-      console.error("❌ OpenAI error:", raw);
-      return "Te leo 🙌 ¿Qué producto buscas y en qué comuna estás?";
+      console.error("❌ OpenAI error:", res.status, raw);
+      return "Te leo 🙌 ¿Me dices cuántas personas son, presupuesto aprox y tu comuna? y te mando 2 opciones con link.";
     }
 
     const data = JSON.parse(raw);
-    const text = data?.output_text?.trim();
 
-    if (!text) {
-      return "Buenísimo 🙌 ¿Qué producto estás buscando?";
-    }
+    // ✅ extracción robusta (cambia según versión, así que cubrimos varias)
+    const t1 = typeof data?.output_text === "string" ? data.output_text : "";
+    const t2 =
+      data?.output?.find?.((x: any) => x?.type === "message")?.content?.find?.((c: any) => c?.type === "output_text")?.text ?? "";
+    const text = (t1 || t2 || "").trim();
 
-    return text;
+    if (text) return text;
+
+    return "Ya bacán 🙌 ¿Qué producto andas buscando y para qué uso? ¿En qué comuna estás?";
   } catch (err) {
-    console.error("❌ OpenAI exception:", err);
-    return "Tu mensaje llegó 🙌 ¿Qué producto buscas?";
+    console.error("❌ Error llamando OpenAI:", err);
+    return "Tu mensaje quedó registrado 🙌 pero tuve un drama con la IA. ¿Qué producto buscas y en qué comuna estás?";
   }
 }
 
