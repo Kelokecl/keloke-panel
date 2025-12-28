@@ -18,7 +18,6 @@ const STORAGE_BUCKET = "whatsapp-media";
 
 /**
  * (Dejamos Nerd para después)
- * Si quieres activar forwarding luego, pon una URL real aquí.
  */
 const NERD_WEBHOOK_URL = ""; // e.g. "https://nerd.../functions/v1/whatsapp-webhook"
 
@@ -30,10 +29,6 @@ function jsonResponse(data: unknown, status = 200) {
 }
 function safeString(v: unknown) {
   return typeof v === "string" ? v : "";
-}
-function safeNumber(v: unknown, d = 0) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : d;
 }
 function mimeToExt(mimeRaw: string): string {
   const mime = (mimeRaw || "").split(";")[0].trim().toLowerCase();
@@ -69,7 +64,7 @@ type AiConfig = {
   auto_reply_enabled: boolean;
   reply_outside_schedule: boolean;
   start_time: string | null; // "HH:MM"
-  end_time: string | null;   // "HH:MM"
+  end_time: string | null; // "HH:MM"
   days_enabled: string[] | null; // ["1","2","3"...] 1=Lun ... 7=Dom
   training_data: string | null;
 };
@@ -84,7 +79,6 @@ const DEFAULT_AI_CONFIG: AiConfig = {
 };
 
 function isWithinScheduleLocal(cfg: AiConfig): boolean {
-  // day: 1=Lun ... 7=Dom
   const now = new Date();
   const dayJs = now.getDay(); // 0=Dom..6=Sab
   const dayIso = dayJs === 0 ? 7 : dayJs;
@@ -108,11 +102,13 @@ function isWithinScheduleLocal(cfg: AiConfig): boolean {
     ? (nowMin >= startMin && nowMin <= endMin)
     : (nowMin >= startMin || nowMin <= endMin);
 
-  // Si reply_outside_schedule=true => responde fuera del horario
+  // reply_outside_schedule=true => responde fuera del horario
   return cfg.reply_outside_schedule ? !inRange : inRange;
 }
 
-async function loadAiConfig(supabase: ReturnType<typeof createClient>): Promise<AiConfig> {
+async function loadAiConfig(
+  supabase: ReturnType<typeof createClient>,
+): Promise<AiConfig> {
   try {
     const { data, error } = await supabase
       .from("whatsapp_ai_config")
@@ -131,7 +127,9 @@ async function loadAiConfig(supabase: ReturnType<typeof createClient>): Promise<
       reply_outside_schedule: Boolean(data.reply_outside_schedule),
       start_time: data.start_time ?? DEFAULT_AI_CONFIG.start_time,
       end_time: data.end_time ?? DEFAULT_AI_CONFIG.end_time,
-      days_enabled: Array.isArray(data.days_enabled) ? data.days_enabled : DEFAULT_AI_CONFIG.days_enabled,
+      days_enabled: Array.isArray(data.days_enabled)
+        ? data.days_enabled
+        : DEFAULT_AI_CONFIG.days_enabled,
       training_data: data.training_data ?? DEFAULT_AI_CONFIG.training_data,
     };
   } catch (e) {
@@ -142,46 +140,107 @@ async function loadAiConfig(supabase: ReturnType<typeof createClient>): Promise<
 
 /**
  * =========================================================
- *  OpenAI (Chat Completions) + contexto con historial
+ *  HISTORIAL: últimos mensajes para evitar “reinicio”
+ * =========================================================
+ */
+type ConvMsg = { role: "user" | "assistant"; content: string };
+
+async function buildConversationFromDB(
+  supabase: ReturnType<typeof createClient>,
+  phone: string,
+  userText: string,
+): Promise<ConvMsg[]> {
+  const { data, error } = await supabase
+    .from("whatsapp_messages")
+    .select("direction,message,created_at,message_type")
+    .eq("phone_number", phone)
+    .order("created_at", { ascending: false })
+    .limit(16);
+
+  if (error) console.warn("⚠️ Error leyendo historial:", error);
+
+  const ordered = (data || []).slice().reverse();
+
+  const conversation: ConvMsg[] = [];
+  for (const row of ordered) {
+    const dir = safeString((row as any).direction);
+    const msg = safeString((row as any).message);
+    const type = safeString((row as any).message_type);
+    if (!msg) continue;
+    // si no es texto, lo pasamos como nota corta (para contexto)
+    const content = type && type !== "text" ? `[${type}] ${msg}` : msg;
+
+    conversation.push({
+      role: dir === "outbound" ? "assistant" : "user",
+      content,
+    });
+  }
+
+  // asegura que el último sea el mensaje actual
+  if (
+    !conversation.length ||
+    conversation[conversation.length - 1].role !== "user" ||
+    conversation[conversation.length - 1].content !== userText
+  ) {
+    conversation.push({ role: "user", content: userText });
+  }
+
+  return conversation;
+}
+
+/**
+ * =========================================================
+ *  PROMPT “Nivel Dios” (sin repetir preguntas)
  * =========================================================
  */
 function buildSystemPrompt(training: string) {
-  const base =
-    [
-      "Eres el asistente de ventas y soporte de Keloke.cl (Chile).",
-      "Hablas en español chileno, cercano y profesional.",
-      "Respondes corto y útil (máx 4-6 líneas), sin textos eternos.",
-      "Tu objetivo: convertir la conversación en venta y resolver dudas rápido.",
-      "Haz 1-2 preguntas SOLO si faltan datos clave (capacidad, presupuesto, comuna, urgencia).",
-      "Si ya te dieron comuna/producto, NO vuelvas a pedir lo mismo: avanza.",
-      "No inventes stock ni promesas raras; ofrece links y confirmación.",
-      "Siempre cierra con CTA suave.",
-    ].join(" ");
+  const base = [
+    "Eres el asistente de ventas y soporte de Keloke.cl (Chile).",
+    "Responde en español chileno, cercano y profesional.",
+    "Sé breve y útil (máx 4–6 líneas).",
+    "NO repitas preguntas ya respondidas por el cliente.",
+    "Si el cliente ya dijo producto, comuna, cantidad de personas o presupuesto: avanza con recomendación.",
+    "Pide SOLO 1 pregunta si falta un dato clave (capacidad / presupuesto / comuna / urgencia).",
+    "No inventes stock; ofrece enviar links y confirmar disponibilidad.",
+    "Cierra con CTA suave: '¿Te mando 2 opciones con link?'",
+  ].join(" ");
 
   const ctx = training?.trim()
-    ? `\n\nCONTEXTO DEL NEGOCIO (para usar en respuestas):\n${training.trim()}`
+    ? `\n\nCONTEXTO DEL NEGOCIO:\n${training.trim()}`
     : "";
 
   return base + ctx;
 }
 
-async function generateOpenAIReply(
-  userText: string,
-  modelOverride?: string,
-): Promise<string> {
+function serializeConversation(conv: ConvMsg[]) {
+  // formato simple y robusto para meter en input string
+  return conv
+    .map((m) => (m.role === "user" ? `Cliente: ${m.content}` : `Asistente: ${m.content}`))
+    .join("\n");
+}
+
+/**
+ * =========================================================
+ *  OpenAI (Responses API) — sin parámetros conflictivos
+ * =========================================================
+ */
+async function generateOpenAIReply(params: {
+  systemPrompt: string;
+  conversation: ConvMsg[];
+}): Promise<string> {
   const apiKey = Deno.env.get("OPENAI_API_KEY");
-  const model = modelOverride || "gpt-5-mini";
+  const model = Deno.env.get("OPENAI_MODEL") || "gpt-5-mini";
 
   if (!apiKey) {
     console.error("❌ OPENAI_API_KEY missing");
     return "Pucha 😅 tuve un tema técnico. ¿Qué producto buscas?";
   }
 
-  const systemPrompt =
-    "Eres el asistente de ventas de Keloke.cl (Chile). " +
-    "Responde en español chileno, cercano, claro y breve (máx 3–4 líneas). " +
-    "Haz 1–2 preguntas para entender uso, presupuesto y comuna. " +
-    "Sugiere opciones y ofrece mandar links.";
+  const inputText =
+    `${params.systemPrompt}\n\n` +
+    `HISTORIAL (no repitas preguntas ya respondidas):\n` +
+    `${serializeConversation(params.conversation)}\n\n` +
+    `Responde ahora como Asistente:`;
 
   try {
     const res = await fetch("https://api.openai.com/v1/responses", {
@@ -192,10 +251,11 @@ async function generateOpenAIReply(
       },
       body: JSON.stringify({
         model,
-        // 🔑 CLAVE: input ES STRING, NO OBJETO
-        input: `${systemPrompt}\n\nMensaje cliente:\n${userText}`,
-        max_output_tokens: 240,
-        temperature: 0.7,
+        // ✅ input STRING (evita invalid_type)
+        input: inputText,
+        // ✅ parámetro correcto para Responses API
+        max_output_tokens: 260,
+        // ❌ NO temperature (tu log dice que este modelo lo rechaza)
       }),
     });
 
@@ -203,25 +263,21 @@ async function generateOpenAIReply(
 
     if (!res.ok) {
       console.error("❌ OpenAI error:", res.status, raw);
-      return "Te leo 🙌 ¿Qué producto buscas y tu presupuesto aprox?";
+      return "Te leo 🙌 ¿Me confirmas tu comuna y presupuesto aprox? y te mando 2 opciones con link.";
     }
 
     const data = JSON.parse(raw);
+    const text = safeString(data?.output_text).trim();
 
-    // Parse robusto (Responses API)
-    const text =
-      data?.output_text ||
-      data?.output?.[0]?.content?.[0]?.text ||
-      "";
+    if (text) return text;
 
-    return text.trim() ||
-      "Ya bacán 🙌 ¿Qué producto buscas y en qué comuna estás?";
+    // fallback final, pero debería casi nunca usarse
+    return "Ya bacán 🙌 ¿Qué producto buscas y en qué comuna estás?";
   } catch (err) {
     console.error("❌ OpenAI fetch error:", err);
-    return "Tu mensaje quedó registrado 🙌 ¿Qué producto buscas?";
+    return "Tu mensaje quedó registrado 🙌 ¿Qué producto buscas? y te mando 2 opciones con link.";
   }
 }
-
 
 /**
  * =========================================================
@@ -259,7 +315,11 @@ async function sendWhatsAppTextReply(
     throw new Error(`WhatsApp send failed: ${res.status} ${raw}`);
   }
 
-  try { return JSON.parse(raw); } catch { return null; }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -269,15 +329,25 @@ async function sendWhatsAppTextReply(
  */
 async function fetchWhatsAppMediaMeta(mediaId: string, accessToken: string) {
   const url = `https://graph.facebook.com/${WA_GRAPH_VERSION}/${mediaId}`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
   const raw = await res.text();
-  const json = (() => { try { return JSON.parse(raw); } catch { return null; } })();
+  const json = (() => {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  })();
   if (!res.ok) throw new Error(json?.error?.message || `Media meta failed ${res.status}`);
   if (!json?.url) throw new Error("Media meta sin url");
   return json;
 }
 async function downloadWhatsAppMediaBinary(mediaUrl: string, accessToken: string) {
-  const res = await fetch(mediaUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const res = await fetch(mediaUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
   if (!res.ok) throw new Error(`Media binary download failed ${res.status}`);
   const ab = await res.arrayBuffer();
   return new Uint8Array(ab);
@@ -320,48 +390,14 @@ async function handleInboundMedia(
 
   const fileName = `${messageType}_in_${randomId()}_${mediaId}.${ext}`;
   const filePath = `${messageType}/inbound/${fileName}`;
-  const publicUrl = await uploadToStorageAndGetPublicUrl(supabase, filePath, bytes, mimeType);
+  const publicUrl = await uploadToStorageAndGetPublicUrl(
+    supabase,
+    filePath,
+    bytes,
+    mimeType,
+  );
 
   return { publicUrl, mimeType, fileName, size: bytes.length, mediaId };
-}
-
-/**
- * =========================================================
- *  Historial para que NO repita
- * =========================================================
- */
-async function buildConversationFromDB(
-  supabase: ReturnType<typeof createClient>,
-  phone: string,
-  userText: string,
-) {
-  // Traemos últimos N mensajes para dar contexto (evita “reinicio”)
-  const { data } = await supabase
-    .from("whatsapp_messages")
-    .select("direction,message,created_at")
-    .eq("phone_number", phone)
-    .order("created_at", { ascending: false })
-    .limit(12);
-
-  const ordered = (data || []).slice().reverse();
-
-  const conversation: { role: "user" | "assistant"; content: string }[] = [];
-  for (const row of ordered) {
-    const dir = safeString(row.direction);
-    const msg = safeString(row.message);
-    if (!msg) continue;
-    conversation.push({
-      role: dir === "outbound" ? "assistant" : "user",
-      content: msg,
-    });
-  }
-
-  // Asegura que el último input sea el del usuario actual (por si DB demora)
-  if (!conversation.length || conversation[conversation.length - 1].role !== "user") {
-    conversation.push({ role: "user", content: userText });
-  }
-
-  return conversation;
 }
 
 /**
@@ -370,6 +406,7 @@ async function buildConversationFromDB(
  * =========================================================
  */
 serve(async (req) => {
+  // CORS
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   // Verify (Meta)
@@ -381,7 +418,10 @@ serve(async (req) => {
     const VERIFY_TOKEN = Deno.env.get("WHATSAPP_VERIFY_TOKEN") ?? "keloke_webhook_token";
 
     if (mode === "subscribe" && token === VERIFY_TOKEN) {
-      return new Response(challenge ?? "", { status: 200, headers: { "Content-Type": "text/plain" } });
+      return new Response(challenge ?? "", {
+        status: 200,
+        headers: { "Content-Type": "text/plain" },
+      });
     }
     return new Response("Forbidden", { status: 403 });
   }
@@ -415,8 +455,8 @@ serve(async (req) => {
       return jsonResponse({ error: "No WhatsApp connection found", details: connError ?? null }, 500);
     }
 
-    const accessToken = safeString(connection.access_token);
-    const phoneNumberId = safeString(connection.phone_number_id);
+    const accessToken = safeString((connection as any).access_token);
+    const phoneNumberId = safeString((connection as any).phone_number_id);
     if (!accessToken || !phoneNumberId) {
       return jsonResponse({ error: "WhatsApp connection missing access_token/phone_number_id" }, 500);
     }
@@ -466,7 +506,8 @@ serve(async (req) => {
                 last_message_at: lastMessageAt,
               });
             } else {
-              await supabase.from("whatsapp_contacts").update({ last_message_at: lastMessageAt })
+              await supabase.from("whatsapp_contacts")
+                .update({ last_message_at: lastMessageAt })
                 .eq("phone_number", fromPhone);
             }
 
@@ -510,7 +551,7 @@ serve(async (req) => {
 
             // 2B) Auto-reply IA SOLO si text + enabled + schedule ok
             if (messageType === "text") {
-              const userText = (messageData.message || "").trim();
+              const userText = safeString(messageData.message).trim();
               if (!userText) continue;
 
               if (!aiCfg.auto_reply_enabled) {
@@ -523,19 +564,20 @@ serve(async (req) => {
                 continue;
               }
 
-              // HISTORIAL para que no repita:
               const conversation = await buildConversationFromDB(supabase, fromPhone, userText);
+              const systemPrompt = buildSystemPrompt(aiCfg.training_data || "");
 
-              const system = buildSystemPrompt(aiCfg.training_data || "");
               const aiReply = await generateOpenAIReply({
-                system,
+                systemPrompt,
                 conversation,
-                model: Deno.env.get("OPENAI_MODEL") ?? "gpt-4o-mini",
-                maxTokens: 260,
-                temperature: 0.6,
               });
 
-              const waResponse = await sendWhatsAppTextReply(fromPhone, aiReply, accessToken, phoneNumberId);
+              const waResponse = await sendWhatsAppTextReply(
+                fromPhone,
+                aiReply,
+                accessToken,
+                phoneNumberId,
+              );
 
               // Guardar outbound
               await supabase.from("whatsapp_messages").insert({
@@ -566,7 +608,7 @@ serve(async (req) => {
       }
     }
 
-    // Forward a Nerd (desactivado por ahora)
+    // Forward a Nerd (apagado)
     if (NERD_WEBHOOK_URL) {
       try {
         const forwarded = safeString(req.headers.get("X-Forwarded-From"));
