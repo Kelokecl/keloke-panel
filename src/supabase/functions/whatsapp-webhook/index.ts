@@ -19,7 +19,7 @@ const STORAGE_BUCKET = "whatsapp-media";
 /**
  * (Dejamos Nerd para después)
  */
-const NERD_WEBHOOK_URL = ""; // e.g. "https://nerd.../functions/v1/whatsapp-webhook"
+const NERD_WEBHOOK_URL = ""; // desactivado
 
 function jsonResponse(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -27,9 +27,11 @@ function jsonResponse(data: unknown, status = 200) {
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
 }
+
 function safeString(v: unknown) {
   return typeof v === "string" ? v : "";
 }
+
 function mimeToExt(mimeRaw: string): string {
   const mime = (mimeRaw || "").split(";")[0].trim().toLowerCase();
   const map: Record<string, string> = {
@@ -51,6 +53,7 @@ function mimeToExt(mimeRaw: string): string {
   if (slash > -1) return mime.slice(slash + 1) || "bin";
   return "bin";
 }
+
 function randomId() {
   return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
@@ -63,14 +66,14 @@ function randomId() {
 type AiConfig = {
   auto_reply_enabled: boolean;
   reply_outside_schedule: boolean;
-  start_time: string | null; // "HH:MM"
-  end_time: string | null; // "HH:MM"
+  start_time: string | null; // "HH:MM" o "HH:MM:SS"
+  end_time: string | null;   // "HH:MM" o "HH:MM:SS"
   days_enabled: string[] | null; // ["1","2","3"...] 1=Lun ... 7=Dom
   training_data: string | null;
 };
 
 const DEFAULT_AI_CONFIG: AiConfig = {
-  auto_reply_enabled: true,
+  auto_reply_enabled: false,
   reply_outside_schedule: true,
   start_time: "09:00",
   end_time: "18:00",
@@ -78,37 +81,7 @@ const DEFAULT_AI_CONFIG: AiConfig = {
   training_data: "",
 };
 
-function isWithinScheduleLocal(cfg: AiConfig): boolean {
-  const now = new Date();
-  const dayJs = now.getDay(); // 0=Dom..6=Sab
-  const dayIso = dayJs === 0 ? 7 : dayJs;
-
-  if (Array.isArray(cfg.days_enabled) && cfg.days_enabled.length > 0) {
-    if (!cfg.days_enabled.includes(String(dayIso))) return false;
-  }
-
-  const start = cfg.start_time;
-  const end = cfg.end_time;
-  if (!start || !end) return true;
-
-  const [sh, sm] = start.split(":").map((x) => parseInt(x, 10));
-  const [eh, em] = end.split(":").map((x) => parseInt(x, 10));
-
-  const startMin = (sh || 0) * 60 + (sm || 0);
-  const endMin = (eh || 0) * 60 + (em || 0);
-  const nowMin = now.getHours() * 60 + now.getMinutes();
-
-  const inRange = startMin <= endMin
-    ? (nowMin >= startMin && nowMin <= endMin)
-    : (nowMin >= startMin || nowMin <= endMin);
-
-  // reply_outside_schedule=true => responde fuera del horario
-  return cfg.reply_outside_schedule ? !inRange : inRange;
-}
-
-async function loadAiConfig(
-  supabase: ReturnType<typeof createClient>,
-): Promise<AiConfig> {
+async function loadAiConfig(supabase: ReturnType<typeof createClient>): Promise<AiConfig> {
   try {
     const { data, error } = await supabase
       .from("whatsapp_ai_config")
@@ -140,69 +113,104 @@ async function loadAiConfig(
 
 /**
  * =========================================================
- *  HISTORIAL: últimos mensajes para evitar “reinicio”
+ *  TZ Chile real (America/Santiago) + helpers
  * =========================================================
  */
-type ConvMsg = { role: "user" | "assistant"; content: string };
+const CHILE_TZ = "America/Santiago";
 
-async function buildConversationFromDB(
-  supabase: ReturnType<typeof createClient>,
-  phone: string,
-  userText: string,
-): Promise<ConvMsg[]> {
-  const { data, error } = await supabase
-    .from("whatsapp_messages")
-    .select("direction,message,created_at,message_type")
-    .eq("phone_number", phone)
-    .order("created_at", { ascending: false })
-    .limit(16);
+function getChileNowParts() {
+  // Obtenemos hora/minuto/día ISO (1-7) en Chile (no UTC)
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: CHILE_TZ,
+    hour12: false,
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 
-  if (error) console.warn("⚠️ Error leyendo historial:", error);
+  const parts = fmt.formatToParts(new Date());
+  const hh = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const mm = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  const wd = (parts.find((p) => p.type === "weekday")?.value ?? "").toLowerCase();
 
-  const ordered = (data || []).slice().reverse();
+  // Mapeo weekday -> ISO (1=Lun...7=Dom)
+  const map: Record<string, number> = {
+    mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6, sun: 7,
+  };
+  const dayIso = map[wd.slice(0, 3)] ?? 0;
 
-  const conversation: ConvMsg[] = [];
-  for (const row of ordered) {
-    const dir = safeString((row as any).direction);
-    const msg = safeString((row as any).message);
-    const type = safeString((row as any).message_type);
-    if (!msg) continue;
-    // si no es texto, lo pasamos como nota corta (para contexto)
-    const content = type && type !== "text" ? `[${type}] ${msg}` : msg;
+  return { hh, mm, dayIso };
+}
 
-    conversation.push({
-      role: dir === "outbound" ? "assistant" : "user",
-      content,
-    });
+function parseHHMM(x: string | null): { h: number; m: number } | null {
+  if (!x) return null;
+  const s = x.trim();
+  if (!s) return null;
+  // acepta "HH:MM" o "HH:MM:SS"
+  const parts = s.split(":").map((v) => Number(v));
+  if (parts.length < 2) return null;
+  const h = Number.isFinite(parts[0]) ? parts[0] : 0;
+  const m = Number.isFinite(parts[1]) ? parts[1] : 0;
+  return { h, m };
+}
+
+/**
+ * Regla:
+ * - Si days_enabled está vacío/null => no restringe por días
+ * - Si start/end inválidos => no restringe por horario (responde siempre)
+ * - reply_outside_schedule:
+ *   - true  => responde SOLO fuera del rango
+ *   - false => responde SOLO dentro del rango
+ */
+function canAnswerByScheduleChile(cfg: AiConfig): boolean {
+  const { hh, mm, dayIso } = getChileNowParts();
+
+  if (Array.isArray(cfg.days_enabled) && cfg.days_enabled.length > 0) {
+    if (!cfg.days_enabled.includes(String(dayIso))) return false;
   }
 
-  // asegura que el último sea el mensaje actual
-  if (
-    !conversation.length ||
-    conversation[conversation.length - 1].role !== "user" ||
-    conversation[conversation.length - 1].content !== userText
-  ) {
-    conversation.push({ role: "user", content: userText });
-  }
+  const st = parseHHMM(cfg.start_time);
+  const en = parseHHMM(cfg.end_time);
 
-  return conversation;
+  // si no hay horario usable, respondemos siempre
+  if (!st || !en) return true;
+
+  const startMin = (st.h || 0) * 60 + (st.m || 0);
+  const endMin = (en.h || 0) * 60 + (en.m || 0);
+  const nowMin = (hh || 0) * 60 + (mm || 0);
+
+  const inRange = startMin <= endMin
+    ? (nowMin >= startMin && nowMin <= endMin)
+    : (nowMin >= startMin || nowMin <= endMin); // cruza medianoche
+
+  return cfg.reply_outside_schedule ? !inRange : inRange;
 }
 
 /**
  * =========================================================
- *  PROMPT “Nivel Dios” (sin repetir preguntas)
+ *  OpenAI Responses API (sin params que rompen)
  * =========================================================
+ *
+ * Tus logs mostraron errores por params:
+ * - max_tokens (no)
+ * - max_completion_tokens (no en Responses)
+ * - temperature (algunos modelos/entradas lo rechazan)
+ * - input con formato incorrecto (objeto)
+ *
+ * Solución: usar Responses API con:
+ * - input: string
+ * - max_output_tokens
+ * - sin temperature
  */
 function buildSystemPrompt(training: string) {
   const base = [
     "Eres el asistente de ventas y soporte de Keloke.cl (Chile).",
-    "Responde en español chileno, cercano y profesional.",
-    "Sé breve y útil (máx 4–6 líneas).",
-    "NO repitas preguntas ya respondidas por el cliente.",
-    "Si el cliente ya dijo producto, comuna, cantidad de personas o presupuesto: avanza con recomendación.",
-    "Pide SOLO 1 pregunta si falta un dato clave (capacidad / presupuesto / comuna / urgencia).",
-    "No inventes stock; ofrece enviar links y confirmar disponibilidad.",
-    "Cierra con CTA suave: '¿Te mando 2 opciones con link?'",
+    "Hablas español chileno, cercano y profesional.",
+    "Respondes claro y breve (máx 4-6 líneas).",
+    "Si ya te dieron datos (producto/comuna/presupuesto), NO los vuelvas a pedir.",
+    "Si faltan datos clave, pregunta 1 cosa a la vez.",
+    "Da 1-2 opciones y ofrece mandar links.",
+    "Cierra con CTA suave.",
   ].join(" ");
 
   const ctx = training?.trim()
@@ -212,35 +220,14 @@ function buildSystemPrompt(training: string) {
   return base + ctx;
 }
 
-function serializeConversation(conv: ConvMsg[]) {
-  // formato simple y robusto para meter en input string
-  return conv
-    .map((m) => (m.role === "user" ? `Cliente: ${m.content}` : `Asistente: ${m.content}`))
-    .join("\n");
-}
-
-/**
- * =========================================================
- *  OpenAI (Responses API) — sin parámetros conflictivos
- * =========================================================
- */
-async function generateOpenAIReply(params: {
-  systemPrompt: string;
-  conversation: ConvMsg[];
-}): Promise<string> {
+async function generateOpenAIReplyFromText(fullPrompt: string): Promise<string> {
   const apiKey = Deno.env.get("OPENAI_API_KEY");
-  const model = Deno.env.get("OPENAI_MODEL") || "gpt-5-mini";
+  const model = Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini";
 
   if (!apiKey) {
     console.error("❌ OPENAI_API_KEY missing");
-    return "Pucha 😅 tuve un tema técnico. ¿Qué producto buscas?";
+    return "Pucha 😅 tuve un tema técnico. ¿Qué producto buscas? y te ayudo al tiro.";
   }
-
-  const inputText =
-    `${params.systemPrompt}\n\n` +
-    `HISTORIAL (no repitas preguntas ya respondidas):\n` +
-    `${serializeConversation(params.conversation)}\n\n` +
-    `Responde ahora como Asistente:`;
 
   try {
     const res = await fetch("https://api.openai.com/v1/responses", {
@@ -251,31 +238,23 @@ async function generateOpenAIReply(params: {
       },
       body: JSON.stringify({
         model,
-        // ✅ input STRING (evita invalid_type)
-        input: inputText,
-        // ✅ parámetro correcto para Responses API
-        max_output_tokens: 260,
-        // ❌ NO temperature (tu log dice que este modelo lo rechaza)
+        input: fullPrompt,          // ✅ string
+        max_output_tokens: 260,      // ✅ correcto para Responses
       }),
     });
 
     const raw = await res.text();
-
     if (!res.ok) {
       console.error("❌ OpenAI error:", res.status, raw);
-      return "Te leo 🙌 ¿Me confirmas tu comuna y presupuesto aprox? y te mando 2 opciones con link.";
+      return "Te leo 🙌 ¿Qué producto buscas y tu presupuesto aprox? así te mando 2 opciones con link.";
     }
 
     const data = JSON.parse(raw);
-    const text = safeString(data?.output_text).trim();
-
-    if (text) return text;
-
-    // fallback final, pero debería casi nunca usarse
-    return "Ya bacán 🙌 ¿Qué producto buscas y en qué comuna estás?";
-  } catch (err) {
-    console.error("❌ OpenAI fetch error:", err);
-    return "Tu mensaje quedó registrado 🙌 ¿Qué producto buscas? y te mando 2 opciones con link.";
+    const text = safeString(data?.output_text)?.trim();
+    return text || "Ya bacán 🙌 ¿Qué andas buscando y en qué comuna estás?";
+  } catch (e) {
+    console.error("❌ OpenAI fetch error:", e);
+    return "Te leo 🙌 ¿Qué producto buscas y tu presupuesto aprox? así te mando 2 opciones con link.";
   }
 }
 
@@ -315,11 +294,7 @@ async function sendWhatsAppTextReply(
     throw new Error(`WhatsApp send failed: ${res.status} ${raw}`);
   }
 
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+  try { return JSON.parse(raw); } catch { return null; }
 }
 
 /**
@@ -329,29 +304,21 @@ async function sendWhatsAppTextReply(
  */
 async function fetchWhatsAppMediaMeta(mediaId: string, accessToken: string) {
   const url = `https://graph.facebook.com/${WA_GRAPH_VERSION}/${mediaId}`;
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
   const raw = await res.text();
-  const json = (() => {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return null;
-    }
-  })();
+  const json = (() => { try { return JSON.parse(raw); } catch { return null; } })();
   if (!res.ok) throw new Error(json?.error?.message || `Media meta failed ${res.status}`);
   if (!json?.url) throw new Error("Media meta sin url");
   return json;
 }
+
 async function downloadWhatsAppMediaBinary(mediaUrl: string, accessToken: string) {
-  const res = await fetch(mediaUrl, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  const res = await fetch(mediaUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!res.ok) throw new Error(`Media binary download failed ${res.status}`);
   const ab = await res.arrayBuffer();
   return new Uint8Array(ab);
 }
+
 async function uploadToStorageAndGetPublicUrl(
   supabase: ReturnType<typeof createClient>,
   filePath: string,
@@ -368,6 +335,7 @@ async function uploadToStorageAndGetPublicUrl(
   if (!data?.publicUrl) throw new Error("No se pudo obtener publicUrl");
   return data.publicUrl;
 }
+
 async function handleInboundMedia(
   supabase: ReturnType<typeof createClient>,
   accessToken: string,
@@ -390,14 +358,44 @@ async function handleInboundMedia(
 
   const fileName = `${messageType}_in_${randomId()}_${mediaId}.${ext}`;
   const filePath = `${messageType}/inbound/${fileName}`;
-  const publicUrl = await uploadToStorageAndGetPublicUrl(
-    supabase,
-    filePath,
-    bytes,
-    mimeType,
-  );
+  const publicUrl = await uploadToStorageAndGetPublicUrl(supabase, filePath, bytes, mimeType);
 
   return { publicUrl, mimeType, fileName, size: bytes.length, mediaId };
+}
+
+/**
+ * =========================================================
+ *  Historial rápido para evitar “reinicio”
+ * =========================================================
+ */
+async function getRecentConversationText(
+  supabase: ReturnType<typeof createClient>,
+  phone: string,
+  currentUserText: string,
+) {
+  const { data } = await supabase
+    .from("whatsapp_messages")
+    .select("direction,message,created_at")
+    .eq("phone_number", phone)
+    .order("created_at", { ascending: false })
+    .limit(10);
+
+  const ordered = (data || []).slice().reverse();
+
+  const lines: string[] = [];
+  for (const row of ordered) {
+    const dir = safeString((row as any).direction);
+    const msg = safeString((row as any).message);
+    if (!msg) continue;
+    lines.push(`${dir === "outbound" ? "Asistente" : "Cliente"}: ${msg}`);
+  }
+
+  // Asegura el último input actual
+  if (!lines.length || !lines[lines.length - 1].startsWith("Cliente:")) {
+    lines.push(`Cliente: ${currentUserText}`);
+  }
+
+  return lines.join("\n");
 }
 
 /**
@@ -406,7 +404,6 @@ async function handleInboundMedia(
  * =========================================================
  */
 serve(async (req) => {
-  // CORS
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   // Verify (Meta)
@@ -434,13 +431,23 @@ serve(async (req) => {
     if (!supabaseUrl || !supabaseServiceKey) {
       return jsonResponse({ error: "Missing Supabase secrets" }, 500);
     }
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
     const body = await req.json();
+
+    // 🔥 Modo prueba para FORZAR respuesta sin pelear con horarios
+    // En Secrets: WA_AI_FORCE_REPLY = "true"
+    const FORCE_REPLY = (Deno.env.get("WA_AI_FORCE_REPLY") ?? "").toLowerCase() === "true";
 
     // 0) Config IA (tu tabla)
     const aiCfg = await loadAiConfig(supabase);
-    const canAnswerBySchedule = isWithinScheduleLocal(aiCfg);
+
+    // Log real de la config para que no haya dudas
+    console.log("🤖 AI CONFIG (DB):", JSON.stringify(aiCfg));
+    console.log("🕒 Chile now:", JSON.stringify(getChileNowParts()), "TZ:", CHILE_TZ);
+    console.log("🧪 FORCE_REPLY:", FORCE_REPLY);
+
+    const scheduleOk = FORCE_REPLY ? true : canAnswerByScheduleChile(aiCfg);
 
     // 1) Conexión WhatsApp activa
     const { data: connection, error: connError } = await supabase
@@ -491,7 +498,7 @@ serve(async (req) => {
               ? new Date(parseInt(timestamp) * 1000).toISOString()
               : new Date().toISOString();
 
-            // Contacto upsert simple (sin tocar id identity)
+            // Contacto upsert simple
             const { data: existingContact } = await supabase
               .from("whatsapp_contacts")
               .select("id")
@@ -506,7 +513,8 @@ serve(async (req) => {
                 last_message_at: lastMessageAt,
               });
             } else {
-              await supabase.from("whatsapp_contacts")
+              await supabase
+                .from("whatsapp_contacts")
                 .update({ last_message_at: lastMessageAt })
                 .eq("phone_number", fromPhone);
             }
@@ -551,7 +559,7 @@ serve(async (req) => {
 
             // 2B) Auto-reply IA SOLO si text + enabled + schedule ok
             if (messageType === "text") {
-              const userText = safeString(messageData.message).trim();
+              const userText = (messageData.message || "").trim();
               if (!userText) continue;
 
               if (!aiCfg.auto_reply_enabled) {
@@ -559,18 +567,21 @@ serve(async (req) => {
                 continue;
               }
 
-              if (!canAnswerBySchedule) {
+              if (!scheduleOk) {
                 console.log("🕒 Según config, no corresponde responder ahora.");
                 continue;
               }
 
-              const conversation = await buildConversationFromDB(supabase, fromPhone, userText);
-              const systemPrompt = buildSystemPrompt(aiCfg.training_data || "");
+              // Prompt con historial + contexto
+              const system = buildSystemPrompt(aiCfg.training_data || "");
+              const history = await getRecentConversationText(supabase, fromPhone, userText);
 
-              const aiReply = await generateOpenAIReply({
-                systemPrompt,
-                conversation,
-              });
+              const fullPrompt =
+                `${system}\n\n` +
+                `HISTORIAL RECIENTE:\n${history}\n\n` +
+                `INSTRUCCIÓN: responde como Keloke, sin repetir preguntas ya respondidas.`;
+
+              const aiReply = await generateOpenAIReplyFromText(fullPrompt);
 
               const waResponse = await sendWhatsAppTextReply(
                 fromPhone,
@@ -600,7 +611,8 @@ serve(async (req) => {
             const stVal = safeString(status?.status);
             if (!stId || !stVal) continue;
 
-            await supabase.from("whatsapp_messages")
+            await supabase
+              .from("whatsapp_messages")
               .update({ status: stVal } as any)
               .eq("whatsapp_message_id", stId);
           }
@@ -615,7 +627,10 @@ serve(async (req) => {
         if (!forwarded) {
           await fetch(NERD_WEBHOOK_URL, {
             method: "POST",
-            headers: { "Content-Type": "application/json", "X-Forwarded-From": "keloke-panel" },
+            headers: {
+              "Content-Type": "application/json",
+              "X-Forwarded-From": "keloke-panel",
+            },
             body: JSON.stringify(body),
           });
         }
