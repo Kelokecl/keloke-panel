@@ -16,10 +16,8 @@ const corsHeaders: Record<string, string> = {
 const WA_GRAPH_VERSION = "v21.0";
 const STORAGE_BUCKET = "whatsapp-media";
 
-/**
- * (Dejamos Nerd para después)
- */
-const NERD_WEBHOOK_URL = ""; // desactivado
+/** (Nerd lo dejamos apagado por ahora) */
+const NERD_WEBHOOK_URL = ""; // luego lo activamos
 
 function jsonResponse(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -60,28 +58,38 @@ function randomId() {
 
 /**
  * =========================================================
- *  IA SETTINGS (tu tabla real: whatsapp_ai_config)
+ *  IA CONFIG (tabla real: whatsapp_ai_config)
  * =========================================================
  */
 type AiConfig = {
   auto_reply_enabled: boolean;
-  reply_outside_schedule: boolean;
-  start_time: string | null; // "HH:MM" o "HH:MM:SS"
-  end_time: string | null;   // "HH:MM" o "HH:MM:SS"
-  days_enabled: string[] | null; // ["1","2","3"...] 1=Lun ... 7=Dom
+  reply_outside_schedule: boolean; // true => responde fuera del horario; false => responde dentro del horario
+  start_time: string | null; // "HH:MM"
+  end_time: string | null; // "HH:MM"
+  days_enabled: string[] | null; // ["1".."7"] 1=Lun ... 7=Dom
   training_data: string | null;
 };
 
 const DEFAULT_AI_CONFIG: AiConfig = {
   auto_reply_enabled: false,
-  reply_outside_schedule: true,
+  reply_outside_schedule: false,
   start_time: "09:00",
   end_time: "18:00",
   days_enabled: ["1", "2", "3", "4", "5"],
   training_data: "",
 };
 
-async function loadAiConfig(supabase: ReturnType<typeof createClient>): Promise<AiConfig> {
+function sanitizeDays(days: unknown): string[] | null {
+  if (!Array.isArray(days)) return null;
+  const cleaned = days
+    .map((d) => safeString(d).trim())
+    .filter((d) => /^[1-7]$/.test(d));
+  return cleaned.length ? cleaned : null;
+}
+
+async function loadAiConfig(
+  supabase: ReturnType<typeof createClient>,
+): Promise<AiConfig> {
   try {
     const { data, error } = await supabase
       .from("whatsapp_ai_config")
@@ -100,9 +108,7 @@ async function loadAiConfig(supabase: ReturnType<typeof createClient>): Promise<
       reply_outside_schedule: Boolean(data.reply_outside_schedule),
       start_time: data.start_time ?? DEFAULT_AI_CONFIG.start_time,
       end_time: data.end_time ?? DEFAULT_AI_CONFIG.end_time,
-      days_enabled: Array.isArray(data.days_enabled)
-        ? data.days_enabled
-        : DEFAULT_AI_CONFIG.days_enabled,
+      days_enabled: sanitizeDays(data.days_enabled) ?? DEFAULT_AI_CONFIG.days_enabled,
       training_data: data.training_data ?? DEFAULT_AI_CONFIG.training_data,
     };
   } catch (e) {
@@ -113,103 +119,119 @@ async function loadAiConfig(supabase: ReturnType<typeof createClient>): Promise<
 
 /**
  * =========================================================
- *  TZ Chile real (America/Santiago) + helpers
+ *  HORA CHILE + SCHEDULE
  * =========================================================
  */
-const CHILE_TZ = "America/Santiago";
-
-function getChileNowParts() {
-  // Obtenemos hora/minuto/día ISO (1-7) en Chile (no UTC)
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: CHILE_TZ,
+function getChileNow() {
+  // Evitamos depender del timezone del Edge
+  const parts = new Intl.DateTimeFormat("es-CL", {
+    timeZone: "America/Santiago",
     hour12: false,
     weekday: "short",
     hour: "2-digit",
     minute: "2-digit",
-  });
+  }).formatToParts(new Date());
 
-  const parts = fmt.formatToParts(new Date());
   const hh = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
   const mm = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
   const wd = (parts.find((p) => p.type === "weekday")?.value ?? "").toLowerCase();
 
-  // Mapeo weekday -> ISO (1=Lun...7=Dom)
+  // Mapeo weekday (es-CL) a ISO day 1..7
+  // Puede venir: "lun.", "mar.", "mié.", "jue.", "vie.", "sáb.", "dom."
   const map: Record<string, number> = {
-    mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6, sun: 7,
+    "lun.": 1,
+    "mar.": 2,
+    "mié.": 3,
+    "mie.": 3,
+    "jue.": 4,
+    "vie.": 5,
+    "sáb.": 6,
+    "sab.": 6,
+    "dom.": 7,
   };
-  const dayIso = map[wd.slice(0, 3)] ?? 0;
+  const dayIso = map[wd] ?? 1;
 
-  return { hh, mm, dayIso };
+  return { hh, mm, dayIso, wd };
 }
 
-function parseHHMM(x: string | null): { h: number; m: number } | null {
-  if (!x) return null;
-  const s = x.trim();
-  if (!s) return null;
-  // acepta "HH:MM" o "HH:MM:SS"
-  const parts = s.split(":").map((v) => Number(v));
-  if (parts.length < 2) return null;
-  const h = Number.isFinite(parts[0]) ? parts[0] : 0;
-  const m = Number.isFinite(parts[1]) ? parts[1] : 0;
-  return { h, m };
-}
+function isWithinScheduleChile(cfg: AiConfig): boolean {
+  const { hh, mm, dayIso } = getChileNow();
 
-/**
- * Regla:
- * - Si days_enabled está vacío/null => no restringe por días
- * - Si start/end inválidos => no restringe por horario (responde siempre)
- * - reply_outside_schedule:
- *   - true  => responde SOLO fuera del rango
- *   - false => responde SOLO dentro del rango
- */
-function canAnswerByScheduleChile(cfg: AiConfig): boolean {
-  const { hh, mm, dayIso } = getChileNowParts();
-
-  if (Array.isArray(cfg.days_enabled) && cfg.days_enabled.length > 0) {
-    if (!cfg.days_enabled.includes(String(dayIso))) return false;
+  const days = cfg.days_enabled;
+  if (Array.isArray(days) && days.length > 0) {
+    if (!days.includes(String(dayIso))) return false;
   }
 
-  const st = parseHHMM(cfg.start_time);
-  const en = parseHHMM(cfg.end_time);
+  const start = cfg.start_time;
+  const end = cfg.end_time;
+  if (!start || !end) return true; // sin horario => permitido
 
-  // si no hay horario usable, respondemos siempre
-  if (!st || !en) return true;
-
-  const startMin = (st.h || 0) * 60 + (st.m || 0);
-  const endMin = (en.h || 0) * 60 + (en.m || 0);
+  const [sh, sm] = start.split(":").map((x) => parseInt(x, 10));
+  const [eh, em] = end.split(":").map((x) => parseInt(x, 10));
+  const startMin = (sh || 0) * 60 + (sm || 0);
+  const endMin = (eh || 0) * 60 + (em || 0);
   const nowMin = (hh || 0) * 60 + (mm || 0);
 
   const inRange = startMin <= endMin
     ? (nowMin >= startMin && nowMin <= endMin)
     : (nowMin >= startMin || nowMin <= endMin); // cruza medianoche
 
+  // true => responde fuera del horario / false => responde dentro del horario
   return cfg.reply_outside_schedule ? !inRange : inRange;
 }
 
 /**
  * =========================================================
- *  OpenAI Responses API (sin params que rompen)
+ *  HISTORIAL desde DB (para no repetir)
  * =========================================================
- *
- * Tus logs mostraron errores por params:
- * - max_tokens (no)
- * - max_completion_tokens (no en Responses)
- * - temperature (algunos modelos/entradas lo rechazan)
- * - input con formato incorrecto (objeto)
- *
- * Solución: usar Responses API con:
- * - input: string
- * - max_output_tokens
- * - sin temperature
  */
-function buildSystemPrompt(training: string) {
+async function getTranscript(
+  supabase: ReturnType<typeof createClient>,
+  phone: string,
+  limit = 10,
+): Promise<string> {
+  const { data, error } = await supabase
+    .from("whatsapp_messages")
+    .select("direction,message,created_at,message_type")
+    .eq("phone_number", phone)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error || !data) return "";
+
+  const ordered = data.slice().reverse();
+  const lines: string[] = [];
+
+  for (const row of ordered) {
+    const msg = safeString(row.message).trim();
+    const dir = safeString(row.direction);
+    const type = safeString(row.message_type);
+    if (!msg) continue;
+
+    // Para IA, solo texto/captions. Si es media, igual dejamos una nota corta.
+    const content =
+      type && type !== "text" ? `${msg} (tipo: ${type})` : msg;
+
+    lines.push(dir === "outbound" ? `Asistente: ${content}` : `Cliente: ${content}`);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * =========================================================
+ *  OPENAI (Responses API) - compatible gpt-5-mini
+ *  OJO: sin temperature / sin max_tokens / sin max_completion_tokens
+ * =========================================================
+ */
+function buildSystem(training: string) {
   const base = [
     "Eres el asistente de ventas y soporte de Keloke.cl (Chile).",
-    "Hablas español chileno, cercano y profesional.",
-    "Respondes claro y breve (máx 4-6 líneas).",
-    "Si ya te dieron datos (producto/comuna/presupuesto), NO los vuelvas a pedir.",
-    "Si faltan datos clave, pregunta 1 cosa a la vez.",
-    "Da 1-2 opciones y ofrece mandar links.",
+    "Responde en español chileno, cercano y profesional.",
+    "Sé breve y útil (máx 4-6 líneas).",
+    "No repitas preguntas si el cliente ya dio datos (producto, comuna, presupuesto).",
+    "Avanza: sugiere 1-2 opciones y ofrece link.",
+    "Si falta UN dato clave, pide solo 1 pregunta corta.",
     "Cierra con CTA suave.",
   ].join(" ");
 
@@ -220,42 +242,46 @@ function buildSystemPrompt(training: string) {
   return base + ctx;
 }
 
-async function generateOpenAIReplyFromText(fullPrompt: string): Promise<string> {
-  const apiKey = Deno.env.get("OPENAI_API_KEY");
-  const model = Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini";
+async function generateOpenAIReply(prompt: string): Promise<string> {
+  const apiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
+  const model = (Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini").trim();
 
   if (!apiKey) {
     console.error("❌ OPENAI_API_KEY missing");
-    return "Pucha 😅 tuve un tema técnico. ¿Qué producto buscas? y te ayudo al tiro.";
+    return "Pucha 😅 tuve un tema técnico. ¿Qué producto buscas y en qué comuna estás?";
   }
 
-  try {
-    const res = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        input: fullPrompt,          // ✅ string
-        max_output_tokens: 260,      // ✅ correcto para Responses
-      }),
-    });
+  const res = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      input: prompt,            // ✅ string (siempre)
+      max_output_tokens: 240,   // ✅ válido en Responses API
+    }),
+  });
 
-    const raw = await res.text();
-    if (!res.ok) {
-      console.error("❌ OpenAI error:", res.status, raw);
-      return "Te leo 🙌 ¿Qué producto buscas y tu presupuesto aprox? así te mando 2 opciones con link.";
-    }
+  const raw = await res.text();
 
-    const data = JSON.parse(raw);
-    const text = safeString(data?.output_text)?.trim();
-    return text || "Ya bacán 🙌 ¿Qué andas buscando y en qué comuna estás?";
-  } catch (e) {
-    console.error("❌ OpenAI fetch error:", e);
-    return "Te leo 🙌 ¿Qué producto buscas y tu presupuesto aprox? así te mando 2 opciones con link.";
+  if (!res.ok) {
+    console.error("❌ OpenAI error:", res.status, raw);
+    return "Te leo 🙌 ¿Me confirmas el presupuesto aprox y tu comuna? así te mando 2 opciones con link.";
   }
+
+  const data = JSON.parse(raw);
+  const text = safeString(data?.output_text).trim();
+
+  if (text) return text;
+
+  // Fallback parse por si cambia el formato
+  const alt =
+    safeString(data?.output?.[0]?.content?.[0]?.text).trim() ||
+    safeString(data?.output?.[0]?.content?.[0]?.value).trim();
+
+  return alt || "Ya bacán 🙌 ¿Me dices tu comuna y presupuesto aprox para mandarte opciones con link?";
 }
 
 /**
@@ -299,7 +325,7 @@ async function sendWhatsAppTextReply(
 
 /**
  * =========================================================
- *  MEDIA (INBOUND)
+ *  MEDIA (INBOUND) - opcional (lo dejo igual, no rompe)
  * =========================================================
  */
 async function fetchWhatsAppMediaMeta(mediaId: string, accessToken: string) {
@@ -311,14 +337,12 @@ async function fetchWhatsAppMediaMeta(mediaId: string, accessToken: string) {
   if (!json?.url) throw new Error("Media meta sin url");
   return json;
 }
-
 async function downloadWhatsAppMediaBinary(mediaUrl: string, accessToken: string) {
   const res = await fetch(mediaUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!res.ok) throw new Error(`Media binary download failed ${res.status}`);
   const ab = await res.arrayBuffer();
   return new Uint8Array(ab);
 }
-
 async function uploadToStorageAndGetPublicUrl(
   supabase: ReturnType<typeof createClient>,
   filePath: string,
@@ -335,7 +359,6 @@ async function uploadToStorageAndGetPublicUrl(
   if (!data?.publicUrl) throw new Error("No se pudo obtener publicUrl");
   return data.publicUrl;
 }
-
 async function handleInboundMedia(
   supabase: ReturnType<typeof createClient>,
   accessToken: string,
@@ -365,48 +388,13 @@ async function handleInboundMedia(
 
 /**
  * =========================================================
- *  Historial rápido para evitar “reinicio”
- * =========================================================
- */
-async function getRecentConversationText(
-  supabase: ReturnType<typeof createClient>,
-  phone: string,
-  currentUserText: string,
-) {
-  const { data } = await supabase
-    .from("whatsapp_messages")
-    .select("direction,message,created_at")
-    .eq("phone_number", phone)
-    .order("created_at", { ascending: false })
-    .limit(10);
-
-  const ordered = (data || []).slice().reverse();
-
-  const lines: string[] = [];
-  for (const row of ordered) {
-    const dir = safeString((row as any).direction);
-    const msg = safeString((row as any).message);
-    if (!msg) continue;
-    lines.push(`${dir === "outbound" ? "Asistente" : "Cliente"}: ${msg}`);
-  }
-
-  // Asegura el último input actual
-  if (!lines.length || !lines[lines.length - 1].startsWith("Cliente:")) {
-    lines.push(`Cliente: ${currentUserText}`);
-  }
-
-  return lines.join("\n");
-}
-
-/**
- * =========================================================
- *  Server
+ *  SERVER
  * =========================================================
  */
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
-  // Verify (Meta)
+  // Verify token (Meta)
   if (req.method === "GET") {
     const url = new URL(req.url);
     const mode = url.searchParams.get("hub.mode");
@@ -415,10 +403,8 @@ serve(async (req) => {
     const VERIFY_TOKEN = Deno.env.get("WHATSAPP_VERIFY_TOKEN") ?? "keloke_webhook_token";
 
     if (mode === "subscribe" && token === VERIFY_TOKEN) {
-      return new Response(challenge ?? "", {
-        status: 200,
-        headers: { "Content-Type": "text/plain" },
-      });
+      console.log("✅ Webhook verificado");
+      return new Response(challenge ?? "", { status: 200, headers: { "Content-Type": "text/plain" } });
     }
     return new Response("Forbidden", { status: 403 });
   }
@@ -435,21 +421,17 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
     const body = await req.json();
 
-    // 🔥 Modo prueba para FORZAR respuesta sin pelear con horarios
-    // En Secrets: WA_AI_FORCE_REPLY = "true"
-    const FORCE_REPLY = (Deno.env.get("WA_AI_FORCE_REPLY") ?? "").toLowerCase() === "true";
+    const forceReply = (Deno.env.get("FORCE_REPLY") ?? "false").toLowerCase() === "true";
 
-    // 0) Config IA (tu tabla)
+    // AI config
     const aiCfg = await loadAiConfig(supabase);
+    const scheduleOk = isWithinScheduleChile(aiCfg);
 
-    // Log real de la config para que no haya dudas
-    console.log("🤖 AI CONFIG (DB):", JSON.stringify(aiCfg));
-    console.log("🕒 Chile now:", JSON.stringify(getChileNowParts()), "TZ:", CHILE_TZ);
-    console.log("🧪 FORCE_REPLY:", FORCE_REPLY);
+    console.log("🧩 FORCE_REPLY:", forceReply);
+    console.log("🧩 AI CONFIG:", aiCfg);
+    console.log("🕒 Schedule OK (Chile):", scheduleOk, "ChileNow:", getChileNow());
 
-    const scheduleOk = FORCE_REPLY ? true : canAnswerByScheduleChile(aiCfg);
-
-    // 1) Conexión WhatsApp activa
+    // Conexión WhatsApp activa
     const { data: connection, error: connError } = await supabase
       .from("social_connections")
       .select("*")
@@ -462,18 +444,18 @@ serve(async (req) => {
       return jsonResponse({ error: "No WhatsApp connection found", details: connError ?? null }, 500);
     }
 
-    const accessToken = safeString((connection as any).access_token);
-    const phoneNumberId = safeString((connection as any).phone_number_id);
+    const accessToken = safeString(connection.access_token);
+    const phoneNumberId = safeString(connection.phone_number_id);
     if (!accessToken || !phoneNumberId) {
       return jsonResponse({ error: "WhatsApp connection missing access_token/phone_number_id" }, 500);
     }
 
-    // 2) Procesar cambios
+    // Procesar payload
     for (const entry of body.entry || []) {
       for (const change of entry.changes || []) {
         const value = change.value;
 
-        // 2A) Mensajes entrantes
+        // Mensajes entrantes
         if (value?.messages) {
           for (const message of value.messages) {
             const fromPhone = safeString(message.from);
@@ -492,13 +474,16 @@ serve(async (req) => {
               .limit(1)
               .maybeSingle();
 
-            if (existingMsg?.id) continue;
+            if (existingMsg?.id) {
+              console.log("⏭️ inbound ya existe, salto:", messageId);
+              continue;
+            }
 
+            // Contacto (no tocamos el id identity)
             const lastMessageAt = timestamp
               ? new Date(parseInt(timestamp) * 1000).toISOString()
               : new Date().toISOString();
 
-            // Contacto upsert simple
             const { data: existingContact } = await supabase
               .from("whatsapp_contacts")
               .select("id")
@@ -513,12 +498,12 @@ serve(async (req) => {
                 last_message_at: lastMessageAt,
               });
             } else {
-              await supabase
-                .from("whatsapp_contacts")
+              await supabase.from("whatsapp_contacts")
                 .update({ last_message_at: lastMessageAt })
                 .eq("phone_number", fromPhone);
             }
 
+            // Message base
             const messageData: any = {
               phone_number: fromPhone,
               direction: "inbound",
@@ -538,7 +523,7 @@ serve(async (req) => {
               messageData.message = caption || `Mensaje de tipo ${messageType} recibido`;
             }
 
-            // Media inbound
+            // Media inbound (opcional)
             if (["audio", "image", "video", "document", "sticker"].includes(messageType)) {
               try {
                 const media = await handleInboundMedia(supabase, accessToken, messageType, message);
@@ -557,9 +542,9 @@ serve(async (req) => {
             // Guardar inbound
             await supabase.from("whatsapp_messages").insert(messageData);
 
-            // 2B) Auto-reply IA SOLO si text + enabled + schedule ok
+            // Auto-reply IA solo texto
             if (messageType === "text") {
-              const userText = (messageData.message || "").trim();
+              const userText = safeString(messageData.message).trim();
               if (!userText) continue;
 
               if (!aiCfg.auto_reply_enabled) {
@@ -567,30 +552,26 @@ serve(async (req) => {
                 continue;
               }
 
-              if (!scheduleOk) {
+              if (!forceReply && !scheduleOk) {
                 console.log("🕒 Según config, no corresponde responder ahora.");
                 continue;
               }
 
-              // Prompt con historial + contexto
-              const system = buildSystemPrompt(aiCfg.training_data || "");
-              const history = await getRecentConversationText(supabase, fromPhone, userText);
+              const system = buildSystem(aiCfg.training_data || "");
+              const transcript = await getTranscript(supabase, fromPhone, 10);
 
-              const fullPrompt =
+              const prompt =
                 `${system}\n\n` +
-                `HISTORIAL RECIENTE:\n${history}\n\n` +
-                `INSTRUCCIÓN: responde como Keloke, sin repetir preguntas ya respondidas.`;
+                `HISTORIAL (últimos mensajes):\n${transcript || "(sin historial)"}\n\n` +
+                `INSTRUCCIÓN: Responde SOLO al último mensaje del cliente. No repitas preguntas ya respondidas.\n\n` +
+                `ÚLTIMO MENSAJE CLIENTE:\n${userText}`;
 
-              const aiReply = await generateOpenAIReplyFromText(fullPrompt);
+              console.log("🤖 Llamando OpenAI… model:", (Deno.env.get("OPENAI_MODEL") ?? "gpt-5-mini"));
+              const aiReply = await generateOpenAIReply(prompt);
+              console.log("✅ IA Reply:", aiReply);
 
-              const waResponse = await sendWhatsAppTextReply(
-                fromPhone,
-                aiReply,
-                accessToken,
-                phoneNumberId,
-              );
+              const waResponse = await sendWhatsAppTextReply(fromPhone, aiReply, accessToken, phoneNumberId);
 
-              // Guardar outbound
               await supabase.from("whatsapp_messages").insert({
                 phone_number: fromPhone,
                 direction: "outbound",
@@ -611,8 +592,7 @@ serve(async (req) => {
             const stVal = safeString(status?.status);
             if (!stId || !stVal) continue;
 
-            await supabase
-              .from("whatsapp_messages")
+            await supabase.from("whatsapp_messages")
               .update({ status: stVal } as any)
               .eq("whatsapp_message_id", stId);
           }
@@ -620,17 +600,14 @@ serve(async (req) => {
       }
     }
 
-    // Forward a Nerd (apagado)
+    // Forward Nerd (apagado)
     if (NERD_WEBHOOK_URL) {
       try {
         const forwarded = safeString(req.headers.get("X-Forwarded-From"));
         if (!forwarded) {
           await fetch(NERD_WEBHOOK_URL, {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Forwarded-From": "keloke-panel",
-            },
+            headers: { "Content-Type": "application/json", "X-Forwarded-From": "keloke-panel" },
             body: JSON.stringify(body),
           });
         }
