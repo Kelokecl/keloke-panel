@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Send, User, Info, Loader, CheckCheck, Check } from 'lucide-react';
+import { Send, User, Info, Loader, CheckCheck, Check, RefreshCw } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import WhatsAppMediaMessage from './WhatsAppMediaMessage';
 import WhatsAppVoiceRecorder from './WhatsAppVoiceRecorder';
@@ -39,7 +39,6 @@ function inferMessageTypeFromFile(file) {
   const t = (file?.type || '').toLowerCase();
   if (t.startsWith('image/')) return 'image';
   if (t.startsWith('video/')) return 'video';
-  // WhatsApp Cloud no soporta “text” como media; txt/pdf/doc van como document
   return 'document';
 }
 
@@ -52,57 +51,40 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
   // Scroll inteligente
   const messagesEndRef = useRef(null);
   const listRef = useRef(null);
-  const lastMessageIdRef = useRef(null);
   const [isNearBottom, setIsNearBottom] = useState(true);
 
-  const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  const scrollToBottom = useCallback((behavior = 'auto') => {
+    messagesEndRef.current?.scrollIntoView({ behavior });
   }, []);
 
-  useEffect(() => {
-    if (!contact?.phone_number) return;
+  const computeIsNearBottom = useCallback(() => {
+    const el = listRef.current;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+  }, []);
 
-    lastMessageIdRef.current = null;
-    setIsNearBottom(true);
+  const upsertMessageInState = useCallback((row) => {
+    if (!row?.id) return;
+    setMessages((prev) => {
+      const idx = prev.findIndex((m) => m.id === row.id);
+      if (idx === -1) {
+        // Insert nuevo -> mantener orden por created_at asc
+        const next = [...prev, row];
+        next.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+        return next;
+      }
+      // Update existente (status, media_url, etc.)
+      const next = prev.slice();
+      next[idx] = { ...next[idx], ...row };
+      return next;
+    });
+  }, []);
 
-    loadMessages();
-    markMessagesAsRead();
-
-    const interval = setInterval(loadMessages, 30000);
-
-    const channel = supabase
-      .channel(`chat_${contact.phone_number}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'whatsapp_messages',
-          filter: `phone_number=eq.${contact.phone_number}`,
-        },
-        () => {
-          loadMessages();
-          markMessagesAsRead();
-        }
-      )
-      .subscribe();
-
-    return () => {
-      clearInterval(interval);
-      supabase.removeChannel(channel);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contact?.phone_number]);
-
-  useEffect(() => {
-    if (isNearBottom) scrollToBottom();
-  }, [messages, isNearBottom, scrollToBottom]);
-
-  async function loadMessages() {
+  async function loadMessages({ showSpinner = false } = {}) {
     if (!contact?.phone_number) return;
 
     try {
-      setIsLoading(true);
+      if (showSpinner) setIsLoading(true);
 
       const { data, error } = await supabase
         .from('whatsapp_messages')
@@ -112,16 +94,12 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
 
       if (error) throw error;
 
-      const lastId = data?.length ? data[data.length - 1].id : null;
-      if (lastMessageIdRef.current === lastId) return;
-
-      lastMessageIdRef.current = lastId;
       setMessages(data || []);
     } catch (err) {
       console.error('Error loading messages:', err);
       setMessages([]);
     } finally {
-      setIsLoading(false);
+      if (showSpinner) setIsLoading(false);
     }
   }
 
@@ -141,6 +119,86 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       console.error('Error marking messages as read:', err);
     }
   }
+
+  // ✅ Carga inicial + realtime SIN polling
+  useEffect(() => {
+    if (!contact?.phone_number) return;
+
+    let mounted = true;
+
+    (async () => {
+      setIsLoading(true);
+      await loadMessages({ showSpinner: false });
+      await markMessagesAsRead();
+      if (!mounted) return;
+
+      // al abrir conversación, bajar al final de una
+      setTimeout(() => scrollToBottom('auto'), 0);
+      setIsLoading(false);
+    })();
+
+    // Realtime: INSERT para mensajes nuevos
+    const chInsert = supabase
+      .channel(`wa_msg_insert_${contact.phone_number}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'whatsapp_messages',
+          filter: `phone_number=eq.${contact.phone_number}`,
+        },
+        async (payload) => {
+          const wasNear = computeIsNearBottom();
+          const row = payload?.new;
+
+          upsertMessageInState(row);
+
+          // marcar leído si inbound
+          if (row?.direction === 'inbound') {
+            markMessagesAsRead();
+          }
+
+          // auto-scroll SOLO si estabas abajo
+          if (wasNear) {
+            setIsNearBottom(true);
+            setTimeout(() => scrollToBottom('auto'), 0);
+          }
+        }
+      )
+      .subscribe();
+
+    // Realtime: UPDATE para status/read/media_url etc
+    const chUpdate = supabase
+      .channel(`wa_msg_update_${contact.phone_number}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'whatsapp_messages',
+          filter: `phone_number=eq.${contact.phone_number}`,
+        },
+        (payload) => {
+          const row = payload?.new;
+          upsertMessageInState(row);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      mounted = false;
+      supabase.removeChannel(chInsert);
+      supabase.removeChannel(chUpdate);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contact?.phone_number]);
+
+  // Scroll handler (manual)
+  const onScroll = useCallback(() => {
+    const near = computeIsNearBottom();
+    setIsNearBottom(near);
+  }, [computeIsNearBottom]);
 
   async function sendMessage() {
     if (!messageText.trim() || !connection) return;
@@ -178,21 +236,28 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       const result = await response.json();
       if (!response.ok) throw new Error(result?.error?.message || 'Error WhatsApp API');
 
-      const { error: insertError } = await supabase.from('whatsapp_messages').insert({
-        phone_number: contact.phone_number,
-        message: messageToSend,
-        direction: 'outbound',
-        status: 'sent',
-        message_type: 'text',
-        whatsapp_message_id: result.messages?.[0]?.id ?? null,
-        platform_response: result,
-      });
+      const { data: inserted, error: insertError } = await supabase
+        .from('whatsapp_messages')
+        .insert({
+          phone_number: contact.phone_number,
+          message: messageToSend,
+          direction: 'outbound',
+          status: 'sent',
+          message_type: 'text',
+          whatsapp_message_id: result.messages?.[0]?.id ?? null,
+          platform_response: result,
+        })
+        .select('*')
+        .single();
 
       if (insertError) console.error('❌ Error guardando outbound:', insertError);
 
+      // update UI inmediato sin reload completo
+      if (inserted) upsertMessageInState(inserted);
+
+      // auto-scroll solo si estás abajo (si envías, asumo que quieres ver el final)
       setIsNearBottom(true);
-      await loadMessages();
-      setTimeout(scrollToBottom, 50);
+      setTimeout(() => scrollToBottom('auto'), 0);
     } catch (err) {
       console.error('❌ [SEND_ERROR]', err);
       alert('Error al enviar el mensaje: ' + (err?.message || err));
@@ -232,7 +297,6 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       const filename = `out_${cleanPhone}_${Date.now()}.${ext}`;
       const storagePath = `audio/${filename}`;
 
-      // 1) Storage (para reproducir en tu app)
       const { error: upErr } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, audioBlob, {
         contentType: mime,
         cacheControl: '3600',
@@ -243,7 +307,6 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       const { data: pub } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(storagePath);
       const publicUrl = pub?.publicUrl || null;
 
-      // 2) WhatsApp /media
       const form = new FormData();
       form.append('messaging_product', 'whatsapp');
       form.append('file', new File([audioBlob], filename, { type: mime }));
@@ -261,7 +324,6 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       const mediaId = mediaUploadJson?.id;
       if (!mediaId) throw new Error('No se recibió media_id desde WhatsApp.');
 
-      // 3) WhatsApp /messages
       const msgRes = await fetch(
         `https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/messages`,
         {
@@ -282,36 +344,36 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
 
       const whatsappMessageId = msgJson?.messages?.[0]?.id ?? null;
 
-      // 4) DB
-      const { error: insertError } = await supabase.from('whatsapp_messages').insert({
-        phone_number: contact.phone_number,
-        direction: 'outbound',
-        status: 'sent',
-        message_type: 'audio',
-        message: '',
-
-        whatsapp_message_id: whatsappMessageId,
-
-        media_id: mediaId,
-        media_url: publicUrl,
-        media_mime_type: mime,
-        media_filename: filename,
-        media_size: audioBlob.size,
-
-        platform_response: {
-          storage_path: storagePath,
-          storage_public_url: publicUrl,
-          media_upload: mediaUploadJson,
-          message_send: msgJson,
-          duration_seconds: durationSeconds ?? null,
-        },
-      });
+      const { data: inserted, error: insertError } = await supabase
+        .from('whatsapp_messages')
+        .insert({
+          phone_number: contact.phone_number,
+          direction: 'outbound',
+          status: 'sent',
+          message_type: 'audio',
+          message: '',
+          whatsapp_message_id: whatsappMessageId,
+          media_id: mediaId,
+          media_url: publicUrl,
+          media_mime_type: mime,
+          media_filename: filename,
+          media_size: audioBlob.size,
+          platform_response: {
+            storage_path: storagePath,
+            storage_public_url: publicUrl,
+            media_upload: mediaUploadJson,
+            message_send: msgJson,
+            duration_seconds: durationSeconds ?? null,
+          },
+        })
+        .select('*')
+        .single();
 
       if (insertError) throw new Error(insertError.message);
+      if (inserted) upsertMessageInState(inserted);
 
       setIsNearBottom(true);
-      await loadMessages();
-      setTimeout(scrollToBottom, 50);
+      setTimeout(() => scrollToBottom('auto'), 0);
     } catch (err) {
       console.error('❌ [SEND_AUDIO_ERROR]', err);
       alert('Error al enviar el audio: ' + (err?.message || err));
@@ -349,12 +411,10 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       const mime = file.type || 'application/octet-stream';
       const ext = safeExtFromMime(mime);
 
-      // nombre estable (evita caracteres raros)
       const safeName = (file.name || `file.${ext}`).replace(/[^\w.\-]+/g, '_');
       const filename = `out_${cleanPhone}_${Date.now()}_${safeName}`;
       const storagePath = `${messageType}/${filename}`;
 
-      // 1) Storage (para tu app)
       const { error: upErr } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, file, {
         contentType: mime,
         cacheControl: '3600',
@@ -369,7 +429,6 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       const { data: pub } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(storagePath);
       const publicUrl = pub?.publicUrl || null;
 
-      // 2) WhatsApp /media
       const form = new FormData();
       form.append('messaging_product', 'whatsapp');
       form.append('file', new File([file], filename, { type: mime }));
@@ -387,7 +446,6 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       const mediaId = mediaUploadJson?.id;
       if (!mediaId) throw new Error('No se recibió media_id desde WhatsApp.');
 
-      // 3) WhatsApp /messages según tipo
       const body = {
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
@@ -400,8 +458,9 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       if (messageType === 'image') body.image = cap ? { id: mediaId, caption: cap } : { id: mediaId };
       if (messageType === 'video') body.video = cap ? { id: mediaId, caption: cap } : { id: mediaId };
       if (messageType === 'document') {
-        // WhatsApp permite filename + caption (caption opcional)
-        body.document = cap ? { id: mediaId, caption: cap, filename: safeName } : { id: mediaId, filename: safeName };
+        body.document = cap
+          ? { id: mediaId, caption: cap, filename: safeName }
+          : { id: mediaId, filename: safeName };
       }
 
       const msgRes = await fetch(
@@ -420,35 +479,35 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
 
       const whatsappMessageId = msgJson?.messages?.[0]?.id ?? null;
 
-      // 4) DB (usa message como caption para mantener compatibilidad con tu esquema)
-      const { error: insertError } = await supabase.from('whatsapp_messages').insert({
-        phone_number: contact.phone_number,
-        direction: 'outbound',
-        status: 'sent',
-        message_type: messageType,
-        message: cap || '',
-
-        whatsapp_message_id: whatsappMessageId,
-
-        media_id: mediaId,
-        media_url: publicUrl,
-        media_mime_type: mime,
-        media_filename: safeName,
-        media_size: file.size,
-
-        platform_response: {
-          storage_path: storagePath,
-          storage_public_url: publicUrl,
-          media_upload: mediaUploadJson,
-          message_send: msgJson,
-        },
-      });
+      const { data: inserted, error: insertError } = await supabase
+        .from('whatsapp_messages')
+        .insert({
+          phone_number: contact.phone_number,
+          direction: 'outbound',
+          status: 'sent',
+          message_type: messageType,
+          message: cap || '',
+          whatsapp_message_id: whatsappMessageId,
+          media_id: mediaId,
+          media_url: publicUrl,
+          media_mime_type: mime,
+          media_filename: safeName,
+          media_size: file.size,
+          platform_response: {
+            storage_path: storagePath,
+            storage_public_url: publicUrl,
+            media_upload: mediaUploadJson,
+            message_send: msgJson,
+          },
+        })
+        .select('*')
+        .single();
 
       if (insertError) throw new Error(insertError.message);
+      if (inserted) upsertMessageInState(inserted);
 
       setIsNearBottom(true);
-      await loadMessages();
-      setTimeout(scrollToBottom, 50);
+      setTimeout(() => scrollToBottom('auto'), 0);
     } catch (err) {
       console.error('❌ [SEND_FILE_ERROR]', err);
       alert('Error al enviar el archivo: ' + (err?.message || err));
@@ -485,6 +544,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
         <div className="w-10 h-10 rounded-full bg-green-500 flex items-center justify-center text-white">
           <User className="w-6 h-6" />
         </div>
+
         <div className="flex-1">
           <h3 className="font-semibold text-gray-900">
             {contact.contact_name || contact.phone_number}
@@ -499,9 +559,23 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
             )}
           </div>
         </div>
+
+        {/* ✅ Refresh manual */}
+        <button
+          onClick={async () => {
+            await loadMessages({ showSpinner: true });
+            await markMessagesAsRead();
+          }}
+          className="p-2 hover:bg-gray-100 rounded-full"
+          title="Actualizar conversación"
+        >
+          <RefreshCw className="w-5 h-5 text-gray-600" />
+        </button>
+
         <button
           onClick={() => onShowClientInfo(contact)}
           className="p-2 hover:bg-gray-100 rounded-full"
+          title="Ver info"
         >
           <Info className="w-5 h-5 text-gray-600" />
         </button>
@@ -510,12 +584,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       {/* Mensajes */}
       <div
         ref={listRef}
-        onScroll={() => {
-          const el = listRef.current;
-          if (!el) return;
-          const near = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-          setIsNearBottom(near);
-        }}
+        onScroll={onScroll}
         className="flex-1 overflow-y-auto p-4 space-y-2"
       >
         {isLoading ? (
@@ -553,7 +622,6 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       {/* Input */}
       <div className="bg-white border-t p-4">
         <div className="flex items-end gap-2 relative">
-          {/* ✅ ahora sí: sendFile real */}
           <WhatsAppFileAttachment onSendFile={sendFile} disabled={isSending} />
 
           <textarea
