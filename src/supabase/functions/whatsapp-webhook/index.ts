@@ -1,680 +1,593 @@
-/// <reference lib="deno.unstable" />
+// Supabase Edge Function: whatsapp-webhook
+// Deno runtime
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
-// -------------------- ENV --------------------
+type WAWebhook = any;
+
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY")!;
-const META_VERIFY_TOKEN = Deno.env.get("META_VERIFY_TOKEN") || "verify_token";
-const META_APP_SECRET = Deno.env.get("META_APP_SECRET") || ""; // opcional (firma)
+const WHATSAPP_VERIFY_TOKEN = Deno.env.get("WHATSAPP_VERIFY_TOKEN") || "";
+const META_WHATSAPP_TOKEN = Deno.env.get("META_WHATSAPP_TOKEN") || "";
+const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") || "";
+const OPENAI_MODEL = Deno.env.get("OPENAI_MODEL") || "gpt-5-mini";
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-}
-if (!OPENAI_API_KEY) {
-  console.error("Missing OPENAI_API_KEY");
-}
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-  auth: { persistSession: false },
-});
-
-// -------------------- TYPES (WhatsApp) --------------------
-type WaWebhook = {
-  object?: string;
-  entry?: Array<{
-    id?: string;
-    changes?: Array<{
-      field?: string;
-      value?: any;
-    }>;
-  }>;
+const corsHeaders = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-headers":
+    "authorization, x-client-info, apikey, content-type",
+  "access-control-allow-methods": "GET,POST,OPTIONS",
 };
 
-type WaMessage = {
-  id: string; // whatsapp_message_id
-  from: string; // wa_id del cliente
-  timestamp?: string;
-  type: string;
-  text?: { body?: string };
-  image?: { id?: string; mime_type?: string; caption?: string };
-  video?: { id?: string; mime_type?: string; caption?: string };
-  audio?: { id?: string; mime_type?: string };
-  document?: { id?: string; filename?: string; mime_type?: string; caption?: string };
-};
-
-type SocialConn = {
-  platform: string;
-  phone_number_id: string;
-  waba_id: string | null;
-  access_token: string;
-  is_active: boolean;
-};
-
-type AiSettings = {
-  is_enabled: boolean;
-  only_outside_hours: boolean;
-  start_time: string; // "09:00:00" o "09:00"
-  end_time: string;
-  days: number[]; // 1..7
-  training_context: string;
-  provider: string;
-  model: string;
-};
-
-type AiConfig = {
-  auto_reply_enabled: boolean;
-  reply_outside_schedule: boolean;
-  start_time: string;
-  end_time: string;
-  days_enabled: string[]; // ["1","2"...]
-  training_data: string;
-  ai_provider: string;
-  ai_model: string;
-};
-
-// -------------------- HELPERS --------------------
-function json(resBody: any, status = 200) {
-  return new Response(JSON.stringify(resBody), {
+function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
+  return new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json; charset=utf-8", ...corsHeaders, ...extraHeaders },
   });
 }
 
-function text(resBody: string, status = 200) {
-  return new Response(resBody, {
+function text(body: string, status = 200, extraHeaders: Record<string, string> = {}) {
+  return new Response(body, {
     status,
-    headers: { "content-type": "text/plain; charset=utf-8" },
+    headers: { "content-type": "text/plain; charset=utf-8", ...corsHeaders, ...extraHeaders },
   });
 }
 
-function nowChileParts() {
-  // Chile (America/Santiago)
+function nowISO() {
+  return new Date().toISOString();
+}
+
+function normalizePhone(s: string) {
+  // WhatsApp Cloud "from" viene como "569xxxxxxxx"
+  return (s || "").replace(/[^\d]/g, "");
+}
+
+async function getActiveConnectionByPhoneNumberId(phoneNumberId: string) {
+  // social_connections: platform, phone_number_id, waba_id, access_token, is_active
+  const { data, error } = await supabase
+    .from("social_connections")
+    .select("*")
+    .eq("platform", "whatsapp")
+    .eq("phone_number_id", phoneNumberId)
+    .eq("is_active", true)
+    .maybeSingle();
+
+  if (error) {
+    console.error("DB social_connections error:", error);
+    return null;
+  }
+  return data || null;
+}
+
+async function upsertContact(waId: string, contactName?: string) {
+  const phone = normalizePhone(waId);
+  if (!phone) return;
+
+  // whatsapp_contacts: phone_number, contact_name, last_message_at, updated_at
+  const payload: any = {
+    phone_number: phone,
+    updated_at: nowISO(),
+  };
+  if (contactName) payload.contact_name = contactName;
+
+  const { error } = await supabase
+    .from("whatsapp_contacts")
+    .upsert(payload, { onConflict: "phone_number" });
+
+  if (error) console.error("upsertContact error:", error);
+}
+
+async function insertMessage(row: any) {
+  const { error } = await supabase.from("whatsapp_messages").insert(row);
+  if (error) console.error("insertMessage error:", error, row);
+}
+
+async function getAIConfig() {
+  // whatsapp_ai_config: auto_reply_enabled, reply_outside_schedule, start_time, end_time, days_enabled, training_data, ai_model, ai_provider
+  const { data, error } = await supabase
+    .from("whatsapp_ai_config")
+    .select("*")
+    .order("id", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getAIConfig error:", error);
+    return null;
+  }
+  return data || null;
+}
+
+function withinScheduleChile(cfg: any) {
+  // Si reply_outside_schedule = true => siempre responde
+  if (!cfg) return true;
+  if (cfg.reply_outside_schedule === true) return true;
+
+  // Si no hay horas definidas, responde igual
+  if (!cfg.start_time || !cfg.end_time) return true;
+
+  // Días: cfg.days_enabled puede venir como array de strings ("1".."7") o nombres ("mon"...)
+  const tz = "America/Santiago";
   const dt = new Date();
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Santiago",
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
     hour12: false,
     weekday: "short",
     hour: "2-digit",
     minute: "2-digit",
-  });
-  const parts = fmt.formatToParts(dt);
-  const hour = Number(parts.find((p) => p.type === "hour")?.value || "0");
-  const minute = Number(parts.find((p) => p.type === "minute")?.value || "0");
-  const wdStr = (parts.find((p) => p.type === "weekday")?.value || "").toLowerCase();
-  // Map: sun..sat -> 7..6? Aquí usaremos 1..7 (lun=1..dom=7)
-  const map: Record<string, number> = {
-    mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6, sun: 7,
+  }).formatToParts(dt);
+
+  const weekday = parts.find((p) => p.type === "weekday")?.value?.toLowerCase() || "";
+  const hour = parseInt(parts.find((p) => p.type === "hour")?.value || "0", 10);
+  const minute = parseInt(parts.find((p) => p.type === "minute")?.value || "0", 10);
+
+  const hhmm = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+
+  const start = String(cfg.start_time).slice(0, 5);
+  const end = String(cfg.end_time).slice(0, 5);
+
+  // days_enabled puede ser ["mon","tue",...] o ["1","2"...]
+  const days = Array.isArray(cfg.days_enabled) ? cfg.days_enabled : [];
+  const weekdayMap: Record<string, string> = {
+    mon: "mon",
+    tue: "tue",
+    wed: "wed",
+    thu: "thu",
+    fri: "fri",
+    sat: "sat",
+    sun: "sun",
   };
-  const day = map[wdStr.slice(0, 3)] ?? 7;
-  return { hour, minute, day };
+
+  const okDay =
+    days.length === 0 ||
+    days.includes(weekday) ||
+    days.includes(weekdayMap[weekday]) ||
+    // soporte "1..7" (1=lun ... 7=dom)
+    (() => {
+      const order = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+      const idx = order.indexOf(weekday.slice(0, 3));
+      if (idx < 0) return false;
+      return days.includes(String(idx + 1));
+    })();
+
+  const okTime = hhmm >= start && hhmm <= end;
+
+  return okDay && okTime;
 }
 
-function parseTimeToMinutes(t: string) {
-  // "09:00" / "09:00:00"
-  const s = t.trim();
-  const [hh, mm] = s.split(":");
-  return Number(hh) * 60 + Number(mm);
-}
-
-function isWithinSchedule(settings: AiSettings) {
-  const { hour, minute, day } = nowChileParts();
-  const nowM = hour * 60 + minute;
-  const startM = parseTimeToMinutes(settings.start_time);
-  const endM = parseTimeToMinutes(settings.end_time);
-
-  const dayOk = settings.days.includes(day);
-  const timeOk = nowM >= startM && nowM <= endM;
-  return dayOk && timeOk;
-}
-
-function normalizePhone(s: string) {
-  return (s || "").replace(/[^\d]/g, "");
-}
-
-function safeTextFromMessage(m: WaMessage): { message_type: string; message_content: string | null; media_id: string | null; caption: string | null; mime: string | null; filename: string | null } {
-  const type = m.type;
-  if (type === "text") {
-    const body = m.text?.body?.trim() || "";
-    return { message_type: "text", message_content: body || null, media_id: null, caption: null, mime: null, filename: null };
-  }
-  if (type === "image") {
-    return { message_type: "image", message_content: null, media_id: m.image?.id || null, caption: m.image?.caption || null, mime: m.image?.mime_type || null, filename: null };
-  }
-  if (type === "video") {
-    return { message_type: "video", message_content: null, media_id: m.video?.id || null, caption: m.video?.caption || null, mime: m.video?.mime_type || null, filename: null };
-  }
-  if (type === "audio") {
-    return { message_type: "audio", message_content: null, media_id: m.audio?.id || null, caption: null, mime: m.audio?.mime_type || null, filename: null };
-  }
-  if (type === "document") {
-    return { message_type: "document", message_content: null, media_id: m.document?.id || null, caption: m.document?.caption || null, mime: m.document?.mime_type || null, filename: m.document?.filename || null };
-  }
-  // otros tipos:
-  return { message_type: type || "unknown", message_content: null, media_id: null, caption: null, mime: null, filename: null };
-}
-
-// -------------------- DB LOADERS --------------------
-async function getSocialConn(): Promise<SocialConn | null> {
-  const { data, error } = await supabase
-    .from("social_connections")
-    .select("platform, phone_number_id, waba_id, access_token, is_active")
-    .eq("platform", "whatsapp")
-    .eq("is_active", true)
-    .limit(1)
-    .maybeSingle();
-
-  if (error) {
-    console.error("social_connections error:", error);
-    return null;
-  }
-  return data as SocialConn | null;
-}
-
-async function getAiSettings(): Promise<AiSettings | null> {
-  // 1) prefer whatsapp_ai_settings (como lo tenías)
-  const s1 = await supabase
-    .from("whatsapp_ai_settings")
-    .select("is_enabled, only_outside_hours, start_time, end_time, days, training_context, provider, model")
-    .eq("id", 1)
-    .maybeSingle();
-
-  if (!s1.error && s1.data) {
-    const d = s1.data as any;
-    return {
-      is_enabled: !!d.is_enabled,
-      only_outside_hours: !!d.only_outside_hours,
-      start_time: String(d.start_time ?? "09:00"),
-      end_time: String(d.end_time ?? "17:00"),
-      days: Array.isArray(d.days) ? d.days.map((x: any) => Number(x)) : [1,2,3,4,5,6,7],
-      training_context: String(d.training_context ?? ""),
-      provider: String(d.provider ?? "openai"),
-      model: String(d.model ?? "gpt-5-mini"),
-    };
-  }
-
-  // 2) fallback whatsapp_ai_config
-  const s2 = await supabase
-    .from("whatsapp_ai_config")
-    .select("auto_reply_enabled, reply_outside_schedule, start_time, end_time, days_enabled, training_data, ai_provider, ai_model")
-    .limit(1)
-    .maybeSingle();
-
-  if (s2.error || !s2.data) {
-    if (s2.error) console.error("whatsapp_ai_config error:", s2.error);
-    return null;
-  }
-
-  const c = s2.data as AiConfig;
-  return {
-    is_enabled: !!c.auto_reply_enabled,
-    only_outside_hours: !!c.reply_outside_schedule, // ojo: nombres distintos, pero sirve
-    start_time: String(c.start_time ?? "09:00"),
-    end_time: String(c.end_time ?? "17:00"),
-    days: Array.isArray(c.days_enabled) ? c.days_enabled.map((x) => Number(x)) : [1,2,3,4,5,6,7],
-    training_context: String(c.training_data ?? ""),
-    provider: String(c.ai_provider ?? "openai"),
-    model: String(c.ai_model ?? "gpt-5-mini"),
-  };
-}
-
-async function getConversation(phone: string) {
+async function getConversation(waId: string) {
+  const phone = normalizePhone(waId);
   const { data, error } = await supabase
     .from("whatsapp_conversations")
-    .select("phone_number, state, product, budget, comuna, updated_at")
+    .select("*")
     .eq("phone_number", phone)
     .maybeSingle();
-
   if (error) {
     console.error("getConversation error:", error);
     return null;
   }
-  return data as any;
+  return data || null;
 }
 
-async function upsertConversation(phone: string, patch: Partial<{ state: string; product: string | null; budget: number | null; comuna: string | null }>) {
-  const existing = await getConversation(phone);
-  const payload: any = {
-    phone_number: phone,
-    state: patch.state ?? existing?.state ?? "NEW",
-    product: patch.product ?? existing?.product ?? null,
-    budget: patch.budget ?? existing?.budget ?? null,
-    comuna: patch.comuna ?? existing?.comuna ?? null,
-    updated_at: new Date().toISOString(),
-  };
-
-  const { error } = await supabase.from("whatsapp_conversations").upsert(payload, { onConflict: "phone_number" });
+async function upsertConversation(waId: string, patch: any) {
+  const phone = normalizePhone(waId);
+  const payload = { phone_number: phone, updated_at: nowISO(), ...patch };
+  const { error } = await supabase
+    .from("whatsapp_conversations")
+    .upsert(payload, { onConflict: "phone_number" });
   if (error) console.error("upsertConversation error:", error);
 }
 
-async function messageAlreadyProcessed(waMessageId: string) {
-  const { data, error } = await supabase
-    .from("whatsapp_messages")
-    .select("id")
-    .eq("whatsapp_message_id", waMessageId)
-    .limit(1);
+function extractBudgetLukas(text: string): number | null {
+  const t = (text || "").toLowerCase();
+  // "90 lucas", "90lks", "90000", "90.000"
+  const m1 = t.match(/(\d{1,3}(?:[.,]\d{3})+|\d{1,6})\s*(lucas|lks|luca)?/i);
+  if (!m1) return null;
+  const raw = m1[1].replace(/\./g, "").replace(/,/g, "");
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
 
-  if (error) {
-    console.error("messageAlreadyProcessed error:", error);
-    return false;
-  }
-  return (data?.length ?? 0) > 0;
+  // Si escribió "90 lucas" => 90000
+  if ((m1[2] || "").toLowerCase().includes("luc")) return n * 1000;
+  // Si puso 90000 => ok
+  return n;
 }
 
-async function insertInboundMessage(args: {
-  from_number: string;
-  to_number: string | null;
-  phone_number: string;
-  whatsapp_message_id: string;
-  message_type: string;
-  message_content: string | null;
-  media_id: string | null;
-  caption: string | null;
-  media_mime_type: string | null;
-  media_filename: string | null;
-}) {
-  // Insert mínimo “seguro” (columnas muy probables según tu tabla)
-  const row: any = {
-    from_number: args.from_number,
-    to_number: args.to_number,
-    phone_number: args.phone_number,
-    direction: "inbound",
-    whatsapp_message_id: args.whatsapp_message_id,
-    message_type: args.message_type,
-    message_content: args.message_content,
-    caption: args.caption,
-    media_id: args.media_id,
-    media_mime_type: args.media_mime_type,
-    media_filename: args.media_filename,
-    timestamp: new Date().toISOString(),
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
-
-  const { error } = await supabase.from("whatsapp_messages").insert(row);
-  if (error) console.error("insertInboundMessage error:", error);
-}
-
-async function insertOutboundMessage(args: {
-  from_number: string | null;
-  to_number: string;
-  phone_number: string;
-  message_type: string;
-  message_content: string;
-  platform_response: any;
-}) {
-  const row: any = {
-    from_number: args.from_number,
-    to_number: args.to_number,
-    phone_number: args.phone_number,
-    direction: "outbound",
-    message_type: args.message_type,
-    message_content: args.message_content,
-    platform_response: args.platform_response,
-    timestamp: new Date().toISOString(),
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
-
-  const { error } = await supabase.from("whatsapp_messages").insert(row);
-  if (error) console.error("insertOutboundMessage error:", error);
-}
-
-// -------------------- META SIGNATURE (optional) --------------------
-async function verifyMetaSignature(req: Request, rawBody: string) {
-  if (!META_APP_SECRET) return true; // si no hay secret, no bloqueamos
-  const sig = req.headers.get("x-hub-signature-256") || "";
-  if (!sig.startsWith("sha256=")) return false;
-
-  const their = sig.slice("sha256=".length);
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(META_APP_SECRET),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(rawBody));
-  const ours = Array.from(new Uint8Array(mac)).map((b) => b.toString(16).padStart(2, "0")).join("");
-  return ours === their;
-}
-
-// -------------------- WHATSAPP SEND --------------------
-async function sendWhatsAppText(conn: SocialConn, to: string, body: string) {
-  const phoneNumberId = conn.phone_number_id;
-  if (!phoneNumberId) throw new Error("phone_number_id is missing (undefined)");
-
-  const url = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
-  const payload = {
-    messaging_product: "whatsapp",
-    to,
-    type: "text",
-    text: { body },
-  };
-
+async function waSendText(phoneNumberId: string, toWaId: string, body: string, accessToken: string) {
+  const url = `https://graph.facebook.com/v24.0/${phoneNumberId}/messages`;
   const resp = await fetch(url, {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${conn.access_token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    console.error("WA send failed:", resp.status, data);
-    throw new Error(`WA send failed ${resp.status}: ${JSON.stringify(data)}`);
-  }
-  return data;
-}
-
-// -------------------- AI (OpenAI Responses API) --------------------
-async function callOpenAI(model: string, system: string, messages: Array<{ role: "user" | "assistant"; content: string }>) {
-  // Creamos un prompt compacto pero con contexto + historial
-  const input = [
-    { role: "system", content: system },
-    ...messages.map((m) => ({ role: m.role, content: m.content })),
-  ];
-
-  const resp = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
+      "content-type": "application/json",
+      "authorization": `Bearer ${accessToken}`,
     },
     body: JSON.stringify({
-      model,
-      input,
-      // importantísimo para WhatsApp: respuesta corta, accionable
-      text: { format: { type: "text" } },
+      messaging_product: "whatsapp",
+      to: normalizePhone(toWaId),
+      type: "text",
+      text: { body },
     }),
   });
 
-  const data = await resp.json();
+  const json = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    console.error("OpenAI error:", resp.status, data);
-    throw new Error(`OpenAI failed ${resp.status}: ${JSON.stringify(data)}`);
+    console.error("WA send failed:", resp.status, json);
+    throw new Error(`WA send failed ${resp.status}`);
   }
-
-  // extraer texto
-  const out = (data.output_text ?? "").trim();
-  return out || "Te leo 🙌 ¿Qué producto buscas y tu presupuesto aprox?";
+  return json;
 }
 
-// -------------------- STATE MACHINE (no loop) --------------------
-function extractBudget(text: string): number | null {
-  const t = text.toLowerCase();
-  // soporta "30 lucas", "30000", "30.000"
-  const m1 = t.match(/(\d{1,3})(?:\s*lucas|\s*luca)/);
-  if (m1) return Number(m1[1]) * 1000;
+async function fetchMediaUrl(mediaId: string, accessToken: string) {
+  // 1) get media url
+  const meta = await fetch(`https://graph.facebook.com/v24.0/${mediaId}`, {
+    headers: { authorization: `Bearer ${accessToken}` },
+  }).then((r) => r.json());
 
-  const m2 = t.match(/(\d[\d\.\s]{2,})/);
-  if (m2) {
-    const n = Number(m2[1].replace(/[^\d]/g, ""));
-    if (Number.isFinite(n) && n >= 1000) return n;
-  }
-  return null;
+  if (!meta?.url) return null;
+
+  // 2) download binary
+  const fileResp = await fetch(meta.url, {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  if (!fileResp.ok) return null;
+
+  const contentType = fileResp.headers.get("content-type") || "application/octet-stream";
+  const bytes = new Uint8Array(await fileResp.arrayBuffer());
+  return { bytes, contentType };
 }
 
-function extractProduct(text: string): string | null {
-  const t = text.trim();
-  if (!t) return null;
-  // heurística simple: si el texto es muy corto tipo "hola", no
-  const bad = ["hola", "buenas", "hi", "hello", "gracias", "???", "ok"];
-  if (bad.includes(t.toLowerCase())) return null;
-  return t;
+async function saveToStorage(mediaId: string, bytes: Uint8Array, contentType: string) {
+  const ext = (() => {
+    if (contentType.includes("jpeg")) return "jpg";
+    if (contentType.includes("png")) return "png";
+    if (contentType.includes("webp")) return "webp";
+    if (contentType.includes("mp4")) return "mp4";
+    if (contentType.includes("mpeg")) return "mp3";
+    if (contentType.includes("ogg")) return "ogg";
+    if (contentType.includes("pdf")) return "pdf";
+    return "bin";
+  })();
+
+  const path = `wa/${mediaId}.${ext}`;
+  const bucket = "whatsapp-media";
+
+  // upload (upsert)
+  const { error: upErr } = await supabase.storage
+    .from(bucket)
+    .upload(path, bytes, { contentType, upsert: true });
+
+  if (upErr) {
+    console.error("storage upload error:", upErr);
+    return null;
+  }
+
+  // signed url (7 días)
+  const { data: signed, error: signErr } = await supabase.storage
+    .from(bucket)
+    .createSignedUrl(path, 60 * 60 * 24 * 7);
+
+  if (signErr) {
+    console.error("signed url error:", signErr);
+    return null;
+  }
+
+  return signed.signedUrl || null;
 }
 
-async function decideNextReply(phone: string, inboundText: string | null) {
-  const conv = await getConversation(phone);
-  const state = conv?.state ?? "NEW";
+async function buildAndSendAIReply(params: {
+  phoneNumberId: string;
+  waId: string;
+  accessToken: string;
+  aiCfg: any;
+}) {
+  const { phoneNumberId, waId, accessToken, aiCfg } = params;
 
-  // si no hay texto (imagen/audio/etc), pedimos claridad
-  if (!inboundText || !inboundText.trim()) {
-    return {
-      reply: "Te leo 🙌 ¿Me confirmas en texto qué producto buscas y tu presupuesto aprox? Así te mando 2 opciones con link.",
-      patch: { state: "ASK_PRODUCT_BUDGET" },
-    };
+  // Estado conversacional (evita loops)
+  const conv = await getConversation(waId) || {};
+  const state = conv.state || "NEW";
+  const product = conv.product || null;
+  const budget = conv.budget || null;
+  const comuna = conv.comuna || null;
+
+  // Si ya se mandó oferta recientemente, no spamear
+  const lastOfferAt = conv.last_offer_at ? new Date(conv.last_offer_at).getTime() : 0;
+  const recentlyOffered = lastOfferAt && (Date.now() - lastOfferAt < 1000 * 60 * 10);
+
+  // Tomamos el último inbound del usuario para avanzar
+  const { data: lastMsg } = await supabase
+    .from("whatsapp_messages")
+    .select("message_content, message_type, created_at")
+    .eq("phone_number", normalizePhone(waId))
+    .eq("direction", "inbound")
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  const userText = (lastMsg?.[0]?.message_content || "").trim();
+
+  // Flujo determinista (no IA) para capturar variables clave
+  if (!product) {
+    await upsertConversation(waId, { state: "ASK_PRODUCT" });
+    await waSendText(phoneNumberId, waId, "Te leo 🙌 ¿Qué producto buscas?", accessToken);
+    return;
   }
 
-  const t = inboundText.trim();
-
-  if (state === "NEW" || state === "ASK_PRODUCT_BUDGET") {
-    const budget = extractBudget(t);
-    const product = extractProduct(t);
-
-    // Si el usuario ya dijo producto y presupuesto en un solo mensaje:
-    if (budget && product) {
-      return {
-        reply: "Perfecto 🙌 ¿En qué comuna estás? (para estimar entrega/tiempos)",
-        patch: { state: "ASK_COMUNA", product, budget },
-      };
+  if (!budget) {
+    const b = extractBudgetLukas(userText);
+    if (b) {
+      await upsertConversation(waId, { budget: b, state: "ASK_COMUNA" });
+      await waSendText(phoneNumberId, waId, "Perfecto 🙌 ¿En qué comuna estás? (para estimar entrega/tiempos)", accessToken);
+      return;
     }
+    await upsertConversation(waId, { state: "ASK_BUDGET" });
+    await waSendText(phoneNumberId, waId, "Perfecto 🙌 ¿Cuál es tu presupuesto aprox (en lucas)?", accessToken);
+    return;
+  }
 
-    // Si solo presupuesto:
-    if (budget && !conv?.product) {
-      return {
-        reply: "Perfecto 🙌 ¿Qué producto estás buscando? así te mando 2 opciones con link.",
-        patch: { state: "ASK_PRODUCT", budget },
-      };
+  if (!comuna) {
+    const c = userText;
+    if (c.length >= 3) {
+      await upsertConversation(waId, { comuna: c, state: "READY_TO_OFFER" });
+      await waSendText(phoneNumberId, waId, "Perfecto 🙌 Dame 10 segundos y te mando 2 opciones con link.", accessToken);
+      // sigue a oferta en la misma ejecución (sin esperar otro mensaje)
+    } else {
+      await upsertConversation(waId, { state: "ASK_COMUNA" });
+      await waSendText(phoneNumberId, waId, "¿En qué comuna estás?", accessToken);
+      return;
     }
-
-    // Si solo producto:
-    if (product && !budget) {
-      return {
-        reply: "Perfecto 🙌 ¿Cuál es tu presupuesto aprox (en lucas)?",
-        patch: { state: "ASK_BUDGET", product },
-      };
-    }
-
-    return {
-      reply: "Te leo 🙌 ¿Qué producto buscas y tu presupuesto aprox? así te mando 2 opciones con link.",
-      patch: { state: "ASK_PRODUCT_BUDGET" },
-    };
   }
 
-  if (state === "ASK_PRODUCT") {
-    const product = extractProduct(t);
-    if (product) {
-      if (conv?.budget) {
-        return {
-          reply: "Perfecto 🙌 ¿En qué comuna estás? (para estimar entrega/tiempos)",
-          patch: { state: "ASK_COMUNA", product },
-        };
-      }
-      return {
-        reply: "Perfecto 🙌 ¿Cuál es tu presupuesto aprox (en lucas)?",
-        patch: { state: "ASK_BUDGET", product },
-      };
-    }
-    return { reply: "¿Qué producto estás buscando? 🙌", patch: {} };
+  // Oferta (2 links) sin depender de Shopify API (cero riesgo). Links directos a búsqueda Keloke.
+  const finalConv = await getConversation(waId) || {};
+  const p = finalConv.product || product;
+  const b = finalConv.budget || budget;
+  const co = finalConv.comuna || comuna;
+
+  if ((finalConv.state === "READY_TO_OFFER" || state === "READY_TO_OFFER") && !recentlyOffered) {
+    const q = encodeURIComponent(String(p));
+    const link1 = `https://keloke.cl/search?q=${q}`;
+    const link2 = `https://keloke.cl/collections/all?filter.v.price.gte=0&filter.v.price.lte=${encodeURIComponent(String(b))}&q=${q}`;
+
+    const msg =
+      `Listo 🙌\n\n` +
+      `Producto: *${p}*\nPresupuesto: *$${Number(b).toLocaleString("es-CL")}*\nComuna: *${co}*\n\n` +
+      `✅ Opción 1 (búsqueda directa):\n${link1}\n\n` +
+      `✅ Opción 2 (filtrada por presupuesto):\n${link2}\n\n` +
+      `Si me dices *color / tamaño / uso* te afino y te mando la mejor al tiro.`;
+
+    await waSendText(phoneNumberId, waId, msg, accessToken);
+    await upsertConversation(waId, { state: "OFFER_SENT", last_offer_at: nowISO() });
+    return;
   }
 
-  if (state === "ASK_BUDGET") {
-    const budget = extractBudget(t);
-    if (budget) {
-      return {
-        reply: "Perfecto 🙌 ¿En qué comuna estás? (para estimar entrega/tiempos)",
-        patch: { state: "ASK_COMUNA", budget },
-      };
-    }
-    return { reply: "¿Cuál es tu presupuesto aprox? (ej: 30 lucas)", patch: {} };
+  // Si está OFFER_SENT o se necesita respuesta “humana”, usar IA para no quedar pegado.
+  if (!OPENAI_API_KEY || !aiCfg?.auto_reply_enabled) return;
+
+  if (!withinScheduleChile(aiCfg)) return;
+
+  const training = (aiCfg.training_data || "").trim();
+  const system =
+    `Eres el asistente de ventas y soporte de Keloke.cl (Chile). ` +
+    `Responde en español chileno, corto y claro. ` +
+    `Objetivo: convertir a compra enviando 2 opciones con link cuando tengas producto+presupuesto+comuna. ` +
+    `Nunca repitas la misma pregunta si ya está respondida.\n\n` +
+    (training ? `Contexto adicional:\n${training}\n\n` : "");
+
+  // Contexto: últimos 12 mensajes (inbound/outbound)
+  const { data: hist } = await supabase
+    .from("whatsapp_messages")
+    .select("direction, message_content, message_type, created_at")
+    .eq("phone_number", normalizePhone(waId))
+    .order("created_at", { ascending: false })
+    .limit(12);
+
+  const messages = (hist || []).reverse().map((m: any) => {
+    const role = m.direction === "inbound" ? "user" : "assistant";
+    const content =
+      m.message_type === "text"
+        ? (m.message_content || "")
+        : `[${m.message_type || "media"}] ${m.message_content || ""}`.trim();
+    return { role, content };
+  });
+
+  // Llamada OpenAI Responses API (simple)
+  const oaiResp = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "authorization": `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: aiCfg.ai_model || OPENAI_MODEL,
+      input: [
+        { role: "system", content: system },
+        ...messages,
+      ],
+      // para que no se alargue infinito
+      max_output_tokens: 220,
+    }),
+  });
+
+  const oaiJson = await oaiResp.json().catch(() => ({}));
+  const outText =
+    oaiJson?.output?.[0]?.content?.[0]?.text ||
+    oaiJson?.output_text ||
+    "";
+
+  if (oaiResp.ok && outText?.trim()) {
+    await waSendText(phoneNumberId, waId, outText.trim(), accessToken);
+    return;
   }
 
-  if (state === "ASK_COMUNA") {
-    const comuna = t;
-    // listo para ofrecer
-    return {
-      reply: "Perfecto 🙌 Dame 10 segundos y te mando 2 opciones con link.",
-      patch: { state: "READY_TO_OFFER", comuna },
-    };
-  }
-
-  if (state === "READY_TO_OFFER") {
-    // aquí ya entra la IA “real” (sin loops)
-    return { reply: null, patch: {} };
-  }
-
-  return { reply: "Te leo 🙌 ¿Qué producto buscas y tu presupuesto aprox?", patch: { state: "ASK_PRODUCT_BUDGET" } };
+  console.error("OpenAI error:", oaiResp.status, oaiJson);
 }
 
-// -------------------- MAIN HANDLER --------------------
+// MAIN HANDLER
 Deno.serve(async (req) => {
   try {
+    if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
     const url = new URL(req.url);
 
-    // -------- GET: verification --------
+    // 1) Webhook verification (Meta GET)
     if (req.method === "GET") {
       const mode = url.searchParams.get("hub.mode");
       const token = url.searchParams.get("hub.verify_token");
       const challenge = url.searchParams.get("hub.challenge");
 
-      if (mode === "subscribe" && token === META_VERIFY_TOKEN && challenge) {
-        return text(challenge, 200);
-      }
-      return text("Forbidden", 403);
-    }
-
-    // -------- POST: webhook events --------
-    const rawBody = await req.text();
-
-    // firma opcional (si pones META_APP_SECRET)
-    const okSig = await verifyMetaSignature(req, rawBody);
-    if (!okSig) return text("Invalid signature", 401);
-
-    const payload = JSON.parse(rawBody) as WaWebhook;
-
-    const conn = await getSocialConn();
-    if (!conn) {
-      console.error("No active social_connections row for whatsapp");
-      return json({ ok: true, warning: "no social connection active" }, 200);
-    }
-
-    const ai = await getAiSettings();
-    if (!ai) {
-      console.error("No AI settings/config found");
-      // no matamos el webhook, solo respondemos 200 a Meta
-      return json({ ok: true, warning: "no ai config" }, 200);
-    }
-
-    // Extraer mensajes
-    const changes = payload.entry?.flatMap((e) => e.changes ?? []) ?? [];
-    const msgEvents = changes
-      .map((c) => c.value)
-      .filter(Boolean)
-      .flatMap((v) => v.messages ?? []) as WaMessage[];
-
-    // si no hay mensajes (status updates, etc.)
-    if (!msgEvents.length) return json({ ok: true }, 200);
-
-    for (const m of msgEvents) {
-      const from = normalizePhone(m.from);
-      const waMessageId = m.id;
-
-      // Dedup: si ya lo procesamos, no respondemos otra vez
-      if (await messageAlreadyProcessed(waMessageId)) {
-        console.log("Duplicate message ignored:", waMessageId);
-        continue;
+      if (mode === "subscribe" && challenge) {
+        if (token && token === WHATSAPP_VERIFY_TOKEN) {
+          return text(challenge, 200);
+        }
+        // Esto es EXACTAMENTE tu 403 actual: token no calza con el que el código espera.
+        return text("Forbidden", 403);
       }
 
-      const parsed = safeTextFromMessage(m);
+      return text("ok", 200);
+    }
 
-      // Guardar inbound (mínimo)
-      await insertInboundMessage({
-        from_number: from,
+    if (req.method !== "POST") return text("Method Not Allowed", 405);
+
+    const payload: WAWebhook = await req.json().catch(() => null);
+    if (!payload) return json({ ok: false, error: "invalid_json" }, 400);
+
+    // Meta manda "statuses" y "messages"
+    const entry = payload.entry?.[0];
+    const change = entry?.changes?.[0];
+    const value = change?.value || {};
+    const metadata = value?.metadata || {};
+    const phoneNumberId = String(metadata?.phone_number_id || "");
+    const wabaId = String(metadata?.phone_number_id ? (metadata?.waba_id || "") : (metadata?.waba_id || ""));
+
+    // Si no hay phone_number_id, no podemos contestar
+    if (!phoneNumberId) {
+      console.error("No phone_number_id in payload:", payload);
+      return json({ ok: true }, 200);
+    }
+
+    // Buscar access_token para este phone_number_id
+    const conn = await getActiveConnectionByPhoneNumberId(phoneNumberId);
+    const accessToken = (conn?.access_token as string) || META_WHATSAPP_TOKEN;
+
+    // Guardar statuses si llegan (opcional)
+    if (Array.isArray(value?.statuses) && value.statuses.length) {
+      // Si quieres persistirlos, aquí.
+    }
+
+    const messages = value?.messages;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      // Acknowledge
+      return json({ ok: true }, 200);
+    }
+
+    // Nombre de contacto si viene
+    const contacts = value?.contacts;
+    const contactName = contacts?.[0]?.profile?.name;
+
+    const aiCfg = await getAIConfig();
+
+    for (const m of messages) {
+      const waId = normalizePhone(m.from || "");
+      if (!waId) continue;
+
+      await upsertContact(waId, contactName);
+
+      const msgType = m.type || "unknown";
+      let messageContent: string | null = null;
+      let mediaUrl: string | null = null;
+      let mediaMime: string | null = null;
+      let mediaId: string | null = null;
+      let caption: string | null = null;
+
+      if (msgType === "text") {
+        messageContent = m.text?.body ?? null;
+      } else if (msgType === "image") {
+        mediaId = m.image?.id ?? null;
+        caption = m.image?.caption ?? null;
+        messageContent = caption || "[image]";
+      } else if (msgType === "video") {
+        mediaId = m.video?.id ?? null;
+        caption = m.video?.caption ?? null;
+        messageContent = caption || "[video]";
+      } else if (msgType === "audio") {
+        mediaId = m.audio?.id ?? null;
+        messageContent = "[audio]";
+      } else if (msgType === "document") {
+        mediaId = m.document?.id ?? null;
+        caption = m.document?.caption ?? null;
+        const filename = m.document?.filename ?? null;
+        messageContent = caption || filename || "[document]";
+      } else {
+        messageContent = `[${msgType}]`;
+      }
+
+      // Si es media, bajar y subir a Storage para que la app tenga URL real (no “encabezado”)
+      if (mediaId && accessToken) {
+        const downloaded = await fetchMediaUrl(mediaId, accessToken);
+        if (downloaded?.bytes) {
+          mediaMime = downloaded.contentType || null;
+          const signedUrl = await saveToStorage(mediaId, downloaded.bytes, downloaded.contentType);
+          if (signedUrl) mediaUrl = signedUrl;
+        }
+      }
+
+      // Persistir inbound message
+      await insertMessage({
+        from_number: waId,
         to_number: null,
-        phone_number: from,
-        whatsapp_message_id: waMessageId,
-        message_type: parsed.message_type,
-        message_content: parsed.message_content,
-        media_id: parsed.media_id,
-        caption: parsed.caption,
-        media_mime_type: parsed.mime,
-        media_filename: parsed.filename,
+        message_type: msgType,
+        message_content: messageContent,
+        media_url: mediaUrl,
+        direction: "inbound",
+        timestamp: new Date((m.timestamp ? parseInt(m.timestamp, 10) : Math.floor(Date.now() / 1000)) * 1000).toISOString(),
+        phone_number: waId,
+        status: "received",
+        whatsapp_message_id: m.id || null,
+        message: messageContent,
+        platform_response: null,
+        media_mime_type: mediaMime,
+        media_filename: m.document?.filename ?? null,
+        media_size: null,
+        caption: caption,
+        media_duration: null,
+        created_at: nowISO(),
+        updated_at: nowISO(),
+        media_sha256: null,
+        contact_name: contactName || null,
+        is_read: false,
+        media_id: mediaId,
+        platform_response_status: null,
       });
 
-      // Si IA está apagada, no respondemos
-      if (!ai.is_enabled) continue;
-
-      // Horario
-      const within = isWithinSchedule(ai);
-      const shouldReply = ai.only_outside_hours ? !within : true;
-      if (!shouldReply) continue;
-
-      // Máquina de estados (evita loop)
-      const decision = await decideNextReply(from, parsed.message_content);
-      if (decision.patch && Object.keys(decision.patch).length) {
-        await upsertConversation(from, decision.patch as any);
+      // Actualizar conversación determinista
+      const conv = await getConversation(waId) || {};
+      if (!conv.product) {
+        // si el usuario mandó texto “normal”, usarlo como producto
+        if (msgType === "text" && messageContent && messageContent.length >= 2) {
+          await upsertConversation(waId, { product: messageContent.trim(), state: "ASK_BUDGET" });
+        }
+      } else if (!conv.budget && msgType === "text" && messageContent) {
+        const b = extractBudgetLukas(messageContent);
+        if (b) await upsertConversation(waId, { budget: b, state: "ASK_COMUNA" });
+      } else if (conv.product && conv.budget && !conv.comuna && msgType === "text" && messageContent) {
+        if (messageContent.trim().length >= 3) await upsertConversation(waId, { comuna: messageContent.trim(), state: "READY_TO_OFFER" });
       }
 
-      // Si state machine devolvió reply directo, lo mandamos y listo
-      if (decision.reply) {
-        const waResp = await sendWhatsAppText(conn, from, decision.reply);
-        await insertOutboundMessage({
-          from_number: conn.phone_number_id,
-          to_number: from,
-          phone_number: from,
-          message_type: "text",
-          message_content: decision.reply,
-          platform_response: waResp,
+      // Responder (IA + flujo)
+      if (aiCfg?.auto_reply_enabled && accessToken) {
+        await buildAndSendAIReply({
+          phoneNumberId,
+          waId,
+          accessToken,
+          aiCfg,
         });
-        continue;
       }
-
-      // Si ya estamos READY_TO_OFFER, usamos IA real con contexto
-      const conv = await getConversation(from);
-      const context = `
-${ai.training_context}
-
-Reglas:
-- Responde en español chileno, amable y vendedor.
-- Sé breve (1-3 mensajes max).
-- Si ya tenemos producto/presupuesto/comuna: ofrece 2 alternativas y pide confirmación para enviar link.
-- Nunca repitas la misma pregunta si el dato ya está guardado.
-- Si falta un dato, pregunta SOLO ese dato.
-Datos actuales:
-- Producto: ${conv?.product ?? "N/A"}
-- Presupuesto: ${conv?.budget ?? "N/A"}
-- Comuna: ${conv?.comuna ?? "N/A"}
-Estado: ${conv?.state ?? "N/A"}
-`;
-
-      // Historial corto (últimos 8 mensajes) para coherencia
-      const { data: history } = await supabase
-        .from("whatsapp_messages")
-        .select("direction, message_content")
-        .eq("phone_number", from)
-        .order("timestamp", { ascending: false })
-        .limit(8);
-
-      const hist = (history ?? [])
-        .reverse()
-        .filter((x: any) => x.message_content)
-        .map((x: any) => ({
-          role: x.direction === "outbound" ? "assistant" : "user",
-          content: String(x.message_content),
-        })) as Array<{ role: "user" | "assistant"; content: string }>;
-
-      const aiReply = await callOpenAI(ai.model, context.trim(), hist);
-
-      const waResp = await sendWhatsAppText(conn, from, aiReply);
-      await insertOutboundMessage({
-        from_number: conn.phone_number_id,
-        to_number: from,
-        phone_number: from,
-        message_type: "text",
-        message_content: aiReply,
-        platform_response: waResp,
-      });
     }
 
-    // Importante: devolver 200 a Meta siempre (si no, reintenta y duplica)
     return json({ ok: true }, 200);
-  } catch (err) {
-    console.error("Fatal error:", err);
-    // Igual 200 para que Meta no reintente infinito (pero dejamos log)
-    return json({ ok: true, error: String(err?.message ?? err) }, 200);
+  } catch (e) {
+    console.error("Fatal error:", e);
+    return json({ ok: false, error: String(e?.message || e) }, 500);
   }
 });
