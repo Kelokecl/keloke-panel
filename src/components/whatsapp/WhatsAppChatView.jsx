@@ -47,9 +47,9 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
   const [messageText, setMessageText] = useState('');
   const [isSending, setIsSending] = useState(false);
 
-  // 👇 IMPORTANTE: loading inicial vs “sync”
-  const [isLoading, setIsLoading] = useState(true);
-  const [isSyncing, setIsSyncing] = useState(false);
+  // Carga inicial vs refresh silencioso
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Scroll inteligente
   const messagesEndRef = useRef(null);
@@ -57,52 +57,62 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
   const lastMessageIdRef = useRef(null);
   const [isNearBottom, setIsNearBottom] = useState(true);
 
-  const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  // Evitar fetch simultáneo
+  const inFlightRef = useRef(false);
+  const mountedRef = useRef(false);
+
+  const scrollToBottom = useCallback((behavior = 'smooth') => {
+    messagesEndRef.current?.scrollIntoView({ behavior });
   }, []);
 
-  const onScroll = useCallback(() => {
+  const computeNearBottom = useCallback(() => {
     const el = listRef.current;
-    if (!el) return;
-    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    setIsNearBottom(near);
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   useEffect(() => {
     if (!contact?.phone_number) return;
 
+    // Reset por cambio de chat
     lastMessageIdRef.current = null;
     setIsNearBottom(true);
     setMessages([]);
-    setIsLoading(true);
+    setIsInitialLoading(true);
 
-    // carga inicial (con spinner)
-    loadMessages({ silent: false }).then(() => {
-      markMessagesAsRead(); // ok, pero OJO: realtime NO escucha UPDATE ahora
-    });
+    // Carga inicial (con spinner grande SOLO una vez)
+    loadMessages({ silent: false, force: true });
+    markMessagesAsRead();
 
-    // ✅ Realtime SOLO en INSERT: evita loop por UPDATE is_read
+    // Realtime: refresco silencioso (no borra UI)
     const channel = supabase
       .channel(`chat_${contact.phone_number}`)
       .on(
         'postgres_changes',
         {
-          event: 'INSERT',
+          event: '*',
           schema: 'public',
           table: 'whatsapp_messages',
           filter: `phone_number=eq.${contact.phone_number}`,
         },
         async () => {
-          await loadMessages({ silent: true });
-          markMessagesAsRead();
+          await loadMessages({ silent: true, force: true });
+          await markMessagesAsRead();
         }
       )
       .subscribe();
 
-    // Poll suave (por si realtime falla). No parpadea, no resetea UI.
+    // Fallback liviano (por si realtime se cae) — cada 60s y silencioso
     const interval = setInterval(() => {
-      loadMessages({ silent: true });
-    }, 25000);
+      loadMessages({ silent: true, force: false });
+    }, 60000);
 
     return () => {
       clearInterval(interval);
@@ -112,15 +122,25 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
   }, [contact?.phone_number]);
 
   useEffect(() => {
-    if (isNearBottom) scrollToBottom();
+    // Auto-scroll solo si estás cerca del final
+    if (isNearBottom) scrollToBottom('auto');
   }, [messages, isNearBottom, scrollToBottom]);
 
-  async function loadMessages({ silent } = { silent: true }) {
+  async function loadMessages({ silent = true, force = false } = {}) {
     if (!contact?.phone_number) return;
+    if (inFlightRef.current) return;
+
+    inFlightRef.current = true;
+
+    // preservar scroll si el usuario está leyendo arriba
+    const el = listRef.current;
+    const wasNearBottom = computeNearBottom();
+    const prevScrollTop = el?.scrollTop ?? 0;
+    const prevScrollHeight = el?.scrollHeight ?? 0;
 
     try {
-      if (silent) setIsSyncing(true);
-      else setIsLoading(true);
+      if (!silent) setIsInitialLoading(true);
+      else setIsRefreshing(true);
 
       const { data, error } = await supabase
         .from('whatsapp_messages')
@@ -132,17 +152,35 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
 
       const lastId = data?.length ? data[data.length - 1].id : null;
 
-      // Si no hay cambios, no toques el estado (evita jump + renders)
-      if (lastMessageIdRef.current === lastId) return;
+      // si no hay cambios, no re-render (a menos que sea force)
+      if (!force && lastMessageIdRef.current === lastId) return;
 
       lastMessageIdRef.current = lastId;
+
+      if (!mountedRef.current) return;
+
       setMessages(data || []);
+
+      // Si NO está cerca del final, preserva posición (evita salto)
+      if (!wasNearBottom && el) {
+        requestAnimationFrame(() => {
+          const newScrollHeight = el.scrollHeight;
+          const delta = newScrollHeight - prevScrollHeight;
+          el.scrollTop = prevScrollTop + (delta > 0 ? delta : 0);
+        });
+      } else {
+        setIsNearBottom(true);
+      }
     } catch (err) {
       console.error('Error loading messages:', err);
+      if (!mountedRef.current) return;
+      // NO borres mensajes en refresh silencioso (eso era el “pantallazo vacío”)
       if (!silent) setMessages([]);
     } finally {
-      setIsLoading(false);
-      setIsSyncing(false);
+      if (!mountedRef.current) return;
+      if (!silent) setIsInitialLoading(false);
+      setIsRefreshing(false);
+      inFlightRef.current = false;
     }
   }
 
@@ -212,8 +250,8 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       if (insertError) console.error('❌ Error guardando outbound:', insertError);
 
       setIsNearBottom(true);
-      await loadMessages({ silent: true });
-      setTimeout(scrollToBottom, 50);
+      await loadMessages({ silent: true, force: true });
+      setTimeout(() => scrollToBottom('smooth'), 50);
     } catch (err) {
       console.error('❌ [SEND_ERROR]', err);
       alert('Error al enviar el mensaje: ' + (err?.message || err));
@@ -316,8 +354,8 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       if (insertError) throw new Error(insertError.message);
 
       setIsNearBottom(true);
-      await loadMessages({ silent: true });
-      setTimeout(scrollToBottom, 50);
+      await loadMessages({ silent: true, force: true });
+      setTimeout(() => scrollToBottom('smooth'), 50);
     } catch (err) {
       console.error('❌ [SEND_AUDIO_ERROR]', err);
       alert('Error al enviar el audio: ' + (err?.message || err));
@@ -371,6 +409,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
         `https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/media`,
         { method: 'POST', headers: { Authorization: `Bearer ${accessToken}` }, body: form }
       );
+
       const mediaUploadJson = await mediaUploadRes.json();
       if (!mediaUploadRes.ok) throw new Error(mediaUploadJson?.error?.message || 'Error subiendo media a WhatsApp');
 
@@ -402,6 +441,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
           body: JSON.stringify(body),
         }
       );
+
       const msgJson = await msgRes.json();
       if (!msgRes.ok) throw new Error(msgJson?.error?.message || 'Error enviando archivo por WhatsApp');
 
@@ -430,8 +470,8 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       if (insertError) throw new Error(insertError.message);
 
       setIsNearBottom(true);
-      await loadMessages({ silent: true });
-      setTimeout(scrollToBottom, 50);
+      await loadMessages({ silent: true, force: true });
+      setTimeout(() => scrollToBottom('smooth'), 50);
     } catch (err) {
       console.error('❌ [SEND_FILE_ERROR]', err);
       alert('Error al enviar el archivo: ' + (err?.message || err));
@@ -473,6 +513,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
           <h3 className="font-semibold text-gray-900">
             {contact.contact_name || contact.phone_number}
           </h3>
+
           <div className="flex items-center gap-2">
             <p className="text-xs text-gray-500">{contact.phone_number}</p>
             {connection && (
@@ -481,8 +522,8 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
                 WhatsApp conectado
               </span>
             )}
-            {isSyncing && (
-              <span className="flex items-center gap-1 text-xs text-gray-400">
+            {isRefreshing && (
+              <span className="flex items-center gap-1 text-xs text-gray-500">
                 <Loader className="w-3 h-3 animate-spin" />
                 actualizando…
               </span>
@@ -490,11 +531,16 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
           </div>
         </div>
 
-        {/* ✅ Refresh manual */}
+        {/* Refresh manual */}
         <button
-          onClick={() => loadMessages({ silent: true })}
+          onClick={async () => {
+            await loadMessages({ silent: true, force: true });
+            await markMessagesAsRead();
+            // No fuerces scroll: respeta dónde está leyendo
+            setIsNearBottom(computeNearBottom());
+          }}
           className="p-2 hover:bg-gray-100 rounded-full"
-          title="Actualizar"
+          title="Refrescar"
         >
           <RefreshCw className="w-5 h-5 text-gray-600" />
         </button>
@@ -502,7 +548,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
         <button
           onClick={() => onShowClientInfo(contact)}
           className="p-2 hover:bg-gray-100 rounded-full"
-          title="Info cliente"
+          title="Info"
         >
           <Info className="w-5 h-5 text-gray-600" />
         </button>
@@ -511,11 +557,13 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       {/* Mensajes */}
       <div
         ref={listRef}
-        onScroll={onScroll}
+        onScroll={() => {
+          setIsNearBottom(computeNearBottom());
+        }}
         className="flex-1 overflow-y-auto p-4 space-y-2"
       >
-        {isLoading ? (
-          <div className="flex justify-center">
+        {isInitialLoading ? (
+          <div className="flex justify-center py-6">
             <Loader className="w-6 h-6 animate-spin text-green-500" />
           </div>
         ) : (
