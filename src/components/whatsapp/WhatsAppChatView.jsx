@@ -8,7 +8,7 @@ import WhatsAppFileAttachment from './WhatsAppFileAttachment';
 const WA_GRAPH_VERSION = 'v21.0';
 const STORAGE_BUCKET = 'whatsapp-media';
 const MAX_FILE_BYTES = 16 * 1024 * 1024; // 16MB
-const FETCH_LIMIT = 200; // evita traer TODO el historial (te estaba matando la UI y el uso)
+const FETCH_LIMIT = 200; // evita traer TODO el historial
 
 function safeExtFromMime(mime = '') {
   const m = mime.split(';')[0].trim().toLowerCase();
@@ -48,11 +48,11 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
   const [messageText, setMessageText] = useState('');
   const [isSending, setIsSending] = useState(false);
 
-  // ✅ Separamos carga inicial de refresh (para que NO te tape la conversación con spinner cada 2s)
+  // ✅ carga inicial vs refresh
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // ✅ Auto refresh controlado (por defecto ON, pero con toggle)
+  // ✅ auto refresh (toggle)
   const [autoRefresh, setAutoRefresh] = useState(true);
 
   // Scroll inteligente
@@ -61,7 +61,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
   const lastMessageIdRef = useRef(null);
   const [isNearBottom, setIsNearBottom] = useState(true);
 
-  // ✅ evitar requests encadenadas (tu consola mostraba muchísimos fetch/preflight)
+  // ✅ evita requests encadenadas
   const inFlightRef = useRef(false);
   const queuedRef = useRef(false);
 
@@ -69,26 +69,101 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, []);
 
-  const preserveScrollOnUpdate = useCallback((apply) => {
-    const el = listRef.current;
-    if (!el) return apply();
+  const preserveScrollOnUpdate = useCallback(
+    (apply) => {
+      const el = listRef.current;
+      if (!el) return apply();
 
-    // Si el usuario NO está cerca del fondo, preservamos la posición “desde abajo”
-    if (!isNearBottom) {
-      const distanceFromBottom = el.scrollHeight - el.scrollTop;
+      // Si NO está cerca del fondo, preserva distancia desde abajo
+      if (!isNearBottom) {
+        const distanceFromBottom = el.scrollHeight - el.scrollTop;
+        apply();
+        requestAnimationFrame(() => {
+          const el2 = listRef.current;
+          if (!el2) return;
+          el2.scrollTop = Math.max(0, el2.scrollHeight - distanceFromBottom);
+        });
+        return;
+      }
+
+      // Si está cerca del fondo, aplica y baja
       apply();
-      requestAnimationFrame(() => {
-        const el2 = listRef.current;
-        if (!el2) return;
-        el2.scrollTop = Math.max(0, el2.scrollHeight - distanceFromBottom);
-      });
-      return;
-    }
+      requestAnimationFrame(() => scrollToBottom());
+    },
+    [isNearBottom, scrollToBottom]
+  );
 
-    // Si está cerca del fondo, aplicamos y bajamos
-    apply();
-    requestAnimationFrame(() => scrollToBottom());
-  }, [isNearBottom, scrollToBottom]);
+  const loadMessages = useCallback(
+    async ({ reason = 'manual', showSpinner = false } = {}) => {
+      if (!contact?.phone_number) return;
+
+      // ✅ anti-spam: si hay request en curso, encola 1
+      if (inFlightRef.current) {
+        queuedRef.current = true;
+        return;
+      }
+      inFlightRef.current = true;
+
+      const doSpinner = showSpinner && (messages?.length ?? 0) === 0;
+
+      try {
+        if (doSpinner) setIsInitialLoading(true);
+        else setIsRefreshing(true);
+
+        const { data, error } = await supabase
+          .from('whatsapp_messages')
+          .select('*')
+          .eq('phone_number', contact.phone_number)
+          .order('created_at', { ascending: false })
+          .limit(FETCH_LIMIT);
+
+        if (error) throw error;
+
+        const normalized = (data || []).slice().reverse();
+        const lastId = normalized.length ? normalized[normalized.length - 1].id : null;
+
+        // Si no hay cambios, no re-render
+        if (lastMessageIdRef.current === lastId) return;
+
+        lastMessageIdRef.current = lastId;
+
+        preserveScrollOnUpdate(() => {
+          setMessages(normalized);
+        });
+      } catch (err) {
+        console.error('Error loading messages:', err);
+        // 👇 IMPORTANTE: no borramos mensajes si falla refresh
+      } finally {
+        setIsInitialLoading(false);
+        setIsRefreshing(false);
+        inFlightRef.current = false;
+
+        // ✅ si se acumuló refresh mientras cargaba, ejecuta 1 vez
+        if (queuedRef.current) {
+          queuedRef.current = false;
+          loadMessages({ reason: 'queued', showSpinner: false });
+        }
+      }
+    },
+    [contact?.phone_number, preserveScrollOnUpdate, messages?.length]
+  );
+
+  const markMessagesAsRead = useCallback(async () => {
+    if (!contact?.phone_number) return;
+
+    try {
+      const { error } = await supabase
+        .from('whatsapp_messages')
+        .update({ is_read: true })
+        .eq('phone_number', contact.phone_number)
+        .eq('direction', 'inbound')
+        .eq('is_read', false);
+
+      if (error) throw error;
+    } catch (err) {
+      console.error('Error marking messages as read:', err);
+    }
+  }, [contact?.phone_number]);
 
   useEffect(() => {
     if (!contact?.phone_number) return;
@@ -123,86 +198,15 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
     return () => {
       supabase.removeChannel(channel);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contact?.phone_number, autoRefresh]);
+  }, [contact?.phone_number, autoRefresh, loadMessages, markMessagesAsRead]);
 
   useEffect(() => {
     // Solo auto-scroll si el usuario está cerca del fondo
     if (isNearBottom) scrollToBottom();
   }, [messages, isNearBottom, scrollToBottom]);
 
-  async function loadMessages({ reason = 'manual', showSpinner = false } = {}) {
-    if (!contact?.phone_number) return;
-
-    // ✅ anti-spam: si hay request en curso, marcamos “queued”
-    if (inFlightRef.current) {
-      queuedRef.current = true;
-      return;
-    }
-    inFlightRef.current = true;
-
-    const doSpinner = showSpinner && messages.length === 0;
-
-    try {
-      if (doSpinner) setIsInitialLoading(true);
-      else setIsRefreshing(true);
-
-      // ✅ NO traer todo: trae los últimos FETCH_LIMIT, orden desc, y luego invertimos
-      const { data, error } = await supabase
-        .from('whatsapp_messages')
-        .select('*')
-        .eq('phone_number', contact.phone_number)
-        .order('created_at', { ascending: false })
-        .limit(FETCH_LIMIT);
-
-      if (error) throw error;
-
-      const normalized = (data || []).slice().reverse();
-      const lastId = normalized.length ? normalized[normalized.length - 1].id : null;
-
-      // Si no hay cambios, no re-renderizamos
-      if (lastMessageIdRef.current === lastId) return;
-
-      lastMessageIdRef.current = lastId;
-
-      preserveScrollOnUpdate(() => {
-        setMessages(normalized);
-      });
-    } catch (err) {
-      console.error('Error loading messages:', err);
-      // No borres mensajes si falla el refresh (evita pantallazo vacío)
-    } finally {
-      setIsInitialLoading(false);
-      setIsRefreshing(false);
-      inFlightRef.current = false;
-
-      // ✅ si se acumuló un refresh mientras cargaba, lo ejecutamos 1 vez
-      if (queuedRef.current) {
-        queuedRef.current = false;
-        loadMessages({ reason: 'queued', showSpinner: false });
-      }
-    }
-  }
-
-  async function markMessagesAsRead() {
-    if (!contact?.phone_number) return;
-
-    try {
-      const { error } = await supabase
-        .from('whatsapp_messages')
-        .update({ is_read: true })
-        .eq('phone_number', contact.phone_number)
-        .eq('direction', 'inbound')
-        .eq('is_read', false);
-
-      if (error) throw error;
-    } catch (err) {
-      console.error('Error marking messages as read:', err);
-    }
-  }
-
   async function sendMessage() {
-    if (!messageText.trim() || !connection) return;
+    if (!messageText.trim() || !connection || !contact?.phone_number) return;
 
     const messageToSend = messageText.trim();
     setIsSending(true);
@@ -240,6 +244,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       const { error: insertError } = await supabase.from('whatsapp_messages').insert({
         phone_number: contact.phone_number,
         message: messageToSend,
+        message_content: messageToSend,
         direction: 'outbound',
         status: 'sent',
         message_type: 'text',
@@ -299,10 +304,11 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       form.append('messaging_product', 'whatsapp');
       form.append('file', new File([audioBlob], filename, { type: mime }));
 
-      const mediaUploadRes = await fetch(
-        `https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/media`,
-        { method: 'POST', headers: { Authorization: `Bearer ${accessToken}` }, body: form }
-      );
+      const mediaUploadRes = await fetch(`https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/media`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}` },
+        body: form,
+      });
 
       const mediaUploadJson = await mediaUploadRes.json();
       if (!mediaUploadRes.ok) throw new Error(mediaUploadJson?.error?.message || 'Error subiendo media a WhatsApp');
@@ -310,20 +316,17 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       const mediaId = mediaUploadJson?.id;
       if (!mediaId) throw new Error('No se recibió media_id desde WhatsApp.');
 
-      const msgRes = await fetch(
-        `https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/messages`,
-        {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            messaging_product: 'whatsapp',
-            recipient_type: 'individual',
-            to: cleanPhone,
-            type: 'audio',
-            audio: { id: mediaId },
-          }),
-        }
-      );
+      const msgRes = await fetch(`https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/messages`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: cleanPhone,
+          type: 'audio',
+          audio: { id: mediaId },
+        }),
+      });
 
       const msgJson = await msgRes.json();
       if (!msgRes.ok) throw new Error(msgJson?.error?.message || 'Error enviando audio por WhatsApp');
@@ -336,6 +339,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
         status: 'sent',
         message_type: 'audio',
         message: '',
+        message_content: '',
         whatsapp_message_id: whatsappMessageId,
         media_id: mediaId,
         media_url: publicUrl,
@@ -405,10 +409,11 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       form.append('messaging_product', 'whatsapp');
       form.append('file', new File([file], filename, { type: mime }));
 
-      const mediaUploadRes = await fetch(
-        `https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/media`,
-        { method: 'POST', headers: { Authorization: `Bearer ${accessToken}` }, body: form }
-      );
+      const mediaUploadRes = await fetch(`https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/media`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}` },
+        body: form,
+      });
 
       const mediaUploadJson = await mediaUploadRes.json();
       if (!mediaUploadRes.ok) throw new Error(mediaUploadJson?.error?.message || 'Error subiendo media a WhatsApp');
@@ -426,16 +431,14 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
       const cap = (caption || '').trim();
       if (messageType === 'image') body.image = cap ? { id: mediaId, caption: cap } : { id: mediaId };
       if (messageType === 'video') body.video = cap ? { id: mediaId, caption: cap } : { id: mediaId };
-      if (messageType === 'document') body.document = cap ? { id: mediaId, caption: cap, filename: safeName } : { id: mediaId, filename: safeName };
+      if (messageType === 'document')
+        body.document = cap ? { id: mediaId, caption: cap, filename: safeName } : { id: mediaId, filename: safeName };
 
-      const msgRes = await fetch(
-        `https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/messages`,
-        {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }
-      );
+      const msgRes = await fetch(`https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/messages`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
 
       const msgJson = await msgRes.json();
       if (!msgRes.ok) throw new Error(msgJson?.error?.message || 'Error enviando archivo por WhatsApp');
@@ -448,6 +451,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
         status: 'sent',
         message_type: messageType,
         message: cap || '',
+        message_content: cap || '',
         whatsapp_message_id: whatsappMessageId,
         media_id: mediaId,
         media_url: publicUrl,
@@ -505,9 +509,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
         </div>
 
         <div className="flex-1">
-          <h3 className="font-semibold text-gray-900">
-            {contact.contact_name || contact.phone_number}
-          </h3>
+          <h3 className="font-semibold text-gray-900">{contact.contact_name || contact.phone_number}</h3>
           <div className="flex items-center gap-2">
             <p className="text-xs text-gray-500">{contact.phone_number}</p>
 
@@ -518,7 +520,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
               </span>
             )}
 
-            {(isRefreshing && !isInitialLoading) && (
+            {isRefreshing && !isInitialLoading && (
               <span className="text-xs text-gray-500 flex items-center gap-1">
                 <Loader className="w-3 h-3 animate-spin" />
                 actualizando
@@ -527,7 +529,6 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
           </div>
         </div>
 
-        {/* ✅ Refresh + Auto toggle */}
         <button
           onClick={() => loadMessages({ reason: 'manual', showSpinner: false })}
           className="p-2 hover:bg-gray-100 rounded-full"
@@ -546,68 +547,63 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
           {autoRefresh ? 'Auto: ON' : 'Auto: OFF'}
         </button>
 
-        <button
-          onClick={() => onShowClientInfo(contact)}
-          className="p-2 hover:bg-gray-100 rounded-full"
-          title="Info"
-        >
+        <button onClick={() => onShowClientInfo(contact)} className="p-2 hover:bg-gray-100 rounded-full" title="Info">
           <Info className="w-5 h-5 text-gray-600" />
         </button>
       </div>
 
-   {/* Mensajes */}
-<div
-  ref={listRef}
-  onScroll={() => {
-    const el = listRef.current;
-    if (!el) return;
-    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    setIsNearBottom(near);
-  }}
-  className="flex-1 overflow-y-auto p-4 space-y-2"
->
-  {isInitialLoading ? (
-    <div className="flex justify-center">
-      <Loader className="w-6 h-6 animate-spin text-green-500" />
-    </div>
-  ) : (
-    (messages || []).map((msg) => {
-      const normalized = {
-        ...msg,
-        message_content: msg.message_content ?? msg.message ?? '',
-        message: msg.message ?? msg.message_content ?? '',
-      };
-
-      return (
-        <div
-          key={normalized.id}
-          className={`flex ${normalized.direction === 'outbound' ? 'justify-end' : 'justify-start'}`}
-        >
-          <div
-            className={`max-w-md px-4 py-2 rounded-lg ${
-              normalized.direction === 'outbound' ? 'bg-[#d9fdd3]' : 'bg-white'
-            }`}
-          >
-            <WhatsAppMediaMessage message={normalized} />
-
-            <div className="flex items-center justify-end gap-1 mt-1">
-              <span className="text-[10px] text-gray-500">
-                {new Date(normalized.created_at || normalized.timestamp || Date.now()).toLocaleTimeString('es-CL', {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })}
-              </span>
-              {normalized.direction === 'outbound' && getStatusIcon(normalized.status)}
-            </div>
+      {/* Mensajes */}
+      <div
+        ref={listRef}
+        onScroll={() => {
+          const el = listRef.current;
+          if (!el) return;
+          const near = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+          setIsNearBottom(near);
+        }}
+        className="flex-1 overflow-y-auto p-4 space-y-2"
+      >
+        {isInitialLoading ? (
+          <div className="flex justify-center">
+            <Loader className="w-6 h-6 animate-spin text-green-500" />
           </div>
-        </div>
-      );
-    })
-  )}
+        ) : (
+          (messages || []).map((msg) => {
+            const normalized = {
+              ...msg,
+              message_content: msg.message_content ?? msg.message ?? '',
+              message: msg.message ?? msg.message_content ?? '',
+            };
 
-  <div ref={messagesEndRef} />
-</div>
+            return (
+              <div
+                key={normalized.id}
+                className={`flex ${normalized.direction === 'outbound' ? 'justify-end' : 'justify-start'}`}
+              >
+                <div
+                  className={`max-w-md px-4 py-2 rounded-lg ${
+                    normalized.direction === 'outbound' ? 'bg-[#d9fdd3]' : 'bg-white'
+                  }`}
+                >
+                  <WhatsAppMediaMessage message={normalized} />
 
+                  <div className="flex items-center justify-end gap-1 mt-1">
+                    <span className="text-[10px] text-gray-500">
+                      {new Date(normalized.created_at || normalized.timestamp || Date.now()).toLocaleTimeString('es-CL', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </span>
+                    {normalized.direction === 'outbound' && getStatusIcon(normalized.status)}
+                  </div>
+                </div>
+              </div>
+            );
+          })
+        )}
+
+        <div ref={messagesEndRef} />
+      </div>
 
       {/* Input */}
       <div className="bg-white border-t p-4">
