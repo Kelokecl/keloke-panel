@@ -555,7 +555,7 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
         </button>
       </div>
 
-     {/* Mensajes */}
+   {/* Mensajes */}
 <div
   ref={listRef}
   onScroll={() => {
@@ -566,13 +566,12 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
   }}
   className="flex-1 overflow-y-auto p-4 space-y-2"
 >
-  {isLoading ? (
+  {isInitialLoading ? (
     <div className="flex justify-center">
       <Loader className="w-6 h-6 animate-spin text-green-500" />
     </div>
   ) : (
     (messages || []).map((msg) => {
-      // ✅ Normaliza contenido (a veces viene message_content, a veces message)
       const normalized = {
         ...msg,
         message_content: msg.message_content ?? msg.message ?? '',
