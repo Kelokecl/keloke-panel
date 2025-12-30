@@ -164,10 +164,23 @@ function extractBudgetLukas(text: string): number | null {
   return n;
 }
 
-function looksLikeUseCase(text: string) {
+// ✅ use_case NORMALIZADO (regalo/casa/negocio/despacho/uso_seguido/uso_ocasional)
+function extractUseCase(text: string): string | null {
   const t = (text || "").toLowerCase();
-  const keys = ["regalo", "casa", "hogar", "negocio", "despacho", "oficina", "emprend", "pyme"];
-  return keys.some((k) => t.includes(k));
+
+  const rules: Array<[RegExp, string]> = [
+    [/\b(regalo|cumple|cumpleaños|para regalar|obsequio)\b/i, "regalo"],
+    [/\b(casa|hogar|depto|departamento)\b/i, "casa"],
+    [/\b(negocio|emprend|emprendimiento|pyme|local|tienda|empresa|oficina)\b/i, "negocio"],
+    [/\b(despacho|env[ií]o|delivery|reparto|bodega)\b/i, "despacho"],
+    [/\b(uso\s*seguido|seguido|diario|frecuente)\b/i, "uso_seguido"],
+    [/\b(uso\s*ocasional|ocasional|de\s*vez\s*en\s*cuando)\b/i, "uso_ocasional"],
+  ];
+
+  for (const [re, val] of rules) {
+    if (re.test(t)) return val;
+  }
+  return null;
 }
 
 async function waSendText(phoneNumberId: string, toWaId: string, body: string, accessToken: string) {
@@ -219,8 +232,6 @@ async function shopifySearchTop2(query: string, budget?: number | null) {
     }
   `;
 
-  // Truco: la sintaxis de query Shopify soporta title:* / tag:* / etc.
-  // Aquí buscamos por texto general.
   const variables = { q };
 
   const resp = await fetch(`https://${SHOPIFY_STORE_DOMAIN}/api/2024-10/graphql.json`, {
@@ -277,7 +288,7 @@ async function buildAndSendReply(params: {
   const lastOfferAt = conv.last_offer_at ? new Date(conv.last_offer_at).getTime() : 0;
   const recentlyOffered = lastOfferAt && (Date.now() - lastOfferAt < 1000 * 60 * 10);
 
-  // anti-loop IA (no mandar lo mismo seguido)
+  // anti-loop IA
   const lastAiAt = conv.last_ai_reply_at ? new Date(conv.last_ai_reply_at).getTime() : 0;
   const recentlyAi = lastAiAt && (Date.now() - lastAiAt < 1000 * 8);
 
@@ -292,9 +303,10 @@ async function buildAndSendReply(params: {
 
   const userText = String(lastMsg?.[0]?.message_content ?? lastMsg?.[0]?.message ?? "").trim();
 
-  // ✅ Captura rápida de use_case si lo dijo
-  if (!useCase && looksLikeUseCase(userText)) {
-    await upsertConversation(waId, { use_case: userText.trim() });
+  // ✅ Captura use_case normalizado si lo dijo
+  if (!useCase) {
+    const uc0 = extractUseCase(userText);
+    if (uc0) await upsertConversation(waId, { use_case: uc0 });
   }
 
   // Flujo determinista “humano”
@@ -332,18 +344,19 @@ async function buildAndSendReply(params: {
     return;
   }
 
-  // ✅ Ya tenemos comuna, ahora pedimos use_case UNA sola vez y lo guardamos
+  // ✅ Ya tenemos comuna, ahora pedimos use_case UNA sola vez (normalizado)
   const updated = (await getConversation(waId)) || {};
   if (!updated.use_case) {
-    // si acaba de responder y no calza, igual aceptamos lo que sea como use_case
-    if (userText.length >= 2) {
-      await upsertConversation(waId, { use_case: userText.trim(), state: "READY_TO_OFFER" });
+    const uc1 = extractUseCase(userText);
+
+    if (uc1) {
+      await upsertConversation(waId, { use_case: uc1, state: "READY_TO_OFFER" });
     } else {
       await upsertConversation(waId, { state: "ASK_USE_CASE" });
       await waSendText(
         phoneNumberId,
         waId,
-        "¿Lo quieres para casa, negocio, despacho o regalo? 👀",
+        "Perfecto 🙌 ¿Lo quieres para qué uso principal? (casa / negocio / despacho / regalo). Con eso te cierro la mejor opción en 1 mensaje.",
         accessToken
       );
       return;
@@ -370,6 +383,20 @@ async function buildAndSendReply(params: {
         })
         .join("\n\n");
 
+      const offerPayload = {
+        product: p,
+        budget: Number(b),
+        comuna: co,
+        use_case: uc || null,
+        options: shopifyPick.map((it: any, idx: number) => ({
+          label: `Opción ${idx + 1}`,
+          title: it.title,
+          price: it.price ? Number(it.price) : null,
+          currency: it.currency || "CLP",
+          url: it.url,
+        })),
+      };
+
       const msg =
         `Listo 🙌 Te dejé 2 opciones buenas para *${uc || "tu caso"}*.\n\n` +
         `Producto: *${p}*\nPresupuesto: *$${Number(b).toLocaleString("es-CL")}*\nComuna: *${co}*\n\n` +
@@ -377,16 +404,29 @@ async function buildAndSendReply(params: {
         `Si me dices *si lo necesitas para envío seguido o uso ocasional*, te confirmo la mejor y te la dejo lista para comprar.`;
 
       await waSendText(phoneNumberId, waId, msg, accessToken);
-      await upsertConversation(waId, { state: "OFFER_SENT", last_offer_at: nowISO() });
-// NO return: dejamos que la IA pueda responder si el cliente contesta algo extra luego
-return;
-
+      await upsertConversation(waId, {
+        state: "OFFER_SENT",
+        last_offer_at: nowISO(),
+        last_offer_payload: offerPayload,
+      });
+      return;
     }
 
     // fallback a links
     const q = encodeURIComponent(String(p));
     const link1 = `${PUBLIC_STORE_DOMAIN}/search?q=${q}`;
     const link2 = `${PUBLIC_STORE_DOMAIN}/collections/all?filter.v.price.gte=0&filter.v.price.lte=${encodeURIComponent(String(b))}&q=${q}`;
+
+    const offerPayload = {
+      product: p,
+      budget: Number(b),
+      comuna: co,
+      use_case: uc || null,
+      options: [
+        { label: "Opción 1", title: "Búsqueda", url: link1 },
+        { label: "Opción 2", title: "Hasta tu presupuesto", url: link2 },
+      ],
+    };
 
     const msg =
       `Listo 🙌\n\n` +
@@ -396,24 +436,34 @@ return;
       `Si me dices *color / tamaño / uso* te afino al tiro.`;
 
     await waSendText(phoneNumberId, waId, msg, accessToken);
-    await upsertConversation(waId, { state: "OFFER_SENT", last_offer_at: nowISO() });
+    await upsertConversation(waId, {
+      state: "OFFER_SENT",
+      last_offer_at: nowISO(),
+      last_offer_payload: offerPayload,
+    });
     return;
   }
 
-  // ✅ IA “humana” solo para conversación post-oferta / dudas (anti-loop + horario)
+  // ✅ IA “humana” solo para post-oferta / dudas (anti-loop + horario)
   if (!OPENAI_API_KEY || !aiCfg?.auto_reply_enabled) return;
   if (!withinScheduleChile(aiCfg)) return;
   if (recentlyAi) return;
 
   const training = (aiCfg.training_data || "").trim();
+
+  const offerCtx = finalConv.last_offer_payload ? JSON.stringify(finalConv.last_offer_payload) : "";
+  const useCaseCtx = finalConv.use_case || "";
+
   const system =
     `Eres el asistente de ventas de Keloke.cl en Chile. ` +
     `Hablas como humano, chileno, natural (sin sonar robot). ` +
     `Objetivo: cerrar venta con confianza, resolver dudas, y guiar a compra. ` +
     `Regla CLAVE: NO repitas la misma pregunta si el cliente ya respondió. ` +
     `Si hay 2 opciones ya enviadas, ahora tu pega es: recomendar 1 y pedir 1 dato final para cerrar (color/tamaño/uso/envío). ` +
-    `Sé breve: 1 a 4 líneas.\n\n` +
-    (training ? `Contexto adicional:\n${training}\n\n` : "");
+    `Sé breve: 1 a 4 líneas.\n` +
+    (useCaseCtx ? `\nUso del cliente: ${useCaseCtx}\n` : "") +
+    (offerCtx ? `\nOferta previa (úsala tal cual, NO inventes): ${offerCtx}\n` : "") +
+    (training ? `\nContexto adicional:\n${training}\n` : "");
 
   const { data: hist } = await supabase
     .from("whatsapp_messages")
@@ -453,7 +503,7 @@ return;
   if (oaiResp.ok && outText?.trim()) {
     const cleaned = outText.trim().slice(0, 900);
 
-    // evita mandar exactamente lo mismo dos veces
+    // evita mandar lo mismo dos veces
     if (String(cleaned) === String(finalConv.last_ai_reply_text || "").trim()) return;
 
     await waSendText(phoneNumberId, waId, cleaned, accessToken);
@@ -532,7 +582,9 @@ Deno.serve(async (req) => {
         message_type: msgType,
         message_content: messageContent,
         direction: "inbound",
-        timestamp: new Date((m.timestamp ? parseInt(m.timestamp, 10) : Math.floor(Date.now() / 1000)) * 1000).toISOString(),
+        timestamp: new Date(
+          (m.timestamp ? parseInt(m.timestamp, 10) : Math.floor(Date.now() / 1000)) * 1000
+        ).toISOString(),
         phone_number: waId,
         status: "received",
         whatsapp_message_id: m.id || null,
@@ -543,16 +595,34 @@ Deno.serve(async (req) => {
         updated_at: nowISO(),
       });
 
-      // ✅ Estado: si no hay product, toma el texto como producto (pero limpia URLs largas)
+      // ✅ Estado base: product/budget/comuna y captura use_case normalizado si toca
       const conv = (await getConversation(waId)) || {};
-      if (!conv.product && msgType === "text" && messageContent) {
+
+      if (msgType === "text" && messageContent) {
         const cleaned = messageContent.replace(/https?:\/\/\S+/g, "").trim();
-        if (cleaned.length >= 2) await upsertConversation(waId, { product: cleaned, state: "ASK_BUDGET" });
-      } else if (!conv.budget && msgType === "text" && messageContent) {
-        const b = extractBudgetLukas(messageContent);
-        if (b) await upsertConversation(waId, { budget: b, state: "ASK_COMUNA" });
-      } else if (conv.product && conv.budget && !conv.comuna && msgType === "text" && messageContent) {
-        if (messageContent.trim().length >= 3) await upsertConversation(waId, { comuna: messageContent.trim(), state: "ASK_USE_CASE" });
+
+        // product
+        if (!conv.product && cleaned.length >= 2) {
+          await upsertConversation(waId, { product: cleaned, state: "ASK_BUDGET" });
+        }
+
+        // budget
+        if (!conv.budget) {
+          const b = extractBudgetLukas(cleaned);
+          if (b) await upsertConversation(waId, { budget: b, state: "ASK_COMUNA" });
+        }
+
+        // comuna
+        if (conv.product && (conv.budget || extractBudgetLukas(cleaned)) && !conv.comuna && cleaned.length >= 3) {
+          // OJO: acá podrías capturar una comuna “real” con regex, pero lo dejamos simple
+          await upsertConversation(waId, { comuna: cleaned, state: "ASK_USE_CASE" });
+        }
+
+        // use_case (normalizado)
+        if (!conv.use_case) {
+          const uc = extractUseCase(cleaned);
+          if (uc) await upsertConversation(waId, { use_case: uc });
+        }
       }
 
       if (aiCfg?.auto_reply_enabled && accessToken) {
@@ -563,6 +633,6 @@ Deno.serve(async (req) => {
     return json({ ok: true }, 200);
   } catch (e) {
     console.error("Fatal error:", e);
-    return json({ ok: false, error: String(e?.message || e) }, 500);
+    return json({ ok: false, error: String((e as any)?.message || e) }, 500);
   }
 });
