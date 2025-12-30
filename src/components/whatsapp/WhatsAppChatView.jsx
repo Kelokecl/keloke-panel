@@ -571,30 +571,41 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
             <Loader className="w-6 h-6 animate-spin text-green-500" />
           </div>
         ) : (
-          messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex ${msg.direction === 'outbound' ? 'justify-end' : 'justify-start'}`}
-            >
-              <div
-                className={`max-w-md px-4 py-2 rounded-lg ${
-                  msg.direction === 'outbound' ? 'bg-[#d9fdd3]' : 'bg-white'
-                }`}
-              >
-                <WhatsAppMediaMessage message={msg} />
-                <div className="flex items-center justify-end gap-1 mt-1">
-                  <span className="text-[10px] text-gray-500">
-                    {new Date(msg.created_at).toLocaleTimeString('es-CL', {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
-                  </span>
-                  {msg.direction === 'outbound' && getStatusIcon(msg.status)}
-                </div>
-              </div>
-            </div>
-          ))
-        )}
+         messages.map((msg) => {
+  // ✅ Normaliza contenido (tu backend a veces usa message_content y otras message)
+  const normalized = {
+    ...msg,
+    message_content: msg.message_content ?? msg.message ?? '',
+    message: msg.message ?? msg.message_content ?? '',
+  };
+
+  return (
+    <div
+      key={msg.id}
+      className={`flex ${normalized.direction === 'outbound' ? 'justify-end' : 'justify-start'}`}
+    >
+      <div
+        className={`max-w-md px-4 py-2 rounded-lg ${
+          normalized.direction === 'outbound' ? 'bg-[#d9fdd3]' : 'bg-white'
+        }`}
+      >
+        {/* ✅ Le pasamos siempre un objeto consistente */}
+        <WhatsAppMediaMessage message={normalized} />
+
+        <div className="flex items-center justify-end gap-1 mt-1">
+          <span className="text-[10px] text-gray-500">
+            {new Date(normalized.created_at || normalized.timestamp || Date.now()).toLocaleTimeString('es-CL', {
+              hour: '2-digit',
+              minute: '2-digit',
+            })}
+          </span>
+          {normalized.direction === 'outbound' && getStatusIcon(normalized.status)}
+        </div>
+      </div>
+    </div>
+  );
+})
+
         <div ref={messagesEndRef} />
       </div>
 
