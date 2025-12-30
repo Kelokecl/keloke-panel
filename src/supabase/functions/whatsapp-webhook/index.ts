@@ -17,6 +17,12 @@ const SHOPIFY_STOREFRONT_TOKEN = Deno.env.get("SHOPIFY_STOREFRONT_TOKEN") || "";
 const SHOPIFY_STORE_DOMAIN = Deno.env.get("SHOPIFY_STORE_DOMAIN") || ""; // csn703-10.myshopify.com
 const PUBLIC_STORE_DOMAIN = "https://keloke.cl";
 
+// ✅ Storage
+const STORAGE_BUCKET = "whatsapp-media";
+const WA_GRAPH_VERSION = "v24.0";
+const SIGNED_URL_SECONDS = 60 * 60 * 24 * 7; // 7 días
+const MAX_FILE_BYTES = 16 * 1024 * 1024; // 16MB (limite típico WhatsApp)
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const corsHeaders = {
@@ -45,6 +51,32 @@ function nowISO() {
 
 function normalizePhone(s: string) {
   return (s || "").replace(/[^\d]/g, "");
+}
+
+function safeExtFromMime(mime = "") {
+  const m = mime.split(";")[0].trim().toLowerCase();
+  const map: Record<string, string> = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "video/mp4": "mp4",
+    "video/quicktime": "mov",
+    "application/pdf": "pdf",
+    "text/plain": "txt",
+    "application/msword": "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "audio/ogg": "ogg",
+    "audio/webm": "webm",
+    "audio/mpeg": "mp3",
+    "audio/mp4": "m4a",
+  };
+  if (map[m]) return map[m];
+  const slash = m.indexOf("/");
+  if (slash > -1) return m.slice(slash + 1) || "bin";
+  return "bin";
 }
 
 async function getActiveConnectionByPhoneNumberId(phoneNumberId: string) {
@@ -164,7 +196,7 @@ function extractBudgetLukas(text: string): number | null {
   return n;
 }
 
-// ✅ use_case NORMALIZADO (regalo/casa/negocio/despacho/uso_seguido/uso_ocasional)
+// ✅ use_case NORMALIZADO
 function extractUseCase(text: string): string | null {
   const t = (text || "").toLowerCase();
 
@@ -184,7 +216,7 @@ function extractUseCase(text: string): string | null {
 }
 
 async function waSendText(phoneNumberId: string, toWaId: string, body: string, accessToken: string) {
-  const url = `https://graph.facebook.com/v24.0/${phoneNumberId}/messages`;
+  const url = `https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/messages`;
   const resp = await fetch(url, {
     method: "POST",
     headers: {
@@ -207,7 +239,99 @@ async function waSendText(phoneNumberId: string, toWaId: string, body: string, a
   return j;
 }
 
-// ✅ Shopify Search (Storefront GraphQL)
+/** =========================
+ *  ✅ MEDIA: Meta -> Storage
+ *  ========================= */
+async function fetchMetaMediaMeta(mediaId: string, accessToken: string) {
+  const url = `https://graph.facebook.com/${WA_GRAPH_VERSION}/${mediaId}?fields=url,mime_type,file_size,sha256`;
+  const resp = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
+  const j = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error("Meta media meta error:", resp.status, j);
+    return null;
+  }
+  return j; // { url, mime_type, file_size, ... }
+}
+
+async function downloadMetaMedia(binaryUrl: string, accessToken: string): Promise<Uint8Array | null> {
+  const resp = await fetch(binaryUrl, { headers: { authorization: `Bearer ${accessToken}` } });
+  if (!resp.ok) {
+    console.error("Meta media download error:", resp.status);
+    return null;
+  }
+  const ab = await resp.arrayBuffer();
+  return new Uint8Array(ab);
+}
+
+async function storeInboundMedia(params: {
+  waId: string;
+  msgType: string;
+  mediaId: string;
+  accessToken: string;
+}) {
+  const { waId, msgType, mediaId, accessToken } = params;
+
+  const meta = await fetchMetaMediaMeta(mediaId, accessToken);
+  if (!meta?.url) return null;
+
+  const size = Number(meta.file_size || 0);
+  if (size && size > MAX_FILE_BYTES) {
+    console.warn("Media too large:", size);
+    return {
+      media_id: mediaId,
+      media_url: null,
+      media_mime_type: String(meta.mime_type || null),
+      media_filename: null,
+      media_size: size,
+      storage_path: null,
+      skipped_reason: "too_large",
+    };
+  }
+
+  const bytes = await downloadMetaMedia(meta.url, accessToken);
+  if (!bytes) return null;
+
+  const mime = String(meta.mime_type || "application/octet-stream");
+  const ext = safeExtFromMime(mime);
+  const filename = `in_${waId}_${Date.now()}.${ext}`;
+  const storagePath = `inbound/${msgType}/${filename}`;
+
+  const up = await supabase.storage
+    .from(STORAGE_BUCKET)
+    .upload(storagePath, bytes, {
+      contentType: mime,
+      upsert: true,
+      cacheControl: "3600",
+    });
+
+  if (up.error) {
+    console.error("Storage upload error:", up.error);
+    return null;
+  }
+
+  // ✅ Signed URL (sirve aunque el bucket sea privado)
+  const signed = await supabase.storage
+    .from(STORAGE_BUCKET)
+    .createSignedUrl(storagePath, SIGNED_URL_SECONDS);
+
+  const mediaUrl =
+    signed.data?.signedUrl ||
+    supabase.storage.from(STORAGE_BUCKET).getPublicUrl(storagePath).data?.publicUrl ||
+    null;
+
+  return {
+    media_id: mediaId,
+    media_url: mediaUrl,
+    media_mime_type: mime,
+    media_filename: filename,
+    media_size: bytes.byteLength,
+    storage_path: storagePath,
+  };
+}
+
+/** =========================
+ *  ✅ Shopify Search
+ *  ========================= */
 async function shopifySearchTop2(query: string, budget?: number | null) {
   if (!SHOPIFY_STOREFRONT_TOKEN || !SHOPIFY_STORE_DOMAIN) return null;
 
@@ -251,7 +375,6 @@ async function shopifySearchTop2(query: string, budget?: number | null) {
 
   const products = (json?.data?.products?.edges || []).map((e: any) => e.node);
 
-  // Filtra por budget si viene (precio <= budget)
   const filtered = products.filter((p: any) => {
     const price = Number(p?.priceRange?.minVariantPrice?.amount || 0);
     if (!price) return false;
@@ -270,6 +393,9 @@ async function shopifySearchTop2(query: string, budget?: number | null) {
   }));
 }
 
+/** =========================
+ *  ✅ Reply logic (tu flujo)
+ *  ========================= */
 async function buildAndSendReply(params: {
   phoneNumberId: string;
   waId: string;
@@ -284,15 +410,12 @@ async function buildAndSendReply(params: {
   const comuna = conv.comuna || null;
   const useCase = conv.use_case || null;
 
-  // anti-spam oferta
   const lastOfferAt = conv.last_offer_at ? new Date(conv.last_offer_at).getTime() : 0;
   const recentlyOffered = lastOfferAt && (Date.now() - lastOfferAt < 1000 * 60 * 10);
 
-  // anti-loop IA
   const lastAiAt = conv.last_ai_reply_at ? new Date(conv.last_ai_reply_at).getTime() : 0;
   const recentlyAi = lastAiAt && (Date.now() - lastAiAt < 1000 * 8);
 
-  // último inbound
   const { data: lastMsg } = await supabase
     .from("whatsapp_messages")
     .select("message_content, message, message_type, created_at")
@@ -303,13 +426,12 @@ async function buildAndSendReply(params: {
 
   const userText = String(lastMsg?.[0]?.message_content ?? lastMsg?.[0]?.message ?? "").trim();
 
-  // ✅ Captura use_case normalizado si lo dijo
+  // ✅ Captura use_case
   if (!useCase) {
     const uc0 = extractUseCase(userText);
     if (uc0) await upsertConversation(waId, { use_case: uc0 });
   }
 
-  // Flujo determinista “humano”
   if (!product) {
     await upsertConversation(waId, { state: "ASK_PRODUCT" });
     await waSendText(phoneNumberId, waId, "Te leo 🙌 ¿Qué producto estás buscando?", accessToken);
@@ -344,11 +466,9 @@ async function buildAndSendReply(params: {
     return;
   }
 
-  // ✅ Ya tenemos comuna, ahora pedimos use_case UNA sola vez (normalizado)
   const updated = (await getConversation(waId)) || {};
   if (!updated.use_case) {
     const uc1 = extractUseCase(userText);
-
     if (uc1) {
       await upsertConversation(waId, { use_case: uc1, state: "READY_TO_OFFER" });
     } else {
@@ -365,7 +485,6 @@ async function buildAndSendReply(params: {
     await upsertConversation(waId, { state: "READY_TO_OFFER" });
   }
 
-  // ✅ Oferta con Shopify real (2 productos), si no hay token cae a links genéricos
   const finalConv = (await getConversation(waId)) || {};
   const p = finalConv.product || product;
   const b = finalConv.budget || budget;
@@ -412,7 +531,6 @@ async function buildAndSendReply(params: {
       return;
     }
 
-    // fallback a links
     const q = encodeURIComponent(String(p));
     const link1 = `${PUBLIC_STORE_DOMAIN}/search?q=${q}`;
     const link2 = `${PUBLIC_STORE_DOMAIN}/collections/all?filter.v.price.gte=0&filter.v.price.lte=${encodeURIComponent(String(b))}&q=${q}`;
@@ -444,13 +562,11 @@ async function buildAndSendReply(params: {
     return;
   }
 
-  // ✅ IA “humana” solo para post-oferta / dudas (anti-loop + horario)
   if (!OPENAI_API_KEY || !aiCfg?.auto_reply_enabled) return;
   if (!withinScheduleChile(aiCfg)) return;
   if (recentlyAi) return;
 
   const training = (aiCfg.training_data || "").trim();
-
   const offerCtx = finalConv.last_offer_payload ? JSON.stringify(finalConv.last_offer_payload) : "";
   const useCaseCtx = finalConv.use_case || "";
 
@@ -503,7 +619,6 @@ async function buildAndSendReply(params: {
   if (oaiResp.ok && outText?.trim()) {
     const cleaned = outText.trim().slice(0, 900);
 
-    // evita mandar lo mismo dos veces
     if (String(cleaned) === String(finalConv.last_ai_reply_text || "").trim()) return;
 
     await waSendText(phoneNumberId, waId, cleaned, accessToken);
@@ -568,19 +683,43 @@ Deno.serve(async (req) => {
       await upsertContact(waId, contactName);
 
       const msgType = m.type || "unknown";
-      let messageContent: string | null = null;
 
-      if (msgType === "text") messageContent = m.text?.body ?? null;
-      else if (msgType === "image") messageContent = m.image?.caption ?? "[image]";
-      else if (msgType === "video") messageContent = m.video?.caption ?? "[video]";
-      else if (msgType === "audio") messageContent = "[audio]";
-      else if (msgType === "document") messageContent = m.document?.caption ?? m.document?.filename ?? "[document]";
+      // ✅ contenido texto/caption (si no hay, dejamos fallback)
+      let messageContent: string = "";
+
+      if (msgType === "text") messageContent = m.text?.body ?? "";
+      else if (msgType === "image") messageContent = m.image?.caption ?? "";
+      else if (msgType === "video") messageContent = m.video?.caption ?? "";
+      else if (msgType === "audio") messageContent = "";
+      else if (msgType === "document") messageContent = m.document?.caption ?? m.document?.filename ?? "";
       else messageContent = `[${msgType}]`;
+
+      const fallbackLabel =
+        msgType === "image" ? "[image]" :
+        msgType === "video" ? "[video]" :
+        msgType === "audio" ? "[audio]" :
+        msgType === "document" ? "[document]" :
+        `[${msgType}]`;
+
+      const finalText = (messageContent && messageContent.trim()) ? messageContent.trim() : fallbackLabel;
+
+      // ✅ MEDIA ID según tipo
+      let mediaId: string | null = null;
+      if (msgType === "image") mediaId = m.image?.id ?? null;
+      if (msgType === "video") mediaId = m.video?.id ?? null;
+      if (msgType === "audio") mediaId = m.audio?.id ?? null;
+      if (msgType === "document") mediaId = m.document?.id ?? null;
+
+      // ✅ Descargar + subir a Storage
+      let mediaData: any = null;
+      if (mediaId && accessToken) {
+        mediaData = await storeInboundMedia({ waId, msgType, mediaId, accessToken });
+      }
 
       await insertMessage({
         from_number: waId,
         message_type: msgType,
-        message_content: messageContent,
+        message_content: finalText,
         direction: "inbound",
         timestamp: new Date(
           (m.timestamp ? parseInt(m.timestamp, 10) : Math.floor(Date.now() / 1000)) * 1000
@@ -588,37 +727,40 @@ Deno.serve(async (req) => {
         phone_number: waId,
         status: "received",
         whatsapp_message_id: m.id || null,
-        message: messageContent,
+        message: finalText,
         contact_name: contactName || null,
         is_read: false,
         created_at: nowISO(),
         updated_at: nowISO(),
+
+        // ✅ Campos media
+        media_id: mediaData?.media_id ?? mediaId ?? null,
+        media_url: mediaData?.media_url ?? null,
+        media_mime_type: mediaData?.media_mime_type ?? null,
+        media_filename: mediaData?.media_filename ?? null,
+        media_size: mediaData?.media_size ?? null,
+        platform_response: mediaData ? { storage_path: mediaData.storage_path, skipped_reason: mediaData.skipped_reason || null } : null,
       });
 
-      // ✅ Estado base: product/budget/comuna y captura use_case normalizado si toca
+      // ✅ Estado base: product/budget/comuna/use_case
       const conv = (await getConversation(waId)) || {};
 
-      if (msgType === "text" && messageContent) {
-        const cleaned = messageContent.replace(/https?:\/\/\S+/g, "").trim();
+      if (msgType === "text" && finalText) {
+        const cleaned = finalText.replace(/https?:\/\/\S+/g, "").trim();
 
-        // product
         if (!conv.product && cleaned.length >= 2) {
           await upsertConversation(waId, { product: cleaned, state: "ASK_BUDGET" });
         }
 
-        // budget
         if (!conv.budget) {
           const b = extractBudgetLukas(cleaned);
           if (b) await upsertConversation(waId, { budget: b, state: "ASK_COMUNA" });
         }
 
-        // comuna
         if (conv.product && (conv.budget || extractBudgetLukas(cleaned)) && !conv.comuna && cleaned.length >= 3) {
-          // OJO: acá podrías capturar una comuna “real” con regex, pero lo dejamos simple
           await upsertConversation(waId, { comuna: cleaned, state: "ASK_USE_CASE" });
         }
 
-        // use_case (normalizado)
         if (!conv.use_case) {
           const uc = extractUseCase(cleaned);
           if (uc) await upsertConversation(waId, { use_case: uc });
