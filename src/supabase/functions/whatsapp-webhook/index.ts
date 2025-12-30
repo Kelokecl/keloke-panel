@@ -378,7 +378,9 @@ async function buildAndSendReply(params: {
 
       await waSendText(phoneNumberId, waId, msg, accessToken);
       await upsertConversation(waId, { state: "OFFER_SENT", last_offer_at: nowISO() });
-      return;
+// NO return: dejamos que la IA pueda responder si el cliente contesta algo extra luego
+return;
+
     }
 
     // fallback a links
