@@ -165,40 +165,44 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
     }
   }, [contact?.phone_number]);
 
-  useEffect(() => {
-    if (!contact?.phone_number) return;
+ useEffect(() => {
+  if (!contact?.phone_number) return;
 
-    lastMessageIdRef.current = null;
-    setIsNearBottom(true);
-    setIsInitialLoading(true);
+  lastMessageIdRef.current = null;
+  setIsNearBottom(true);
+  setIsInitialLoading(true);
 
-    // Primera carga
-    loadMessages({ reason: 'initial', showSpinner: true });
-    markMessagesAsRead();
+  // Primera carga
+  loadMessages({ reason: 'initial', showSpinner: true });
+  markMessagesAsRead(); // ✅ solo aquí (carga inicial)
 
-    // Realtime: SOLO si autoRefresh está ON
-    const channel = supabase
-      .channel(`chat_${contact.phone_number}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'whatsapp_messages',
-          filter: `phone_number=eq.${contact.phone_number}`,
-        },
-        () => {
-          if (!autoRefresh) return;
-          loadMessages({ reason: 'realtime', showSpinner: false });
-          markMessagesAsRead();
-        }
-      )
-      .subscribe();
+  // ✅ Realtime: SOLO INSERT (evita loop con markMessagesAsRead que hace UPDATE)
+  const channel = supabase
+    .channel(`chat_${contact.phone_number}`)
+    .on(
+      'postgres_changes',
+      {
+        event: 'INSERT', // ✅ clave
+        schema: 'public',
+        table: 'whatsapp_messages',
+        filter: `phone_number=eq.${contact.phone_number}`,
+      },
+      () => {
+        if (!autoRefresh) return;
+        loadMessages({ reason: 'realtime-insert', showSpinner: false });
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [contact?.phone_number, autoRefresh, loadMessages, markMessagesAsRead]);
+        // ✅ marcar como leído pero SIN provocar loop:
+        // como este handler solo escucha INSERT, no se loop-ea aunque mark haga UPDATE
+        markMessagesAsRead();
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+// eslint-disable-next-line react-hooks/exhaustive-deps
+}, [contact?.phone_number, autoRefresh]);
 
   useEffect(() => {
     // Solo auto-scroll si el usuario está cerca del fondo
