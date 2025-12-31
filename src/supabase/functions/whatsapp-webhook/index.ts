@@ -19,6 +19,10 @@ const PUBLIC_STORE_DOMAIN = "https://keloke.cl";
 
 const WA_GRAPH_VERSION = Deno.env.get("WA_GRAPH_VERSION") || "v24.0";
 
+// ✅ MEDIA FIX (solo esto)
+const STORAGE_BUCKET = "whatsapp-media";
+const MAX_FILE_BYTES = 16 * 1024 * 1024; // 16MB
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const corsHeaders = {
@@ -360,7 +364,6 @@ function buildOfferText(params: {
     })
     .join("\n\n");
 
-  // Mensaje “nivel dios”: corto, humano, 1 sola pregunta.
   const closeQ = pickCloseQuestion(product);
 
   return (
@@ -382,9 +385,8 @@ async function sendAndLogOutbound(params: {
 
   const sent = await waSendText(phoneNumberId, waId, textBody, accessToken);
 
-  // ✅ CLAVE: guardar outbound para que la app lo vea en la conversación
   await insertMessage({
-    from_number: normalizePhone(phoneNumberId), // no es perfecto, pero no rompe tu esquema actual
+    from_number: normalizePhone(phoneNumberId),
     message_type: "text",
     message_content: textBody,
     direction: "outbound",
@@ -416,7 +418,6 @@ function extractMessageText(m: any): { type: string; content: string | null } {
     return { type: "document", content: `[document]${name}${mime}${cap}`.trim() };
   }
 
-  // ✅ WhatsApp “cosas raras” que antes te quedaban como unsupported
   if (msgType === "interactive") {
     const title =
       m.interactive?.button_reply?.title ||
@@ -447,20 +448,17 @@ function extractMessageText(m: any): { type: string; content: string | null } {
 }
 
 function shouldResetOnNewAsk(conv: any, userText: string) {
-  // Reset si: venía una conversación vieja/oferta, y llega un “necesito/busco/quiero” o un link de producto
   const t = String(userText || "").toLowerCase();
   const hasKelokeProduct = /keloke\.cl\/products\/[a-z0-9-]+/i.test(userText || "");
   const isNewAsk = /\b(necesito|busco|quiero|me interesa|tengo una consulta|consulta)\b/i.test(t);
 
   if (hasKelokeProduct) return true;
 
-  // Si la última actividad fue hace rato, y ahora dice hola o viene con nueva consulta
   const updatedAt = conv?.updated_at ? new Date(conv.updated_at).getTime() : 0;
   const stale = updatedAt && (Date.now() - updatedAt > 1000 * 60 * 25); // 25 min
 
   if (stale && (looksLikeGreeting(userText) || isNewAsk)) return true;
 
-  // Si ya había oferta enviada y ahora manda un texto largo (no es “sí/no/casa/seguido…”)
   const state = String(conv?.state || "");
   if (state === "OFFER_SENT" && !looksLikeShortAnswer(userText) && userText.trim().length >= 12) return true;
 
@@ -500,7 +498,6 @@ async function maybeAIReply(params: {
     return { role, content };
   });
 
-  // Contexto de oferta previa
   const offerCtx = conv?.last_offer_payload ? JSON.stringify(conv.last_offer_payload) : "";
 
   const system =
@@ -564,13 +561,11 @@ async function buildAndSendReply(params: {
 
   let conv = (await getConversation(waId)) || {};
 
-  // ✅ Reset inteligente: evita quedarse pegado en “freidora/90k/Ñuñoa”
   if (shouldResetOnNewAsk(conv, inboundText)) {
     await resetConversation(waId);
     conv = (await getConversation(waId)) || {};
   }
 
-  // ✅ Si viene link de producto Keloke, úsalo como “producto” y parte limpio
   const handle = extractProductHandleFromKelokeUrl(inboundText);
   if (handle) {
     const p = prettifyHandle(handle);
@@ -578,7 +573,6 @@ async function buildAndSendReply(params: {
     conv = (await getConversation(waId)) || {};
   }
 
-  // Normaliza use_case si aparece
   const uc = extractUseCase(inboundText);
   if (uc && !conv.use_case) {
     await upsertConversation(waId, { use_case: uc });
@@ -590,7 +584,6 @@ async function buildAndSendReply(params: {
   const comuna = conv.comuna || null;
   const useCase = conv.use_case || null;
 
-  // 1) Si no hay producto → conversación natural desde “hola”
   if (!product) {
     const msg = looksLikeGreeting(inboundText)
       ? "¡Hola! 🙌 Soy tu asesor de *Keloke.cl*. ¿Qué estás buscando hoy? (producto o link)"
@@ -600,7 +593,6 @@ async function buildAndSendReply(params: {
     return;
   }
 
-  // 2) Presupuesto
   if (!budget) {
     const b = extractBudgetLukas(inboundText);
     if (b) {
@@ -626,7 +618,6 @@ async function buildAndSendReply(params: {
     return;
   }
 
-  // 3) Comuna (IMPORTANTÍSIMO: NO volver a tomar “30 lucas” como comuna)
   if (!comuna) {
     const bHere = extractBudgetLukas(inboundText);
     if (!bHere) {
@@ -655,7 +646,6 @@ async function buildAndSendReply(params: {
     return;
   }
 
-  // 4) Use case
   if (!useCase) {
     const uc2 = extractUseCase(inboundText);
     if (uc2) {
@@ -674,7 +664,6 @@ async function buildAndSendReply(params: {
     }
   }
 
-  // 5) Oferta (evita spam + re-oferta si cambió producto)
   conv = (await getConversation(waId)) || {};
   const p = conv.product || product;
   const b = Number(conv.budget || budget);
@@ -724,7 +713,6 @@ async function buildAndSendReply(params: {
       return;
     }
 
-    // fallback mejorado (SIN repetir use_case, y con 1 sola pregunta útil)
     const q = encodeURIComponent(cleanProductQuery(String(p)));
     const link1 = `${PUBLIC_STORE_DOMAIN}/search?q=${q}`;
     const link2 = `${PUBLIC_STORE_DOMAIN}/collections/all?filter.v.price.gte=0&filter.v.price.lte=${encodeURIComponent(String(b))}&q=${q}`;
@@ -758,13 +746,12 @@ async function buildAndSendReply(params: {
     return;
   }
 
-  // 6) Post-oferta: SIEMPRE responder algo útil (y usar IA solo cuando valga la pena)
-  // Heurística simple: si responde “seguido/ocasional” o “opción 1/2”, recomienda y cierra.
+  conv = (await getConversation(waId)) || {};
   const t = String(inboundText || "").toLowerCase();
   const offer = conv?.last_offer_payload;
 
   const wantsOption = t.match(/\b(opcion|opción)\s*(1|2)\b/i);
-  const usage = extractUseCase(inboundText); // puede traer uso_seguido / uso_ocasional
+  const usage = extractUseCase(inboundText);
 
   if (offer?.options?.length) {
     if (wantsOption) {
@@ -793,14 +780,12 @@ async function buildAndSendReply(params: {
     }
   }
 
-  // Si es una pregunta o texto largo: ahí sí llama IA (controlado)
   const shouldUseAI = !looksLikeShortAnswer(inboundText) && (inboundText.includes("?") || inboundText.trim().length >= 18);
   if (shouldUseAI) {
     await maybeAIReply({ phoneNumberId, waId, accessToken, aiCfg, contactName, conv });
     return;
   }
 
-  // Fallback ultra simple (sin gastar tokens)
   await sendAndLogOutbound({
     phoneNumberId,
     waId,
@@ -808,6 +793,138 @@ async function buildAndSendReply(params: {
     textBody: "Te caché 🙌 Dime solo *opción 1 o 2* y te la dejo lista para comprar.",
     contactName,
   });
+}
+
+// ✅ MEDIA FIX helpers (solo esto)
+function safeExtFromMime(mime = "") {
+  const m = mime.split(";")[0].trim().toLowerCase();
+  const map: Record<string, string> = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "video/mp4": "mp4",
+    "video/quicktime": "mov",
+    "audio/ogg": "ogg",
+    "audio/webm": "webm",
+    "audio/mpeg": "mp3",
+    "audio/mp4": "m4a",
+    "application/pdf": "pdf",
+    "text/plain": "txt",
+    "text/calendar": "ics",
+    "application/ics": "ics",
+    "application/octet-stream": "bin",
+  };
+  if (map[m]) return map[m];
+  const slash = m.indexOf("/");
+  if (slash > -1) return m.slice(slash + 1) || "bin";
+  return "bin";
+}
+
+async function waGetMediaInfo(mediaId: string, accessToken: string) {
+  const url = `https://graph.facebook.com/${WA_GRAPH_VERSION}/${mediaId}?fields=url,mime_type,file_size`;
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  const j = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(j?.error?.message || `media info failed ${resp.status}`);
+  return j; // { url, mime_type, file_size }
+}
+
+async function waDownloadMediaBinary(downloadUrl: string, accessToken: string) {
+  const resp = await fetch(downloadUrl, {
+    method: "GET",
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok) throw new Error(`media download failed ${resp.status}`);
+  const ab = await resp.arrayBuffer();
+  return new Uint8Array(ab);
+}
+
+function inferInboundMediaId(m: any, msgType: string): string | null {
+  if (msgType === "image") return m.image?.id || null;
+  if (msgType === "video") return m.video?.id || null;
+  if (msgType === "audio") return m.audio?.id || null;
+  if (msgType === "document") return m.document?.id || null;
+  if (msgType === "sticker") return m.sticker?.id || null;
+  return null;
+}
+
+function inferInboundFilename(m: any, msgType: string, mime: string): string {
+  if (msgType === "document") return m.document?.filename || `document.${safeExtFromMime(mime)}`;
+  if (msgType === "image") return `image.${safeExtFromMime(mime)}`;
+  if (msgType === "video") return `video.${safeExtFromMime(mime)}`;
+  if (msgType === "audio") return `audio.${safeExtFromMime(mime)}`;
+  if (msgType === "sticker") return `sticker.${safeExtFromMime(mime || "image/webp")}`;
+  return `file.${safeExtFromMime(mime)}`;
+}
+
+async function fetchStoreAndReturnMediaFields(params: {
+  waId: string;
+  msgType: string;
+  msg: any;
+  accessToken: string;
+}) {
+  const { waId, msgType, msg, accessToken } = params;
+  const mediaId = inferInboundMediaId(msg, msgType);
+  if (!mediaId || !accessToken) return null;
+
+  const info = await waGetMediaInfo(mediaId, accessToken);
+  const mime = String(info?.mime_type || "application/octet-stream");
+  const size = Number(info?.file_size || 0);
+
+  if (size && size > MAX_FILE_BYTES) {
+    // guardamos al menos el id/mime para mostrar “archivo muy grande”
+    return {
+      media_id: mediaId,
+      media_url: null,
+      media_mime_type: mime,
+      media_filename: inferInboundFilename(msg, msgType, mime),
+      media_size: size,
+      platform_response: { media_info: info, note: "file_too_large" },
+    };
+  }
+
+  const dlUrl = String(info?.url || "");
+  if (!dlUrl) return null;
+
+  const bytes = await waDownloadMediaBinary(dlUrl, accessToken);
+  const filename = inferInboundFilename(msg, msgType, mime);
+  const safeName = filename.replace(/[^\w.\-]+/g, "_");
+
+  const storagePath = `inbound/${normalizePhone(waId)}/${Date.now()}_${safeName}`;
+
+  const blob = new Blob([bytes], { type: mime });
+
+  const { error: upErr } = await supabase.storage.from(STORAGE_BUCKET).upload(storagePath, blob, {
+    contentType: mime,
+    cacheControl: "3600",
+    upsert: true,
+  });
+
+  if (upErr) {
+    return {
+      media_id: mediaId,
+      media_url: null,
+      media_mime_type: mime,
+      media_filename: safeName,
+      media_size: bytes.byteLength,
+      platform_response: { media_info: info, storage_error: upErr },
+    };
+  }
+
+  const { data: pub } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(storagePath);
+  const publicUrl = pub?.publicUrl || null;
+
+  return {
+    media_id: mediaId,
+    media_url: publicUrl,
+    media_mime_type: mime,
+    media_filename: safeName,
+    media_size: bytes.byteLength,
+    platform_response: { media_info: info, storage_path: storagePath, storage_public_url: publicUrl },
+  };
 }
 
 // MAIN
@@ -858,7 +975,7 @@ Deno.serve(async (req) => {
       const waId = normalizePhone(m.from || "");
       if (!waId) continue;
 
-      // ✅ anti-duplicados: si Meta reintenta el mismo mensaje, NO vuelvas a responder
+      // ✅ anti-duplicados
       const msgId = String(m.id || "");
       if (msgId && (await hasInboundMessageIdAlready(msgId))) continue;
 
@@ -867,6 +984,23 @@ Deno.serve(async (req) => {
       const extracted = extractMessageText(m);
       const msgType = extracted.type;
       const messageContent = extracted.content;
+
+      // ✅ MEDIA FIX: si es media, descarga + guarda URL pública para que tu UI la vea
+      let mediaFields: any = null;
+      try {
+        if (["image", "video", "audio", "document", "sticker"].includes(msgType)) {
+          mediaFields = await fetchStoreAndReturnMediaFields({
+            waId,
+            msgType,
+            msg: m,
+            accessToken,
+          });
+        }
+      } catch (e) {
+        // no rompas el flujo si falla media
+        console.error("media fetch/store error:", e);
+        mediaFields = null;
+      }
 
       await insertMessage({
         from_number: waId,
@@ -882,6 +1016,7 @@ Deno.serve(async (req) => {
         is_read: false,
         created_at: nowISO(),
         updated_at: nowISO(),
+        ...(mediaFields ? mediaFields : {}),
       });
 
       // ✅ Solo respondemos si Auto está ON y hay token
