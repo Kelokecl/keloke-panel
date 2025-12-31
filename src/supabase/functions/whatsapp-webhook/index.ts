@@ -17,11 +17,7 @@ const SHOPIFY_STOREFRONT_TOKEN = Deno.env.get("SHOPIFY_STOREFRONT_TOKEN") || "";
 const SHOPIFY_STORE_DOMAIN = Deno.env.get("SHOPIFY_STORE_DOMAIN") || ""; // csn703-10.myshopify.com
 const PUBLIC_STORE_DOMAIN = "https://keloke.cl";
 
-// ✅ Storage
-const STORAGE_BUCKET = "whatsapp-media";
-const WA_GRAPH_VERSION = "v24.0";
-const SIGNED_URL_SECONDS = 60 * 60 * 24 * 7; // 7 días
-const MAX_FILE_BYTES = 16 * 1024 * 1024; // 16MB (limite típico WhatsApp)
+const WA_GRAPH_VERSION = Deno.env.get("WA_GRAPH_VERSION") || "v24.0";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -53,30 +49,86 @@ function normalizePhone(s: string) {
   return (s || "").replace(/[^\d]/g, "");
 }
 
-function safeExtFromMime(mime = "") {
-  const m = mime.split(";")[0].trim().toLowerCase();
-  const map: Record<string, string> = {
-    "image/jpeg": "jpg",
-    "image/jpg": "jpg",
-    "image/png": "png",
-    "image/webp": "webp",
-    "video/mp4": "mp4",
-    "video/quicktime": "mov",
-    "application/pdf": "pdf",
-    "text/plain": "txt",
-    "application/msword": "doc",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
-    "application/vnd.ms-excel": "xls",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
-    "audio/ogg": "ogg",
-    "audio/webm": "webm",
-    "audio/mpeg": "mp3",
-    "audio/mp4": "m4a",
-  };
-  if (map[m]) return map[m];
-  const slash = m.indexOf("/");
-  if (slash > -1) return m.slice(slash + 1) || "bin";
-  return "bin";
+function clamp(str: string, n = 900) {
+  return String(str || "").slice(0, n);
+}
+
+function stripUrls(s: string) {
+  return String(s || "").replace(/https?:\/\/\S+/g, "").trim();
+}
+
+function extractProductHandleFromKelokeUrl(s: string): string | null {
+  const m = String(s || "").match(/keloke\.cl\/products\/([a-z0-9-]+)/i);
+  return m?.[1] || null;
+}
+
+function prettifyHandle(h: string) {
+  return h.replace(/-/g, " ").trim();
+}
+
+function looksLikeGreeting(s: string) {
+  const t = String(s || "").toLowerCase().trim();
+  return /^(hola|wena|buenas|buenos dias|buenas tardes|buenas noches|holi|hello)\b/.test(t);
+}
+
+function looksLikeShortAnswer(s: string) {
+  const t = String(s || "").toLowerCase().trim();
+  return (
+    t.length <= 10 &&
+    /^(si|sí|no|dale|ya|ok|oka|listo|perfecto|gracias|vale|casa|negocio|despacho|regalo|seguido|ocasional)$/i.test(t)
+  );
+}
+
+function extractBudgetLukas(text: string): number | null {
+  const t = (text || "").toLowerCase();
+  const m1 = t.match(/(\d{1,3}(?:[.,]\d{3})+|\d{1,6})\s*(lucas|lks|luca)?/i);
+  if (!m1) return null;
+  const raw = m1[1].replace(/\./g, "").replace(/,/g, "");
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if ((m1[2] || "").toLowerCase().includes("luc")) return n * 1000;
+  return n;
+}
+
+// ✅ use_case NORMALIZADO (regalo/casa/negocio/despacho/uso_seguido/uso_ocasional)
+function extractUseCase(text: string): string | null {
+  const t = (text || "").toLowerCase();
+
+  const rules: Array<[RegExp, string]> = [
+    [/\b(regalo|cumple|cumpleaños|para regalar|obsequio)\b/i, "regalo"],
+    [/\b(casa|hogar|depto|departamento)\b/i, "casa"],
+    [/\b(negocio|emprend|emprendimiento|pyme|local|tienda|empresa|oficina)\b/i, "negocio"],
+    [/\b(despacho|env[ií]o|delivery|reparto|bodega)\b/i, "despacho"],
+    [/\b(uso\s*seguido|seguido|diario|frecuente)\b/i, "uso_seguido"],
+    [/\b(uso\s*ocasional|ocasional|de\s*vez\s*en\s*cuando)\b/i, "uso_ocasional"],
+  ];
+
+  for (const [re, val] of rules) {
+    if (re.test(t)) return val;
+  }
+  return null;
+}
+
+function cleanProductQuery(raw: string) {
+  let t = stripUrls(raw);
+  t = t.replace(/\b(hola|tengo una consulta sobre|consulta sobre|quiero|necesito|busco|me interesa|quisiera)\b/gi, "").trim();
+  // evita queries muy largas tipo “ideal para notas…”
+  if (t.length > 60) t = t.slice(0, 60);
+  return t.trim();
+}
+
+function pickCloseQuestion(product: string) {
+  const p = String(product || "").toLowerCase();
+  if (/(lampara|lámpara|led|velador|escritorio)/i.test(p)) {
+    return "¿La quieres de *escritorio* o para *velador*? (una palabra)";
+  }
+  if (/(freidora|air\s*fryer)/i.test(p)) {
+    return "¿La necesitas para *uso seguido* o *uso ocasional*?";
+  }
+  if (/(audif|auricular|headphone|parlante|speaker)/i.test(p)) {
+    return "¿La quieres para *casa* o para *calle/deporte*?";
+  }
+  return "Dime 1 cosa para afinarla: ¿*color* o *tamaño*? (elige una)";
 }
 
 async function getActiveConnectionByPhoneNumberId(phoneNumberId: string) {
@@ -160,10 +212,22 @@ async function getConversation(waId: string) {
 async function upsertConversation(waId: string, patch: any) {
   const phone = normalizePhone(waId);
   const payload = { phone_number: phone, updated_at: nowISO(), ...patch };
-  const { error } = await supabase
-    .from("whatsapp_conversations")
-    .upsert(payload, { onConflict: "phone_number" });
+  const { error } = await supabase.from("whatsapp_conversations").upsert(payload, { onConflict: "phone_number" });
   if (error) console.error("upsertConversation error:", error);
+}
+
+async function resetConversation(waId: string) {
+  await upsertConversation(waId, {
+    product: null,
+    budget: null,
+    comuna: null,
+    use_case: null,
+    state: "ASK_PRODUCT",
+    last_offer_at: null,
+    last_offer_payload: null,
+    last_ai_reply_at: null,
+    last_ai_reply_text: null,
+  });
 }
 
 async function upsertContact(waId: string, contactName?: string) {
@@ -173,10 +237,7 @@ async function upsertContact(waId: string, contactName?: string) {
   const payload: any = { phone_number: phone, updated_at: nowISO() };
   if (contactName) payload.contact_name = contactName;
 
-  const { error } = await supabase
-    .from("whatsapp_contacts")
-    .upsert(payload, { onConflict: "phone_number" });
-
+  const { error } = await supabase.from("whatsapp_contacts").upsert(payload, { onConflict: "phone_number" });
   if (error) console.error("upsertContact error:", error);
 }
 
@@ -185,34 +246,16 @@ async function insertMessage(row: any) {
   if (error) console.error("insertMessage error:", error, row);
 }
 
-function extractBudgetLukas(text: string): number | null {
-  const t = (text || "").toLowerCase();
-  const m1 = t.match(/(\d{1,3}(?:[.,]\d{3})+|\d{1,6})\s*(lucas|lks|luca)?/i);
-  if (!m1) return null;
-  const raw = m1[1].replace(/\./g, "").replace(/,/g, "");
-  const n = parseInt(raw, 10);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  if ((m1[2] || "").toLowerCase().includes("luc")) return n * 1000;
-  return n;
-}
+async function hasInboundMessageIdAlready(whatsappMessageId: string) {
+  if (!whatsappMessageId) return false;
+  const { data, error } = await supabase
+    .from("whatsapp_messages")
+    .select("id")
+    .eq("whatsapp_message_id", whatsappMessageId)
+    .limit(1);
 
-// ✅ use_case NORMALIZADO
-function extractUseCase(text: string): string | null {
-  const t = (text || "").toLowerCase();
-
-  const rules: Array<[RegExp, string]> = [
-    [/\b(regalo|cumple|cumpleaños|para regalar|obsequio)\b/i, "regalo"],
-    [/\b(casa|hogar|depto|departamento)\b/i, "casa"],
-    [/\b(negocio|emprend|emprendimiento|pyme|local|tienda|empresa|oficina)\b/i, "negocio"],
-    [/\b(despacho|env[ií]o|delivery|reparto|bodega)\b/i, "despacho"],
-    [/\b(uso\s*seguido|seguido|diario|frecuente)\b/i, "uso_seguido"],
-    [/\b(uso\s*ocasional|ocasional|de\s*vez\s*en\s*cuando)\b/i, "uso_ocasional"],
-  ];
-
-  for (const [re, val] of rules) {
-    if (re.test(t)) return val;
-  }
-  return null;
+  if (error) return false;
+  return Array.isArray(data) && data.length > 0;
 }
 
 async function waSendText(phoneNumberId: string, toWaId: string, body: string, accessToken: string) {
@@ -239,103 +282,11 @@ async function waSendText(phoneNumberId: string, toWaId: string, body: string, a
   return j;
 }
 
-/** =========================
- *  ✅ MEDIA: Meta -> Storage
- *  ========================= */
-async function fetchMetaMediaMeta(mediaId: string, accessToken: string) {
-  const url = `https://graph.facebook.com/${WA_GRAPH_VERSION}/${mediaId}?fields=url,mime_type,file_size,sha256`;
-  const resp = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
-  const j = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    console.error("Meta media meta error:", resp.status, j);
-    return null;
-  }
-  return j; // { url, mime_type, file_size, ... }
-}
-
-async function downloadMetaMedia(binaryUrl: string, accessToken: string): Promise<Uint8Array | null> {
-  const resp = await fetch(binaryUrl, { headers: { authorization: `Bearer ${accessToken}` } });
-  if (!resp.ok) {
-    console.error("Meta media download error:", resp.status);
-    return null;
-  }
-  const ab = await resp.arrayBuffer();
-  return new Uint8Array(ab);
-}
-
-async function storeInboundMedia(params: {
-  waId: string;
-  msgType: string;
-  mediaId: string;
-  accessToken: string;
-}) {
-  const { waId, msgType, mediaId, accessToken } = params;
-
-  const meta = await fetchMetaMediaMeta(mediaId, accessToken);
-  if (!meta?.url) return null;
-
-  const size = Number(meta.file_size || 0);
-  if (size && size > MAX_FILE_BYTES) {
-    console.warn("Media too large:", size);
-    return {
-      media_id: mediaId,
-      media_url: null,
-      media_mime_type: String(meta.mime_type || null),
-      media_filename: null,
-      media_size: size,
-      storage_path: null,
-      skipped_reason: "too_large",
-    };
-  }
-
-  const bytes = await downloadMetaMedia(meta.url, accessToken);
-  if (!bytes) return null;
-
-  const mime = String(meta.mime_type || "application/octet-stream");
-  const ext = safeExtFromMime(mime);
-  const filename = `in_${waId}_${Date.now()}.${ext}`;
-  const storagePath = `inbound/${msgType}/${filename}`;
-
-  const up = await supabase.storage
-    .from(STORAGE_BUCKET)
-    .upload(storagePath, bytes, {
-      contentType: mime,
-      upsert: true,
-      cacheControl: "3600",
-    });
-
-  if (up.error) {
-    console.error("Storage upload error:", up.error);
-    return null;
-  }
-
-  // ✅ Signed URL (sirve aunque el bucket sea privado)
-  const signed = await supabase.storage
-    .from(STORAGE_BUCKET)
-    .createSignedUrl(storagePath, SIGNED_URL_SECONDS);
-
-  const mediaUrl =
-    signed.data?.signedUrl ||
-    supabase.storage.from(STORAGE_BUCKET).getPublicUrl(storagePath).data?.publicUrl ||
-    null;
-
-  return {
-    media_id: mediaId,
-    media_url: mediaUrl,
-    media_mime_type: mime,
-    media_filename: filename,
-    media_size: bytes.byteLength,
-    storage_path: storagePath,
-  };
-}
-
-/** =========================
- *  ✅ Shopify Search
- *  ========================= */
+// ✅ Shopify Search (Storefront GraphQL)
 async function shopifySearchTop2(query: string, budget?: number | null) {
   if (!SHOPIFY_STOREFRONT_TOKEN || !SHOPIFY_STORE_DOMAIN) return null;
 
-  const q = (query || "").trim();
+  const q = cleanProductQuery(query);
   if (!q) return null;
 
   const gql = `
@@ -393,200 +344,152 @@ async function shopifySearchTop2(query: string, budget?: number | null) {
   }));
 }
 
-/** =========================
- *  ✅ Reply logic (tu flujo)
- *  ========================= */
-async function buildAndSendReply(params: {
+function buildOfferText(params: {
+  product: string;
+  budget: number;
+  comuna: string;
+  useCase: string;
+  options: Array<{ title: string; price?: any; url: string }>;
+}) {
+  const { product, budget, comuna, useCase, options } = params;
+
+  const lines = options
+    .map((it, idx) => {
+      const price = it.price ? ` $${Number(it.price).toLocaleString("es-CL")}` : "";
+      return `✅ Opción ${idx + 1}: *${it.title}*${price}\n${it.url}`;
+    })
+    .join("\n\n");
+
+  // Mensaje “nivel dios”: corto, humano, 1 sola pregunta.
+  const closeQ = pickCloseQuestion(product);
+
+  return (
+    `¡Listo! 🙌 Soy tu asesor de *Keloke.cl*.\n` +
+    `Para *${useCase || "tu caso"}* con *$${Number(budget).toLocaleString("es-CL")}* (${comuna}), estas son las mejores que encontré:\n\n` +
+    `${lines}\n\n` +
+    `${closeQ}`
+  );
+}
+
+async function sendAndLogOutbound(params: {
+  phoneNumberId: string;
+  waId: string;
+  accessToken: string;
+  textBody: string;
+  contactName?: string | null;
+}) {
+  const { phoneNumberId, waId, accessToken, textBody, contactName } = params;
+
+  const sent = await waSendText(phoneNumberId, waId, textBody, accessToken);
+
+  // ✅ CLAVE: guardar outbound para que la app lo vea en la conversación
+  await insertMessage({
+    from_number: normalizePhone(phoneNumberId), // no es perfecto, pero no rompe tu esquema actual
+    message_type: "text",
+    message_content: textBody,
+    direction: "outbound",
+    timestamp: nowISO(),
+    phone_number: normalizePhone(waId),
+    status: "sent",
+    whatsapp_message_id: sent?.messages?.[0]?.id || null,
+    message: textBody,
+    contact_name: contactName || null,
+    is_read: true,
+    created_at: nowISO(),
+    updated_at: nowISO(),
+  });
+
+  return sent;
+}
+
+function extractMessageText(m: any): { type: string; content: string | null } {
+  const msgType = m.type || "unknown";
+
+  if (msgType === "text") return { type: "text", content: m.text?.body ?? null };
+  if (msgType === "image") return { type: "image", content: m.image?.caption ?? "[image]" };
+  if (msgType === "video") return { type: "video", content: m.video?.caption ?? "[video]" };
+  if (msgType === "audio") return { type: "audio", content: "[audio]" };
+  if (msgType === "document") {
+    const name = m.document?.filename ? ` ${m.document.filename}` : "";
+    const mime = m.document?.mime_type ? ` (${m.document.mime_type})` : "";
+    const cap = m.document?.caption ? ` — ${m.document.caption}` : "";
+    return { type: "document", content: `[document]${name}${mime}${cap}`.trim() };
+  }
+
+  // ✅ WhatsApp “cosas raras” que antes te quedaban como unsupported
+  if (msgType === "interactive") {
+    const title =
+      m.interactive?.button_reply?.title ||
+      m.interactive?.list_reply?.title ||
+      m.interactive?.list_reply?.description ||
+      null;
+    return { type: "interactive", content: title ? `[interactive] ${title}` : "[interactive]" };
+  }
+
+  if (msgType === "button") {
+    const txt = m.button?.text || null;
+    return { type: "button", content: txt ? `[button] ${txt}` : "[button]" };
+  }
+
+  if (msgType === "sticker") return { type: "sticker", content: "[sticker]" };
+
+  if (msgType === "location") {
+    const name = m.location?.name || "";
+    const addr = m.location?.address || "";
+    const lat = m.location?.latitude;
+    const lng = m.location?.longitude;
+    const loc = [name, addr].filter(Boolean).join(" — ");
+    const coords = (lat && lng) ? ` (${lat},${lng})` : "";
+    return { type: "location", content: `[location] ${loc}${coords}`.trim() || "[location]" };
+  }
+
+  return { type: msgType, content: `[${msgType}]` };
+}
+
+function shouldResetOnNewAsk(conv: any, userText: string) {
+  // Reset si: venía una conversación vieja/oferta, y llega un “necesito/busco/quiero” o un link de producto
+  const t = String(userText || "").toLowerCase();
+  const hasKelokeProduct = /keloke\.cl\/products\/[a-z0-9-]+/i.test(userText || "");
+  const isNewAsk = /\b(necesito|busco|quiero|me interesa|tengo una consulta|consulta)\b/i.test(t);
+
+  if (hasKelokeProduct) return true;
+
+  // Si la última actividad fue hace rato, y ahora dice hola o viene con nueva consulta
+  const updatedAt = conv?.updated_at ? new Date(conv.updated_at).getTime() : 0;
+  const stale = updatedAt && (Date.now() - updatedAt > 1000 * 60 * 25); // 25 min
+
+  if (stale && (looksLikeGreeting(userText) || isNewAsk)) return true;
+
+  // Si ya había oferta enviada y ahora manda un texto largo (no es “sí/no/casa/seguido…”)
+  const state = String(conv?.state || "");
+  if (state === "OFFER_SENT" && !looksLikeShortAnswer(userText) && userText.trim().length >= 12) return true;
+
+  return false;
+}
+
+async function maybeAIReply(params: {
   phoneNumberId: string;
   waId: string;
   accessToken: string;
   aiCfg: any;
+  contactName?: string | null;
+  conv: any;
 }) {
-  const { phoneNumberId, waId, accessToken, aiCfg } = params;
-
-  const conv = (await getConversation(waId)) || {};
-  const product = conv.product || null;
-  const budget = conv.budget || null;
-  const comuna = conv.comuna || null;
-  const useCase = conv.use_case || null;
-
-  const lastOfferAt = conv.last_offer_at ? new Date(conv.last_offer_at).getTime() : 0;
-  const recentlyOffered = lastOfferAt && (Date.now() - lastOfferAt < 1000 * 60 * 10);
-
-  const lastAiAt = conv.last_ai_reply_at ? new Date(conv.last_ai_reply_at).getTime() : 0;
-  const recentlyAi = lastAiAt && (Date.now() - lastAiAt < 1000 * 8);
-
-  const { data: lastMsg } = await supabase
-    .from("whatsapp_messages")
-    .select("message_content, message, message_type, created_at")
-    .eq("phone_number", normalizePhone(waId))
-    .eq("direction", "inbound")
-    .order("created_at", { ascending: false })
-    .limit(1);
-
-  const userText = String(lastMsg?.[0]?.message_content ?? lastMsg?.[0]?.message ?? "").trim();
-
-  // ✅ Captura use_case
-  if (!useCase) {
-    const uc0 = extractUseCase(userText);
-    if (uc0) await upsertConversation(waId, { use_case: uc0 });
-  }
-
-  if (!product) {
-    await upsertConversation(waId, { state: "ASK_PRODUCT" });
-    await waSendText(phoneNumberId, waId, "Te leo 🙌 ¿Qué producto estás buscando?", accessToken);
-    return;
-  }
-
-  if (!budget) {
-    const b = extractBudgetLukas(userText);
-    if (b) {
-      await upsertConversation(waId, { budget: b, state: "ASK_COMUNA" });
-      await waSendText(phoneNumberId, waId, "Perfecto 🙌 ¿En qué comuna estás? (para estimar entrega/tiempos)", accessToken);
-      return;
-    }
-    await upsertConversation(waId, { state: "ASK_BUDGET" });
-    await waSendText(phoneNumberId, waId, "Bacán 🙌 ¿Cuál es tu presupuesto aprox (en lucas o $)?", accessToken);
-    return;
-  }
-
-  if (!comuna) {
-    if (userText.length >= 3) {
-      await upsertConversation(waId, { comuna: userText.trim(), state: "ASK_USE_CASE" });
-      await waSendText(
-        phoneNumberId,
-        waId,
-        "Perfecto 🙌 ¿Lo quieres para qué uso principal? (casa / negocio / despacho / regalo). Con eso te cierro la mejor opción en 1 mensaje.",
-        accessToken
-      );
-      return;
-    }
-    await upsertConversation(waId, { state: "ASK_COMUNA" });
-    await waSendText(phoneNumberId, waId, "¿En qué comuna estás?", accessToken);
-    return;
-  }
-
-  const updated = (await getConversation(waId)) || {};
-  if (!updated.use_case) {
-    const uc1 = extractUseCase(userText);
-    if (uc1) {
-      await upsertConversation(waId, { use_case: uc1, state: "READY_TO_OFFER" });
-    } else {
-      await upsertConversation(waId, { state: "ASK_USE_CASE" });
-      await waSendText(
-        phoneNumberId,
-        waId,
-        "Perfecto 🙌 ¿Lo quieres para qué uso principal? (casa / negocio / despacho / regalo). Con eso te cierro la mejor opción en 1 mensaje.",
-        accessToken
-      );
-      return;
-    }
-  } else {
-    await upsertConversation(waId, { state: "READY_TO_OFFER" });
-  }
-
-  const finalConv = (await getConversation(waId)) || {};
-  const p = finalConv.product || product;
-  const b = finalConv.budget || budget;
-  const co = finalConv.comuna || comuna;
-  const uc = finalConv.use_case || useCase || "";
-
-  if (!recentlyOffered) {
-    const shopifyPick = await shopifySearchTop2(String(p), Number(b));
-
-    if (shopifyPick?.length) {
-      const lines = shopifyPick
-        .map((it: any, idx: number) => {
-          const price = it.price ? `$${Number(it.price).toLocaleString("es-CL")}` : "";
-          return `✅ Opción ${idx + 1}: *${it.title}* ${price}\n${it.url}`;
-        })
-        .join("\n\n");
-
-      const offerPayload = {
-        product: p,
-        budget: Number(b),
-        comuna: co,
-        use_case: uc || null,
-        options: shopifyPick.map((it: any, idx: number) => ({
-          label: `Opción ${idx + 1}`,
-          title: it.title,
-          price: it.price ? Number(it.price) : null,
-          currency: it.currency || "CLP",
-          url: it.url,
-        })),
-      };
-
-      const msg =
-        `Listo 🙌 Te dejé 2 opciones buenas para *${uc || "tu caso"}*.\n\n` +
-        `Producto: *${p}*\nPresupuesto: *$${Number(b).toLocaleString("es-CL")}*\nComuna: *${co}*\n\n` +
-        `${lines}\n\n` +
-        `Si me dices *si lo necesitas para envío seguido o uso ocasional*, te confirmo la mejor y te la dejo lista para comprar.`;
-
-      await waSendText(phoneNumberId, waId, msg, accessToken);
-      await upsertConversation(waId, {
-        state: "OFFER_SENT",
-        last_offer_at: nowISO(),
-        last_offer_payload: offerPayload,
-      });
-      return;
-    }
-
-    const q = encodeURIComponent(String(p));
-    const link1 = `${PUBLIC_STORE_DOMAIN}/search?q=${q}`;
-    const link2 = `${PUBLIC_STORE_DOMAIN}/collections/all?filter.v.price.gte=0&filter.v.price.lte=${encodeURIComponent(String(b))}&q=${q}`;
-
-    const offerPayload = {
-      product: p,
-      budget: Number(b),
-      comuna: co,
-      use_case: uc || null,
-      options: [
-        { label: "Opción 1", title: "Búsqueda", url: link1 },
-        { label: "Opción 2", title: "Hasta tu presupuesto", url: link2 },
-      ],
-    };
-
-    const msg =
-      `Listo 🙌\n\n` +
-      `Producto: *${p}*\nPresupuesto: *$${Number(b).toLocaleString("es-CL")}*\nComuna: *${co}*\n\n` +
-      `✅ Opción 1:\n${link1}\n\n` +
-      `✅ Opción 2 (hasta tu presupuesto):\n${link2}\n\n` +
-      `Si me dices *color / tamaño / uso* te afino al tiro.`;
-
-    await waSendText(phoneNumberId, waId, msg, accessToken);
-    await upsertConversation(waId, {
-      state: "OFFER_SENT",
-      last_offer_at: nowISO(),
-      last_offer_payload: offerPayload,
-    });
-    return;
-  }
+  const { phoneNumberId, waId, accessToken, aiCfg, contactName, conv } = params;
 
   if (!OPENAI_API_KEY || !aiCfg?.auto_reply_enabled) return;
   if (!withinScheduleChile(aiCfg)) return;
+
+  const lastAiAt = conv?.last_ai_reply_at ? new Date(conv.last_ai_reply_at).getTime() : 0;
+  const recentlyAi = lastAiAt && (Date.now() - lastAiAt < 1000 * 12);
   if (recentlyAi) return;
-
-  const training = (aiCfg.training_data || "").trim();
-  const offerCtx = finalConv.last_offer_payload ? JSON.stringify(finalConv.last_offer_payload) : "";
-  const useCaseCtx = finalConv.use_case || "";
-
-  const system =
-    `Eres el asistente de ventas de Keloke.cl en Chile. ` +
-    `Hablas como humano, chileno, natural (sin sonar robot). ` +
-    `Objetivo: cerrar venta con confianza, resolver dudas, y guiar a compra. ` +
-    `Regla CLAVE: NO repitas la misma pregunta si el cliente ya respondió. ` +
-    `Si hay 2 opciones ya enviadas, ahora tu pega es: recomendar 1 y pedir 1 dato final para cerrar (color/tamaño/uso/envío). ` +
-    `Sé breve: 1 a 4 líneas.\n` +
-    (useCaseCtx ? `\nUso del cliente: ${useCaseCtx}\n` : "") +
-    (offerCtx ? `\nOferta previa (úsala tal cual, NO inventes): ${offerCtx}\n` : "") +
-    (training ? `\nContexto adicional:\n${training}\n` : "");
 
   const { data: hist } = await supabase
     .from("whatsapp_messages")
     .select("direction, message_content, message, message_type, created_at")
     .eq("phone_number", normalizePhone(waId))
     .order("created_at", { ascending: false })
-    .limit(14);
+    .limit(16);
 
   const msgs = (hist || []).reverse().map((m: any) => {
     const role = m.direction === "inbound" ? "user" : "assistant";
@@ -597,6 +500,21 @@ async function buildAndSendReply(params: {
     return { role, content };
   });
 
+  // Contexto de oferta previa
+  const offerCtx = conv?.last_offer_payload ? JSON.stringify(conv.last_offer_payload) : "";
+
+  const system =
+    `Eres el asesor de ventas de Keloke.cl (Chile).` +
+    ` Tono: chileno, cercano, claro, sin sonar robot.` +
+    ` Objetivo: ayudar y cerrar compra.` +
+    ` Reglas:` +
+    ` - Máximo 1 pregunta.` +
+    ` - NO repitas preguntas ya respondidas (mira historial).` +
+    ` - Si hay 2 opciones ya enviadas, recomienda 1 y justifica en 1 frase.` +
+    ` - Sé breve (1 a 4 líneas).` +
+    (offerCtx ? `\nOferta previa (NO inventes otras): ${offerCtx}\n` : "") +
+    (aiCfg?.training_data ? `\nContexto adicional:\n${aiCfg.training_data}\n` : "");
+
   const oaiResp = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -606,27 +524,290 @@ async function buildAndSendReply(params: {
     body: JSON.stringify({
       model: aiCfg.ai_model || OPENAI_MODEL,
       input: [{ role: "system", content: system }, ...msgs],
-      max_output_tokens: 200,
+      max_output_tokens: 160,
+      temperature: 0.7,
     }),
   });
 
   const oaiJson = await oaiResp.json().catch(() => ({}));
-  const outText =
-    oaiJson?.output?.[0]?.content?.[0]?.text ||
-    oaiJson?.output_text ||
-    "";
+  const outText = oaiJson?.output?.[0]?.content?.[0]?.text || oaiJson?.output_text || "";
 
   if (oaiResp.ok && outText?.trim()) {
-    const cleaned = outText.trim().slice(0, 900);
+    const cleaned = clamp(outText.trim(), 900);
 
-    if (String(cleaned) === String(finalConv.last_ai_reply_text || "").trim()) return;
+    if (String(cleaned) === String(conv?.last_ai_reply_text || "").trim()) return;
 
-    await waSendText(phoneNumberId, waId, cleaned, accessToken);
+    await sendAndLogOutbound({
+      phoneNumberId,
+      waId,
+      accessToken,
+      textBody: cleaned,
+      contactName,
+    });
+
     await upsertConversation(waId, { last_ai_reply_at: nowISO(), last_ai_reply_text: cleaned });
     return;
   }
 
   console.error("OpenAI error:", oaiResp.status, oaiJson);
+}
+
+async function buildAndSendReply(params: {
+  phoneNumberId: string;
+  waId: string;
+  accessToken: string;
+  aiCfg: any;
+  contactName?: string | null;
+  inboundText: string;
+}) {
+  const { phoneNumberId, waId, accessToken, aiCfg, contactName, inboundText } = params;
+
+  let conv = (await getConversation(waId)) || {};
+
+  // ✅ Reset inteligente: evita quedarse pegado en “freidora/90k/Ñuñoa”
+  if (shouldResetOnNewAsk(conv, inboundText)) {
+    await resetConversation(waId);
+    conv = (await getConversation(waId)) || {};
+  }
+
+  // ✅ Si viene link de producto Keloke, úsalo como “producto” y parte limpio
+  const handle = extractProductHandleFromKelokeUrl(inboundText);
+  if (handle) {
+    const p = prettifyHandle(handle);
+    await upsertConversation(waId, { product: p, state: "ASK_BUDGET", budget: null, comuna: null, use_case: null });
+    conv = (await getConversation(waId)) || {};
+  }
+
+  // Normaliza use_case si aparece
+  const uc = extractUseCase(inboundText);
+  if (uc && !conv.use_case) {
+    await upsertConversation(waId, { use_case: uc });
+    conv = (await getConversation(waId)) || {};
+  }
+
+  const product = conv.product || null;
+  const budget = conv.budget || null;
+  const comuna = conv.comuna || null;
+  const useCase = conv.use_case || null;
+
+  // 1) Si no hay producto → conversación natural desde “hola”
+  if (!product) {
+    const msg = looksLikeGreeting(inboundText)
+      ? "¡Hola! 🙌 Soy tu asesor de *Keloke.cl*. ¿Qué estás buscando hoy? (producto o link)"
+      : "Te leo 🙌 ¿Qué producto estás buscando? (o mándame el link)";
+    await upsertConversation(waId, { state: "ASK_PRODUCT" });
+    await sendAndLogOutbound({ phoneNumberId, waId, accessToken, textBody: msg, contactName });
+    return;
+  }
+
+  // 2) Presupuesto
+  if (!budget) {
+    const b = extractBudgetLukas(inboundText);
+    if (b) {
+      await upsertConversation(waId, { budget: b, state: "ASK_COMUNA" });
+      await sendAndLogOutbound({
+        phoneNumberId,
+        waId,
+        accessToken,
+        textBody: "Perfecto 🙌 ¿En qué comuna estás? Así te digo entrega/tiempos.",
+        contactName,
+      });
+      return;
+    }
+
+    await upsertConversation(waId, { state: "ASK_BUDGET" });
+    await sendAndLogOutbound({
+      phoneNumberId,
+      waId,
+      accessToken,
+      textBody: "Bacán 🙌 ¿Tu presupuesto aprox es de cuántas lucas? (ej: 30 lucas)",
+      contactName,
+    });
+    return;
+  }
+
+  // 3) Comuna (IMPORTANTÍSIMO: NO volver a tomar “30 lucas” como comuna)
+  if (!comuna) {
+    const bHere = extractBudgetLukas(inboundText);
+    if (!bHere) {
+      const c = stripUrls(inboundText).trim();
+      if (c.length >= 3) {
+        await upsertConversation(waId, { comuna: c, state: "ASK_USE_CASE" });
+        await sendAndLogOutbound({
+          phoneNumberId,
+          waId,
+          accessToken,
+          textBody: "Perfecto 🙌 ¿Lo quieres para *casa*, *negocio*, *despacho* o *regalo*? (una palabra)",
+          contactName,
+        });
+        return;
+      }
+    }
+
+    await upsertConversation(waId, { state: "ASK_COMUNA" });
+    await sendAndLogOutbound({
+      phoneNumberId,
+      waId,
+      accessToken,
+      textBody: "¿En qué comuna estás? (solo la comuna 🙌)",
+      contactName,
+    });
+    return;
+  }
+
+  // 4) Use case
+  if (!useCase) {
+    const uc2 = extractUseCase(inboundText);
+    if (uc2) {
+      await upsertConversation(waId, { use_case: uc2, state: "READY_TO_OFFER" });
+      conv = (await getConversation(waId)) || {};
+    } else {
+      await upsertConversation(waId, { state: "ASK_USE_CASE" });
+      await sendAndLogOutbound({
+        phoneNumberId,
+        waId,
+        accessToken,
+        textBody: "Para afinarla al tiro: ¿es para *casa*, *negocio*, *despacho* o *regalo*? (una palabra 🙌)",
+        contactName,
+      });
+      return;
+    }
+  }
+
+  // 5) Oferta (evita spam + re-oferta si cambió producto)
+  conv = (await getConversation(waId)) || {};
+  const p = conv.product || product;
+  const b = Number(conv.budget || budget);
+  const co = conv.comuna || comuna;
+  const u = conv.use_case || useCase || "";
+
+  const lastOfferAt = conv.last_offer_at ? new Date(conv.last_offer_at).getTime() : 0;
+  const recentlyOffered = lastOfferAt && (Date.now() - lastOfferAt < 1000 * 60 * 10);
+
+  const lastOfferProduct = conv?.last_offer_payload?.product ? String(conv.last_offer_payload.product) : "";
+  const productChanged = lastOfferProduct && String(lastOfferProduct).toLowerCase() !== String(p).toLowerCase();
+
+  if (!recentlyOffered || productChanged) {
+    const shopifyPick = await shopifySearchTop2(String(p), b);
+
+    if (shopifyPick?.length) {
+      const offerPayload = {
+        product: p,
+        budget: b,
+        comuna: co,
+        use_case: u || null,
+        options: shopifyPick.map((it: any, idx: number) => ({
+          label: `Opción ${idx + 1}`,
+          title: it.title,
+          price: it.price ? Number(it.price) : null,
+          currency: it.currency || "CLP",
+          url: it.url,
+        })),
+      };
+
+      const msg = buildOfferText({
+        product: p,
+        budget: b,
+        comuna: co,
+        useCase: u,
+        options: shopifyPick,
+      });
+
+      await sendAndLogOutbound({ phoneNumberId, waId, accessToken, textBody: msg, contactName });
+
+      await upsertConversation(waId, {
+        state: "OFFER_SENT",
+        last_offer_at: nowISO(),
+        last_offer_payload: offerPayload,
+      });
+
+      return;
+    }
+
+    // fallback mejorado (SIN repetir use_case, y con 1 sola pregunta útil)
+    const q = encodeURIComponent(cleanProductQuery(String(p)));
+    const link1 = `${PUBLIC_STORE_DOMAIN}/search?q=${q}`;
+    const link2 = `${PUBLIC_STORE_DOMAIN}/collections/all?filter.v.price.gte=0&filter.v.price.lte=${encodeURIComponent(String(b))}&q=${q}`;
+
+    const offerPayload = {
+      product: p,
+      budget: b,
+      comuna: co,
+      use_case: u || null,
+      options: [
+        { label: "Opción 1", title: "Búsqueda", url: link1 },
+        { label: "Opción 2", title: "Hasta tu presupuesto", url: link2 },
+      ],
+    };
+
+    const msg =
+      `¡Listo! 🙌 Soy tu asesor de *Keloke.cl*.\n` +
+      `Te dejo 2 links directos para *${cleanProductQuery(String(p))}* hasta *$${b.toLocaleString("es-CL")}* (${co}):\n\n` +
+      `✅ Opción 1 (búsqueda):\n${link1}\n\n` +
+      `✅ Opción 2 (hasta tu presupuesto):\n${link2}\n\n` +
+      `${pickCloseQuestion(p)}`;
+
+    await sendAndLogOutbound({ phoneNumberId, waId, accessToken, textBody: msg, contactName });
+
+    await upsertConversation(waId, {
+      state: "OFFER_SENT",
+      last_offer_at: nowISO(),
+      last_offer_payload: offerPayload,
+    });
+
+    return;
+  }
+
+  // 6) Post-oferta: SIEMPRE responder algo útil (y usar IA solo cuando valga la pena)
+  // Heurística simple: si responde “seguido/ocasional” o “opción 1/2”, recomienda y cierra.
+  const t = String(inboundText || "").toLowerCase();
+  const offer = conv?.last_offer_payload;
+
+  const wantsOption = t.match(/\b(opcion|opción)\s*(1|2)\b/i);
+  const usage = extractUseCase(inboundText); // puede traer uso_seguido / uso_ocasional
+
+  if (offer?.options?.length) {
+    if (wantsOption) {
+      const idx = Number(wantsOption[2]) - 1;
+      const pick = offer.options[idx] || offer.options[0];
+      const msg =
+        `De una 🙌 Me quedo con *${pick.label}* porque calza mejor con lo que buscas.\n` +
+        `${pick.url}\n` +
+        `¿La quieres en algún *color/tamaño* específico? (una cosa y te la dejo lista)`;
+      await sendAndLogOutbound({ phoneNumberId, waId, accessToken, textBody: msg, contactName });
+      return;
+    }
+
+    if (usage === "uso_seguido" || usage === "uso_ocasional") {
+      const pick = usage === "uso_seguido" ? (offer.options[1] || offer.options[0]) : offer.options[0];
+      const why = usage === "uso_seguido"
+        ? "para uso seguido conviene ir por algo más firme/completo"
+        : "para uso ocasional te sale mejor algo simple y rendidor";
+
+      const msg =
+        `Perfecto 🙌 Yo te recomiendo *${pick.label}*: ${why}.\n` +
+        `${pick.url}\n` +
+        `¿La quieres con alguna preferencia de *color/tamaño*? (una cosa y cierro)`;
+      await sendAndLogOutbound({ phoneNumberId, waId, accessToken, textBody: msg, contactName });
+      return;
+    }
+  }
+
+  // Si es una pregunta o texto largo: ahí sí llama IA (controlado)
+  const shouldUseAI = !looksLikeShortAnswer(inboundText) && (inboundText.includes("?") || inboundText.trim().length >= 18);
+  if (shouldUseAI) {
+    await maybeAIReply({ phoneNumberId, waId, accessToken, aiCfg, contactName, conv });
+    return;
+  }
+
+  // Fallback ultra simple (sin gastar tokens)
+  await sendAndLogOutbound({
+    phoneNumberId,
+    waId,
+    accessToken,
+    textBody: "Te caché 🙌 Dime solo *opción 1 o 2* y te la dejo lista para comprar.",
+    contactName,
+  });
 }
 
 // MAIN
@@ -660,10 +841,7 @@ Deno.serve(async (req) => {
     const metadata = value?.metadata || {};
     const phoneNumberId = String(metadata?.phone_number_id || "");
 
-    if (!phoneNumberId) {
-      console.error("No phone_number_id in payload");
-      return json({ ok: true }, 200);
-    }
+    if (!phoneNumberId) return json({ ok: true }, 200);
 
     const conn = await getActiveConnectionByPhoneNumberId(phoneNumberId);
     const accessToken = String(conn?.access_token || "");
@@ -680,95 +858,36 @@ Deno.serve(async (req) => {
       const waId = normalizePhone(m.from || "");
       if (!waId) continue;
 
+      // ✅ anti-duplicados: si Meta reintenta el mismo mensaje, NO vuelvas a responder
+      const msgId = String(m.id || "");
+      if (msgId && (await hasInboundMessageIdAlready(msgId))) continue;
+
       await upsertContact(waId, contactName);
 
-      const msgType = m.type || "unknown";
-
-      // ✅ contenido texto/caption (si no hay, dejamos fallback)
-      let messageContent: string = "";
-
-      if (msgType === "text") messageContent = m.text?.body ?? "";
-      else if (msgType === "image") messageContent = m.image?.caption ?? "";
-      else if (msgType === "video") messageContent = m.video?.caption ?? "";
-      else if (msgType === "audio") messageContent = "";
-      else if (msgType === "document") messageContent = m.document?.caption ?? m.document?.filename ?? "";
-      else messageContent = `[${msgType}]`;
-
-      const fallbackLabel =
-        msgType === "image" ? "[image]" :
-        msgType === "video" ? "[video]" :
-        msgType === "audio" ? "[audio]" :
-        msgType === "document" ? "[document]" :
-        `[${msgType}]`;
-
-      const finalText = (messageContent && messageContent.trim()) ? messageContent.trim() : fallbackLabel;
-
-      // ✅ MEDIA ID según tipo
-      let mediaId: string | null = null;
-      if (msgType === "image") mediaId = m.image?.id ?? null;
-      if (msgType === "video") mediaId = m.video?.id ?? null;
-      if (msgType === "audio") mediaId = m.audio?.id ?? null;
-      if (msgType === "document") mediaId = m.document?.id ?? null;
-
-      // ✅ Descargar + subir a Storage
-      let mediaData: any = null;
-      if (mediaId && accessToken) {
-        mediaData = await storeInboundMedia({ waId, msgType, mediaId, accessToken });
-      }
+      const extracted = extractMessageText(m);
+      const msgType = extracted.type;
+      const messageContent = extracted.content;
 
       await insertMessage({
         from_number: waId,
         message_type: msgType,
-        message_content: finalText,
+        message_content: messageContent,
         direction: "inbound",
-        timestamp: new Date(
-          (m.timestamp ? parseInt(m.timestamp, 10) : Math.floor(Date.now() / 1000)) * 1000
-        ).toISOString(),
+        timestamp: new Date((m.timestamp ? parseInt(m.timestamp, 10) : Math.floor(Date.now() / 1000)) * 1000).toISOString(),
         phone_number: waId,
         status: "received",
-        whatsapp_message_id: m.id || null,
-        message: finalText,
+        whatsapp_message_id: msgId || null,
+        message: messageContent,
         contact_name: contactName || null,
         is_read: false,
         created_at: nowISO(),
         updated_at: nowISO(),
-
-        // ✅ Campos media
-        media_id: mediaData?.media_id ?? mediaId ?? null,
-        media_url: mediaData?.media_url ?? null,
-        media_mime_type: mediaData?.media_mime_type ?? null,
-        media_filename: mediaData?.media_filename ?? null,
-        media_size: mediaData?.media_size ?? null,
-        platform_response: mediaData ? { storage_path: mediaData.storage_path, skipped_reason: mediaData.skipped_reason || null } : null,
       });
 
-      // ✅ Estado base: product/budget/comuna/use_case
-      const conv = (await getConversation(waId)) || {};
-
-      if (msgType === "text" && finalText) {
-        const cleaned = finalText.replace(/https?:\/\/\S+/g, "").trim();
-
-        if (!conv.product && cleaned.length >= 2) {
-          await upsertConversation(waId, { product: cleaned, state: "ASK_BUDGET" });
-        }
-
-        if (!conv.budget) {
-          const b = extractBudgetLukas(cleaned);
-          if (b) await upsertConversation(waId, { budget: b, state: "ASK_COMUNA" });
-        }
-
-        if (conv.product && (conv.budget || extractBudgetLukas(cleaned)) && !conv.comuna && cleaned.length >= 3) {
-          await upsertConversation(waId, { comuna: cleaned, state: "ASK_USE_CASE" });
-        }
-
-        if (!conv.use_case) {
-          const uc = extractUseCase(cleaned);
-          if (uc) await upsertConversation(waId, { use_case: uc });
-        }
-      }
-
+      // ✅ Solo respondemos si Auto está ON y hay token
       if (aiCfg?.auto_reply_enabled && accessToken) {
-        await buildAndSendReply({ phoneNumberId, waId, accessToken, aiCfg });
+        const inboundText = msgType === "text" ? String(messageContent || "") : String(messageContent || "");
+        await buildAndSendReply({ phoneNumberId, waId, accessToken, aiCfg, contactName, inboundText });
       }
     }
 
