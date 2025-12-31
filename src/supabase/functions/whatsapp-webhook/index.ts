@@ -17,12 +17,6 @@ const SHOPIFY_STOREFRONT_TOKEN = Deno.env.get("SHOPIFY_STOREFRONT_TOKEN") || "";
 const SHOPIFY_STORE_DOMAIN = Deno.env.get("SHOPIFY_STORE_DOMAIN") || ""; // csn703-10.myshopify.com
 const PUBLIC_STORE_DOMAIN = "https://keloke.cl";
 
-// ✅ Storage
-const STORAGE_BUCKET = "whatsapp-media";
-const WA_GRAPH_VERSION = "v24.0";
-const SIGNED_URL_SECONDS = 60 * 60 * 24 * 7; // 7 días
-const MAX_FILE_BYTES = 16 * 1024 * 1024; // 16MB (limite típico WhatsApp)
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const corsHeaders = {
@@ -53,30 +47,24 @@ function normalizePhone(s: string) {
   return (s || "").replace(/[^\d]/g, "");
 }
 
-function safeExtFromMime(mime = "") {
-  const m = mime.split(";")[0].trim().toLowerCase();
-  const map: Record<string, string> = {
-    "image/jpeg": "jpg",
-    "image/jpg": "jpg",
-    "image/png": "png",
-    "image/webp": "webp",
-    "video/mp4": "mp4",
-    "video/quicktime": "mov",
-    "application/pdf": "pdf",
-    "text/plain": "txt",
-    "application/msword": "doc",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
-    "application/vnd.ms-excel": "xls",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
-    "audio/ogg": "ogg",
-    "audio/webm": "webm",
-    "audio/mpeg": "mp3",
-    "audio/mp4": "m4a",
-  };
-  if (map[m]) return map[m];
-  const slash = m.indexOf("/");
-  if (slash > -1) return m.slice(slash + 1) || "bin";
-  return "bin";
+function stripUrlsKeepText(s: string) {
+  return String(s || "").replace(/https?:\/\/\S+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function isGreeting(text: string) {
+  const t = (text || "").toLowerCase().trim();
+  return /^(hola|holaa+|buenas|buenos\s*d[ií]as|buenas\s*tardes|buenas\s*noches|wena+|hello|hi)\b/.test(t);
+}
+
+function extractProductHandleFromText(text: string): string | null {
+  const t = String(text || "");
+  // keloke.cl/products/<handle>
+  const m1 = t.match(/keloke\.cl\/products\/([a-z0-9\-]+)/i);
+  if (m1?.[1]) return m1[1].toLowerCase();
+  // cualquier dominio /products/<handle>
+  const m2 = t.match(/\/products\/([a-z0-9\-]+)/i);
+  if (m2?.[1]) return m2[1].toLowerCase();
+  return null;
 }
 
 async function getActiveConnectionByPhoneNumberId(phoneNumberId: string) {
@@ -166,6 +154,21 @@ async function upsertConversation(waId: string, patch: any) {
   if (error) console.error("upsertConversation error:", error);
 }
 
+async function resetConversationForNewProduct(waId: string, product: string) {
+  // Reseteo suave para evitar “quedarse pegado” a freidora/budget/comuna
+  await upsertConversation(waId, {
+    product,
+    budget: null,
+    comuna: null,
+    use_case: null,
+    state: "ASK_BUDGET",
+    last_offer_at: null,
+    last_offer_payload: null,
+    last_ai_reply_at: null,
+    last_ai_reply_text: null,
+  });
+}
+
 async function upsertContact(waId: string, contactName?: string) {
   const phone = normalizePhone(waId);
   if (!phone) return;
@@ -216,7 +219,7 @@ function extractUseCase(text: string): string | null {
 }
 
 async function waSendText(phoneNumberId: string, toWaId: string, body: string, accessToken: string) {
-  const url = `https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneNumberId}/messages`;
+  const url = `https://graph.facebook.com/v24.0/${phoneNumberId}/messages`;
   const resp = await fetch(url, {
     method: "POST",
     headers: {
@@ -239,99 +242,40 @@ async function waSendText(phoneNumberId: string, toWaId: string, body: string, a
   return j;
 }
 
-/** =========================
- *  ✅ MEDIA: Meta -> Storage
- *  ========================= */
-async function fetchMetaMediaMeta(mediaId: string, accessToken: string) {
-  const url = `https://graph.facebook.com/${WA_GRAPH_VERSION}/${mediaId}?fields=url,mime_type,file_size,sha256`;
-  const resp = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
-  const j = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    console.error("Meta media meta error:", resp.status, j);
-    return null;
-  }
-  return j; // { url, mime_type, file_size, ... }
-}
+// ✅ Shopify: productByHandle (para cuando el cliente manda link)
+async function shopifyGetProductTitleByHandle(handle: string): Promise<string | null> {
+  if (!SHOPIFY_STOREFRONT_TOKEN || !SHOPIFY_STORE_DOMAIN) return null;
+  if (!handle) return null;
 
-async function downloadMetaMedia(binaryUrl: string, accessToken: string): Promise<Uint8Array | null> {
-  const resp = await fetch(binaryUrl, { headers: { authorization: `Bearer ${accessToken}` } });
-  if (!resp.ok) {
-    console.error("Meta media download error:", resp.status);
-    return null;
-  }
-  const ab = await resp.arrayBuffer();
-  return new Uint8Array(ab);
-}
+  const gql = `
+    query ProductByHandle($handle: String!) {
+      productByHandle(handle: $handle) {
+        title
+        handle
+      }
+    }
+  `;
 
-async function storeInboundMedia(params: {
-  waId: string;
-  msgType: string;
-  mediaId: string;
-  accessToken: string;
-}) {
-  const { waId, msgType, mediaId, accessToken } = params;
+  const resp = await fetch(`https://${SHOPIFY_STORE_DOMAIN}/api/2024-10/graphql.json`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "X-Shopify-Storefront-Access-Token": SHOPIFY_STOREFRONT_TOKEN,
+    },
+    body: JSON.stringify({ query: gql, variables: { handle } }),
+  });
 
-  const meta = await fetchMetaMediaMeta(mediaId, accessToken);
-  if (!meta?.url) return null;
-
-  const size = Number(meta.file_size || 0);
-  if (size && size > MAX_FILE_BYTES) {
-    console.warn("Media too large:", size);
-    return {
-      media_id: mediaId,
-      media_url: null,
-      media_mime_type: String(meta.mime_type || null),
-      media_filename: null,
-      media_size: size,
-      storage_path: null,
-      skipped_reason: "too_large",
-    };
-  }
-
-  const bytes = await downloadMetaMedia(meta.url, accessToken);
-  if (!bytes) return null;
-
-  const mime = String(meta.mime_type || "application/octet-stream");
-  const ext = safeExtFromMime(mime);
-  const filename = `in_${waId}_${Date.now()}.${ext}`;
-  const storagePath = `inbound/${msgType}/${filename}`;
-
-  const up = await supabase.storage
-    .from(STORAGE_BUCKET)
-    .upload(storagePath, bytes, {
-      contentType: mime,
-      upsert: true,
-      cacheControl: "3600",
-    });
-
-  if (up.error) {
-    console.error("Storage upload error:", up.error);
+  const json = await resp.json().catch(() => ({}));
+  if (!resp.ok || json?.errors) {
+    console.error("Shopify productByHandle error:", resp.status, json);
     return null;
   }
 
-  // ✅ Signed URL (sirve aunque el bucket sea privado)
-  const signed = await supabase.storage
-    .from(STORAGE_BUCKET)
-    .createSignedUrl(storagePath, SIGNED_URL_SECONDS);
-
-  const mediaUrl =
-    signed.data?.signedUrl ||
-    supabase.storage.from(STORAGE_BUCKET).getPublicUrl(storagePath).data?.publicUrl ||
-    null;
-
-  return {
-    media_id: mediaId,
-    media_url: mediaUrl,
-    media_mime_type: mime,
-    media_filename: filename,
-    media_size: bytes.byteLength,
-    storage_path: storagePath,
-  };
+  const title = json?.data?.productByHandle?.title;
+  return title ? String(title) : null;
 }
 
-/** =========================
- *  ✅ Shopify Search
- *  ========================= */
+// ✅ Shopify Search (top 2)
 async function shopifySearchTop2(query: string, budget?: number | null) {
   if (!SHOPIFY_STOREFRONT_TOKEN || !SHOPIFY_STORE_DOMAIN) return null;
 
@@ -393,9 +337,6 @@ async function shopifySearchTop2(query: string, budget?: number | null) {
   }));
 }
 
-/** =========================
- *  ✅ Reply logic (tu flujo)
- *  ========================= */
 async function buildAndSendReply(params: {
   phoneNumberId: string;
   waId: string;
@@ -410,12 +351,7 @@ async function buildAndSendReply(params: {
   const comuna = conv.comuna || null;
   const useCase = conv.use_case || null;
 
-  const lastOfferAt = conv.last_offer_at ? new Date(conv.last_offer_at).getTime() : 0;
-  const recentlyOffered = lastOfferAt && (Date.now() - lastOfferAt < 1000 * 60 * 10);
-
-  const lastAiAt = conv.last_ai_reply_at ? new Date(conv.last_ai_reply_at).getTime() : 0;
-  const recentlyAi = lastAiAt && (Date.now() - lastAiAt < 1000 * 8);
-
+  // último inbound
   const { data: lastMsg } = await supabase
     .from("whatsapp_messages")
     .select("message_content, message, message_type, created_at")
@@ -425,50 +361,72 @@ async function buildAndSendReply(params: {
     .limit(1);
 
   const userText = String(lastMsg?.[0]?.message_content ?? lastMsg?.[0]?.message ?? "").trim();
+  const userClean = stripUrlsKeepText(userText);
 
-  // ✅ Captura use_case
+  // ✅ “Hola” siempre debe responder y guiar (sin quedarse pegado)
+  if (isGreeting(userClean) && !product) {
+    await upsertConversation(waId, { state: "ASK_PRODUCT" });
+    await waSendText(
+      phoneNumberId,
+      waId,
+      "¡Hola! 👋 Soy tu asesor de ventas de *Keloke.cl* 🙌\n¿Qué estás buscando hoy? (ej: freidora, lámpara, masajeador, etc.)",
+      accessToken
+    );
+    return;
+  }
+
+  // ✅ Captura use_case si lo dijo (solo si no existe)
   if (!useCase) {
-    const uc0 = extractUseCase(userText);
+    const uc0 = extractUseCase(userClean);
     if (uc0) await upsertConversation(waId, { use_case: uc0 });
   }
 
+  // 1) producto
   if (!product) {
     await upsertConversation(waId, { state: "ASK_PRODUCT" });
-    await waSendText(phoneNumberId, waId, "Te leo 🙌 ¿Qué producto estás buscando?", accessToken);
+    await waSendText(
+      phoneNumberId,
+      waId,
+      "Te leo 🙌 Soy asesor de *Keloke.cl*.\n¿Qué producto necesitas? (o mándame el link del producto)",
+      accessToken
+    );
     return;
   }
 
+  // 2) presupuesto
   if (!budget) {
-    const b = extractBudgetLukas(userText);
+    const b = extractBudgetLukas(userClean);
     if (b) {
       await upsertConversation(waId, { budget: b, state: "ASK_COMUNA" });
-      await waSendText(phoneNumberId, waId, "Perfecto 🙌 ¿En qué comuna estás? (para estimar entrega/tiempos)", accessToken);
+      await waSendText(phoneNumberId, waId, "Perfecto 🙌 ¿En qué comuna estás? (para tiempos/entrega)", accessToken);
       return;
     }
     await upsertConversation(waId, { state: "ASK_BUDGET" });
-    await waSendText(phoneNumberId, waId, "Bacán 🙌 ¿Cuál es tu presupuesto aprox (en lucas o $)?", accessToken);
+    await waSendText(phoneNumberId, waId, "Bacán 🙌 ¿Tu presupuesto aprox es de cuántas lucas? (ej: 30 lucas)", accessToken);
     return;
   }
 
+  // 3) comuna
   if (!comuna) {
-    if (userText.length >= 3) {
-      await upsertConversation(waId, { comuna: userText.trim(), state: "ASK_USE_CASE" });
+    if (userClean.length >= 3) {
+      await upsertConversation(waId, { comuna: userClean.trim(), state: "ASK_USE_CASE" });
       await waSendText(
         phoneNumberId,
         waId,
-        "Perfecto 🙌 ¿Lo quieres para qué uso principal? (casa / negocio / despacho / regalo). Con eso te cierro la mejor opción en 1 mensaje.",
+        "Perfecto 🙌 Última: ¿lo quieres para *casa*, *negocio*, *despacho* o *regalo*? 👀",
         accessToken
       );
       return;
     }
     await upsertConversation(waId, { state: "ASK_COMUNA" });
-    await waSendText(phoneNumberId, waId, "¿En qué comuna estás?", accessToken);
+    await waSendText(phoneNumberId, waId, "¿En qué comuna estás? 😊", accessToken);
     return;
   }
 
+  // 4) use_case (una sola vez, normalizado)
   const updated = (await getConversation(waId)) || {};
   if (!updated.use_case) {
-    const uc1 = extractUseCase(userText);
+    const uc1 = extractUseCase(userClean);
     if (uc1) {
       await upsertConversation(waId, { use_case: uc1, state: "READY_TO_OFFER" });
     } else {
@@ -476,7 +434,7 @@ async function buildAndSendReply(params: {
       await waSendText(
         phoneNumberId,
         waId,
-        "Perfecto 🙌 ¿Lo quieres para qué uso principal? (casa / negocio / despacho / regalo). Con eso te cierro la mejor opción en 1 mensaje.",
+        "Para afinarte la mejor opción: ¿es para *casa*, *negocio*, *despacho* o *regalo*? 🙌",
         accessToken
       );
       return;
@@ -485,13 +443,19 @@ async function buildAndSendReply(params: {
     await upsertConversation(waId, { state: "READY_TO_OFFER" });
   }
 
+  // ✅ Oferta (con anti-spam por *mismo producto*)
   const finalConv = (await getConversation(waId)) || {};
-  const p = finalConv.product || product;
-  const b = finalConv.budget || budget;
-  const co = finalConv.comuna || comuna;
-  const uc = finalConv.use_case || useCase || "";
+  const p = String(finalConv.product || product);
+  const b = Number(finalConv.budget || budget);
+  const co = String(finalConv.comuna || comuna);
+  const uc = String(finalConv.use_case || useCase || "");
 
-  if (!recentlyOffered) {
+  const lastOfferAtMs = finalConv.last_offer_at ? new Date(finalConv.last_offer_at).getTime() : 0;
+  const lastOfferProduct = finalConv.last_offer_payload?.product ? String(finalConv.last_offer_payload.product) : "";
+  const recentlyOfferedSameProduct =
+    !!lastOfferAtMs && (Date.now() - lastOfferAtMs < 1000 * 60 * 10) && lastOfferProduct.toLowerCase() === p.toLowerCase();
+
+  if (!recentlyOfferedSameProduct) {
     const shopifyPick = await shopifySearchTop2(String(p), Number(b));
 
     if (shopifyPick?.length) {
@@ -517,10 +481,10 @@ async function buildAndSendReply(params: {
       };
 
       const msg =
-        `Listo 🙌 Te dejé 2 opciones buenas para *${uc || "tu caso"}*.\n\n` +
-        `Producto: *${p}*\nPresupuesto: *$${Number(b).toLocaleString("es-CL")}*\nComuna: *${co}*\n\n` +
+        `Listo 🙌 Soy tu asesor de *Keloke.cl*.\n` +
+        `Para *${uc || "tu caso"}* y con $${Number(b).toLocaleString("es-CL")} en *${co}*, estas 2 son las mejores:\n\n` +
         `${lines}\n\n` +
-        `Si me dices *si lo necesitas para envío seguido o uso ocasional*, te confirmo la mejor y te la dejo lista para comprar.`;
+        `Dime una sola cosa y te recomiendo 1 al tiro: ¿lo necesitas para *uso seguido* o *uso ocasional*?`;
 
       await waSendText(phoneNumberId, waId, msg, accessToken);
       await upsertConversation(waId, {
@@ -531,6 +495,7 @@ async function buildAndSendReply(params: {
       return;
     }
 
+    // fallback a links
     const q = encodeURIComponent(String(p));
     const link1 = `${PUBLIC_STORE_DOMAIN}/search?q=${q}`;
     const link2 = `${PUBLIC_STORE_DOMAIN}/collections/all?filter.v.price.gte=0&filter.v.price.lte=${encodeURIComponent(String(b))}&q=${q}`;
@@ -547,11 +512,10 @@ async function buildAndSendReply(params: {
     };
 
     const msg =
-      `Listo 🙌\n\n` +
+      `Listo 🙌 Soy tu asesor de *Keloke.cl*.\n\n` +
       `Producto: *${p}*\nPresupuesto: *$${Number(b).toLocaleString("es-CL")}*\nComuna: *${co}*\n\n` +
-      `✅ Opción 1:\n${link1}\n\n` +
-      `✅ Opción 2 (hasta tu presupuesto):\n${link2}\n\n` +
-      `Si me dices *color / tamaño / uso* te afino al tiro.`;
+      `✅ Opciones:\n${link1}\n${link2}\n\n` +
+      `Para cerrarlo bien: ¿lo quieres para casa, negocio, despacho o regalo?`;
 
     await waSendText(phoneNumberId, waId, msg, accessToken);
     await upsertConversation(waId, {
@@ -562,8 +526,12 @@ async function buildAndSendReply(params: {
     return;
   }
 
+  // ✅ IA post-oferta (solo dudas/cierre)
   if (!OPENAI_API_KEY || !aiCfg?.auto_reply_enabled) return;
   if (!withinScheduleChile(aiCfg)) return;
+
+  const lastAiAtMs = finalConv.last_ai_reply_at ? new Date(finalConv.last_ai_reply_at).getTime() : 0;
+  const recentlyAi = lastAiAtMs && (Date.now() - lastAiAtMs < 1000 * 8);
   if (recentlyAi) return;
 
   const training = (aiCfg.training_data || "").trim();
@@ -571,14 +539,14 @@ async function buildAndSendReply(params: {
   const useCaseCtx = finalConv.use_case || "";
 
   const system =
-    `Eres el asistente de ventas de Keloke.cl en Chile. ` +
-    `Hablas como humano, chileno, natural (sin sonar robot). ` +
-    `Objetivo: cerrar venta con confianza, resolver dudas, y guiar a compra. ` +
-    `Regla CLAVE: NO repitas la misma pregunta si el cliente ya respondió. ` +
-    `Si hay 2 opciones ya enviadas, ahora tu pega es: recomendar 1 y pedir 1 dato final para cerrar (color/tamaño/uso/envío). ` +
-    `Sé breve: 1 a 4 líneas.\n` +
-    (useCaseCtx ? `\nUso del cliente: ${useCaseCtx}\n` : "") +
-    (offerCtx ? `\nOferta previa (úsala tal cual, NO inventes): ${offerCtx}\n` : "") +
+    `Eres un asesor de ventas TOP de Keloke.cl (Chile).` +
+    ` Hablas natural, cercano, cero robótico, estilo chileno suave.` +
+    ` Objetivo: resolver dudas y CERRAR la compra.` +
+    ` Regla: si ya se ofrecieron 2 opciones, ahora elige 1 y pide 1 dato final para cerrar.` +
+    ` NO repitas la misma pregunta si el cliente ya respondió.` +
+    ` Responde en 1 a 4 líneas, con seguridad y calidez.` +
+    (useCaseCtx ? `\nUso: ${useCaseCtx}\n` : "") +
+    (offerCtx ? `\nOferta previa (NO inventes): ${offerCtx}\n` : "") +
     (training ? `\nContexto adicional:\n${training}\n` : "");
 
   const { data: hist } = await supabase
@@ -606,19 +574,15 @@ async function buildAndSendReply(params: {
     body: JSON.stringify({
       model: aiCfg.ai_model || OPENAI_MODEL,
       input: [{ role: "system", content: system }, ...msgs],
-      max_output_tokens: 200,
+      max_output_tokens: 220,
     }),
   });
 
   const oaiJson = await oaiResp.json().catch(() => ({}));
-  const outText =
-    oaiJson?.output?.[0]?.content?.[0]?.text ||
-    oaiJson?.output_text ||
-    "";
+  const outText = oaiJson?.output?.[0]?.content?.[0]?.text || oaiJson?.output_text || "";
 
   if (oaiResp.ok && outText?.trim()) {
     const cleaned = outText.trim().slice(0, 900);
-
     if (String(cleaned) === String(finalConv.last_ai_reply_text || "").trim()) return;
 
     await waSendText(phoneNumberId, waId, cleaned, accessToken);
@@ -683,43 +647,19 @@ Deno.serve(async (req) => {
       await upsertContact(waId, contactName);
 
       const msgType = m.type || "unknown";
+      let messageContent: string | null = null;
 
-      // ✅ contenido texto/caption (si no hay, dejamos fallback)
-      let messageContent: string = "";
-
-      if (msgType === "text") messageContent = m.text?.body ?? "";
-      else if (msgType === "image") messageContent = m.image?.caption ?? "";
-      else if (msgType === "video") messageContent = m.video?.caption ?? "";
-      else if (msgType === "audio") messageContent = "";
-      else if (msgType === "document") messageContent = m.document?.caption ?? m.document?.filename ?? "";
+      if (msgType === "text") messageContent = m.text?.body ?? null;
+      else if (msgType === "image") messageContent = m.image?.caption ?? "[image]";
+      else if (msgType === "video") messageContent = m.video?.caption ?? "[video]";
+      else if (msgType === "audio") messageContent = "[audio]";
+      else if (msgType === "document") messageContent = m.document?.caption ?? m.document?.filename ?? "[document]";
       else messageContent = `[${msgType}]`;
-
-      const fallbackLabel =
-        msgType === "image" ? "[image]" :
-        msgType === "video" ? "[video]" :
-        msgType === "audio" ? "[audio]" :
-        msgType === "document" ? "[document]" :
-        `[${msgType}]`;
-
-      const finalText = (messageContent && messageContent.trim()) ? messageContent.trim() : fallbackLabel;
-
-      // ✅ MEDIA ID según tipo
-      let mediaId: string | null = null;
-      if (msgType === "image") mediaId = m.image?.id ?? null;
-      if (msgType === "video") mediaId = m.video?.id ?? null;
-      if (msgType === "audio") mediaId = m.audio?.id ?? null;
-      if (msgType === "document") mediaId = m.document?.id ?? null;
-
-      // ✅ Descargar + subir a Storage
-      let mediaData: any = null;
-      if (mediaId && accessToken) {
-        mediaData = await storeInboundMedia({ waId, msgType, mediaId, accessToken });
-      }
 
       await insertMessage({
         from_number: waId,
         message_type: msgType,
-        message_content: finalText,
+        message_content: messageContent,
         direction: "inbound",
         timestamp: new Date(
           (m.timestamp ? parseInt(m.timestamp, 10) : Math.floor(Date.now() / 1000)) * 1000
@@ -727,43 +667,67 @@ Deno.serve(async (req) => {
         phone_number: waId,
         status: "received",
         whatsapp_message_id: m.id || null,
-        message: finalText,
+        message: messageContent,
         contact_name: contactName || null,
         is_read: false,
         created_at: nowISO(),
         updated_at: nowISO(),
-
-        // ✅ Campos media
-        media_id: mediaData?.media_id ?? mediaId ?? null,
-        media_url: mediaData?.media_url ?? null,
-        media_mime_type: mediaData?.media_mime_type ?? null,
-        media_filename: mediaData?.media_filename ?? null,
-        media_size: mediaData?.media_size ?? null,
-        platform_response: mediaData ? { storage_path: mediaData.storage_path, skipped_reason: mediaData.skipped_reason || null } : null,
       });
 
-      // ✅ Estado base: product/budget/comuna/use_case
+      // ✅ Captura/Reset inteligente cuando llega un link o cambia el producto
       const conv = (await getConversation(waId)) || {};
+      const txt = String(messageContent || "");
+      const clean = stripUrlsKeepText(txt);
+      const handle = msgType === "text" ? extractProductHandleFromText(txt) : null;
 
-      if (msgType === "text" && finalText) {
-        const cleaned = finalText.replace(/https?:\/\/\S+/g, "").trim();
+      if (msgType === "text") {
+        // Si el cliente manda LINK de producto => product real por handle + reset
+        if (handle) {
+          const title = await shopifyGetProductTitleByHandle(handle);
+          const productTitle = title || handle.replace(/-/g, " ");
+          // si es distinto al actual => reseteamos (evita “freidora pegada”)
+          if (!conv.product || String(conv.product).toLowerCase() !== productTitle.toLowerCase()) {
+            await resetConversationForNewProduct(waId, productTitle);
+          }
+        } else {
+          // Si NO es link, pero parece que el usuario está pidiendo otra cosa,
+          // y el texto trae un producto claro (>= 3 chars) y no es solo “sí/no”
+          const looksLikeNewProduct =
+            clean.length >= 3 &&
+            !/^(si|sí|no|ok|dale|ya|gracias|genial|perfecto)$/i.test(clean) &&
+            !extractBudgetLukas(clean) &&
+            !extractUseCase(clean) &&
+            !isGreeting(clean);
 
-        if (!conv.product && cleaned.length >= 2) {
-          await upsertConversation(waId, { product: cleaned, state: "ASK_BUDGET" });
-        }
+          if (looksLikeNewProduct && conv.product && String(conv.product).toLowerCase() !== clean.toLowerCase()) {
+            // Resetea contexto y toma este texto como nuevo producto
+            await resetConversationForNewProduct(waId, clean);
+          }
 
-        if (!conv.budget) {
-          const b = extractBudgetLukas(cleaned);
-          if (b) await upsertConversation(waId, { budget: b, state: "ASK_COMUNA" });
-        }
+          // Estado base si todavía está vacío (primer contacto)
+          const conv2 = (await getConversation(waId)) || {};
+          if (!conv2.product && clean.length >= 2 && !isGreeting(clean)) {
+            await upsertConversation(waId, { product: clean, state: "ASK_BUDGET" });
+          }
 
-        if (conv.product && (conv.budget || extractBudgetLukas(cleaned)) && !conv.comuna && cleaned.length >= 3) {
-          await upsertConversation(waId, { comuna: cleaned, state: "ASK_USE_CASE" });
-        }
+          if (!conv2.budget) {
+            const b = extractBudgetLukas(clean);
+            if (b) await upsertConversation(waId, { budget: b, state: "ASK_COMUNA" });
+          }
 
-        if (!conv.use_case) {
-          const uc = extractUseCase(cleaned);
-          if (uc) await upsertConversation(waId, { use_case: uc });
+          if ((conv2.product || clean.length >= 2) && (conv2.budget || extractBudgetLukas(clean)) && !conv2.comuna && clean.length >= 3) {
+            // ojo: acá podría confundirse si manda "Ñuñoa" vs "freidora" etc.
+            // como estamos reseteando mejor, queda mucho más estable.
+            // Igual solo setea comuna si ya está el flujo armado.
+            if (conv2.product && (conv2.budget || extractBudgetLukas(clean))) {
+              await upsertConversation(waId, { comuna: clean, state: "ASK_USE_CASE" });
+            }
+          }
+
+          if (!conv2.use_case) {
+            const uc = extractUseCase(clean);
+            if (uc) await upsertConversation(waId, { use_case: uc });
+          }
         }
       }
 
