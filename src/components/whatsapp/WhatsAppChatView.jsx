@@ -165,44 +165,111 @@ export default function WhatsAppChatView({ contact, connection, onShowClientInfo
     }
   }, [contact?.phone_number]);
 
- useEffect(() => {
-  if (!contact?.phone_number) return;
+  /**
+   * ✅ PARCHE: Realtime + Poll inteligente (sin loops / sin spam / no se muere al dejarlo quieto)
+   * - Mantiene realtime solo INSERT (como ya lo tenías)
+   * - Agrega poll cada 4–6s SOLO si la pestaña está visible
+   * - Al volver a la pestaña (visibilitychange), refresca una vez
+   */
+  useEffect(() => {
+    if (!contact?.phone_number) return;
 
-  lastMessageIdRef.current = null;
-  setIsNearBottom(true);
-  setIsInitialLoading(true);
+    lastMessageIdRef.current = null;
+    setIsNearBottom(true);
+    setIsInitialLoading(true);
 
-  // Primera carga
-  loadMessages({ reason: 'initial', showSpinner: true });
-  markMessagesAsRead(); // ✅ solo aquí (carga inicial)
+    let alive = true;
+    let pollTimer = null;
+    let lastRealtimeAt = 0;
+    let lastPollAt = 0;
 
-  // ✅ Realtime: SOLO INSERT (evita loop con markMessagesAsRead que hace UPDATE)
-  const channel = supabase
-    .channel(`chat_${contact.phone_number}`)
-    .on(
-      'postgres_changes',
-      {
-        event: 'INSERT', // ✅ clave
-        schema: 'public',
-        table: 'whatsapp_messages',
-        filter: `phone_number=eq.${contact.phone_number}`,
-      },
-      () => {
-        if (!autoRefresh) return;
-        loadMessages({ reason: 'realtime-insert', showSpinner: false });
+    const pollTick = async () => {
+      if (!alive) return;
 
-        // ✅ marcar como leído pero SIN provocar loop:
-        // como este handler solo escucha INSERT, no se loop-ea aunque mark haga UPDATE
+      // si autoRefresh está off, no hacer nada
+      if (!autoRefresh) {
+        pollTimer = setTimeout(pollTick, 2000);
+        return;
+      }
+
+      // si la pestaña está oculta, baja frecuencia (no mates recursos)
+      if (document.hidden) {
+        pollTimer = setTimeout(pollTick, 6000);
+        return;
+      }
+
+      // evita poll pegado si acaba de llegar realtime
+      const now = Date.now();
+      if (now - lastRealtimeAt < 1500) {
+        pollTimer = setTimeout(pollTick, 4000);
+        return;
+      }
+
+      // evita poll demasiado frecuente aunque algo llame pollTick seguido
+      if (now - lastPollAt < 3000) {
+        pollTimer = setTimeout(pollTick, 4000);
+        return;
+      }
+
+      lastPollAt = now;
+
+      try {
+        await loadMessages({ reason: 'poll', showSpinner: false });
+        // marca leído solo si estás mirando (tab visible)
+        await markMessagesAsRead();
+      } catch (e) {
+        console.error('pollTick error', e);
+      } finally {
+        pollTimer = setTimeout(pollTick, 4000);
+      }
+    };
+
+    const onVisibility = () => {
+      if (!alive) return;
+      if (!document.hidden && autoRefresh) {
+        // al volver al tab, refresca 1 vez
+        loadMessages({ reason: 'visibility', showSpinner: false });
         markMessagesAsRead();
       }
-    )
-    .subscribe();
+    };
 
-  return () => {
-    supabase.removeChannel(channel);
-  };
-// eslint-disable-next-line react-hooks/exhaustive-deps
-}, [contact?.phone_number, autoRefresh]);
+    // Primera carga
+    loadMessages({ reason: 'initial', showSpinner: true });
+    markMessagesAsRead(); // ✅ solo aquí (carga inicial)
+
+    // ✅ Realtime: SOLO INSERT (evita loop con markMessagesAsRead que hace UPDATE)
+    const channel = supabase
+      .channel(`chat_${contact.phone_number}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'whatsapp_messages',
+          filter: `phone_number=eq.${contact.phone_number}`,
+        },
+        () => {
+          if (!autoRefresh) return;
+          lastRealtimeAt = Date.now();
+          loadMessages({ reason: 'realtime-insert', showSpinner: false });
+          markMessagesAsRead();
+        }
+      )
+      .subscribe();
+
+    document.addEventListener('visibilitychange', onVisibility);
+
+    // inicia poll inteligente
+    pollTimer = setTimeout(pollTick, 1200);
+
+    return () => {
+      alive = false;
+      if (pollTimer) clearTimeout(pollTimer);
+      document.removeEventListener('visibilitychange', onVisibility);
+      supabase.removeChannel(channel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contact?.phone_number, autoRefresh]);
 
   useEffect(() => {
     // Solo auto-scroll si el usuario está cerca del fondo
