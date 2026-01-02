@@ -259,6 +259,8 @@ export default function SocialConnections() {
   // ... el resto de tu archivo queda igual (refreshWhatsAppToken, disconnect, render, etc.)
   // IMPORTANTE: tu disconnect hoy solo borra user_social_tokens.
   // WhatsApp está en social_connections, así que desconectar WhatsApp requiere otro delete/update ahí.
-
-  return <div />;
-}
+return (
+  <div>
+    {/* TU JSX ORIGINAL AQUI, sin cambios */}
+  </div>
+);
