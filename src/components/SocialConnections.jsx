@@ -2,74 +2,54 @@ import React, { useState, useEffect } from 'react';
 import { Instagram, Facebook, Youtube, Music2, MessageCircle, ShoppingBag, RefreshCw } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
-// ✅ Estado base (evita arrastrar state viejo)
-const INITIAL_CONNECTIONS = {
-  instagram: { connected: false, username: null, expires: null, lastConnection: null },
-  facebook: { connected: false, username: null, expires: null, lastConnection: null },
-  youtube: { connected: false, username: null, expires: null, lastConnection: null },
-  tiktok: { connected: false, username: null, expires: null, lastConnection: null },
-  whatsapp: { connected: false, phone: null, expires: null, lastConnection: null },
-  shopify: { connected: false, store: null, expires: null, lastConnection: null },
-};
-
-// ✅ Meta OAuth unificado
+// ✅ Unificamos Meta OAuth en v24.0 (Instagram/Facebook/WhatsApp)
 const META_OAUTH_VERSION = 'v24.0';
+const APP_ORIGIN = typeof window !== 'undefined' ? window.location.origin : '';
 
-// VERSIÓN - SocialConnections (estable / build-safe)
 export default function SocialConnections() {
-  const [connections, setConnections] = useState(INITIAL_CONNECTIONS);
+  const defaultConnections = {
+    instagram: { connected: false, username: null, expires: null, lastConnection: null },
+    facebook: { connected: false, username: null, expires: null, lastConnection: null },
+    youtube: { connected: false, username: null, expires: null, lastConnection: null },
+    tiktok: { connected: false, username: null, expires: null, lastConnection: null },
+    whatsapp: { connected: false, phone: null, expires: null, lastConnection: null },
+    shopify: { connected: false, store: null, expires: null, lastConnection: null },
+  };
+
+  const [connections, setConnections] = useState(defaultConnections);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(null);
   const [oauthWindow, setOauthWindow] = useState(null);
 
   // Log de versión para verificar que el código correcto se está ejecutando
-  // (esto NO rompe build, solo consola)
-  console.log('🚀 SocialConnections OK - Meta OAuth v24.0');
+  console.log('🚀 SocialConnections OK — Meta OAuth v24.0');
 
   useEffect(() => {
     loadConnections();
 
-    // ✅ whitelist de orígenes permitidos (tu dominio + supabase domain)
-    const allowedOrigins = new Set();
-    try {
-      allowedOrigins.add(window.location.origin);
-    } catch (_) {}
-
-    try {
-      if (supabase?.supabaseUrl) {
-        allowedOrigins.add(new URL(supabase.supabaseUrl).origin);
-      }
-    } catch (_) {}
-
-    // Escuchar mensajes del callback de OAuth (postMessage)
+    // Escuchar mensajes del callback de OAuth (popup -> window.opener.postMessage)
     const handleMessage = (event) => {
-      // Seguridad: acepta solo desde orígenes conocidos
-      if (allowedOrigins.size > 0 && !allowedOrigins.has(event.origin)) return;
+      // ✅ Seguridad: aceptar solo mensajes desde tu mismo origen (tu app)
+      // Si tus callbacks están en Supabase Functions con otro dominio, cambia esta validación.
+      if (APP_ORIGIN && event.origin !== APP_ORIGIN) return;
 
       let data = event.data;
-
-      // Si el mensaje es un string, intentar parsearlo como JSON
       if (typeof data === 'string') {
         try {
           data = JSON.parse(data);
         } catch (e) {
-          console.error('Error al parsear mensaje:', e);
           return;
         }
       }
 
-      // Manejar mensaje de éxito
       if (data && data.success === true) {
-        console.log(`${data.platform} conectado exitosamente`);
         alert(`✅ ${data.platform} conectado exitosamente${data.account ? ': ' + data.account : ''}`);
         loadConnections();
         return;
       }
 
-      // Manejar mensaje de error
       if (data && data.success === false) {
-        console.error(`Error de ${data.platform}:`, data.error);
         alert(`❌ Error al conectar ${data.platform}: ${data.error || 'Error desconocido'}`);
         return;
       }
@@ -80,21 +60,15 @@ export default function SocialConnections() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ✅ detectar popup cerrado sin completar
+  // ✅ Si el popup se cierra sin completar
   useEffect(() => {
     if (!oauthWindow) return;
-
     const t = setInterval(() => {
-      try {
-        if (oauthWindow.closed) {
-          clearInterval(t);
-          setOauthWindow(null);
-        }
-      } catch (_) {
-        // si hay cross-origin restrictions, igual evitamos crash
+      if (oauthWindow.closed) {
+        clearInterval(t);
+        setOauthWindow(null);
       }
     }, 500);
-
     return () => clearInterval(t);
   }, [oauthWindow]);
 
@@ -102,25 +76,25 @@ export default function SocialConnections() {
     const timeout = setTimeout(() => {
       setError('La carga está tardando más de lo esperado. Verifica tu conexión.');
       setLoading(false);
-    }, 8000); // 8 segundos timeout
+    }, 8000);
 
     try {
       setError(null);
 
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
+      const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
         clearTimeout(timeout);
         setLoading(false);
         return;
       }
 
-      const { data: tokens } = await supabase.from('user_social_tokens').select('*').eq('user_id', user.id);
+      const { data: tokens } = await supabase
+        .from('user_social_tokens')
+        .select('*')
+        .eq('user_id', user.id);
 
-      // ✅ partir desde base limpia siempre
-      const newConnections = { ...INITIAL_CONNECTIONS };
+      // ✅ Partimos desde default, para no “arrastrar” state viejo
+      const newConnections = { ...defaultConnections };
 
       if (tokens) {
         tokens.forEach((token) => {
@@ -133,7 +107,7 @@ export default function SocialConnections() {
         });
       }
 
-      // Obtener información adicional de WhatsApp (tabla distinta)
+      // WhatsApp se guarda en social_connections
       const { data: whatsappConnection } = await supabase
         .from('social_connections')
         .select('*')
@@ -142,7 +116,6 @@ export default function SocialConnections() {
         .single();
 
       if (whatsappConnection) {
-        // Obtener último mensaje recibido
         const { data: lastMessage } = await supabase
           .from('whatsapp_messages')
           .select('created_at, direction')
@@ -160,8 +133,7 @@ export default function SocialConnections() {
         };
       }
 
-      // Shopify uses direct API credentials (not OAuth)
-      // Mark as connected since credentials are configured in shopify.jsx
+      // Shopify (según tu lógica actual: siempre conectado)
       newConnections.shopify = {
         connected: true,
         username: 'csn703-10',
@@ -171,8 +143,8 @@ export default function SocialConnections() {
 
       setConnections(newConnections);
       clearTimeout(timeout);
-    } catch (err) {
-      console.error('Error loading connections:', err);
+    } catch (e) {
+      console.error('Error loading connections:', e);
       setError('Error al cargar las conexiones. Por favor, intenta recargar la página.');
       clearTimeout(timeout);
     } finally {
@@ -182,39 +154,43 @@ export default function SocialConnections() {
 
   const connectPlatform = async (platform) => {
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
+      const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
         alert('Debes iniciar sesión primero');
         return;
       }
 
-      // Obtener credenciales OAuth de la plataforma
-      const { data: creds } = await supabase.from('oauth_credentials').select('credentials').eq('platform', platform).single();
+      // ⚠️ OJO: si /rest/v1/oauth_credentials da 404, no es el React:
+      // es que la tabla no existe / no está expuesta / RLS / schema.
+      const { data: creds, error: credsErr } = await supabase
+        .from('oauth_credentials')
+        .select('credentials')
+        .eq('platform', platform)
+        .single();
 
-      if (!creds?.credentials) {
+      if (credsErr) {
+        console.error('oauth_credentials error:', credsErr);
+      }
+
+      if (!creds || !creds.credentials) {
         alert('Credenciales no configuradas para esta plataforma');
         return;
       }
 
       const credentials = creds.credentials;
 
-      // Usar el user_id directamente como state
+      // state = user.id
       const state = user.id;
 
       let authUrl = '';
 
-      // ✅ Meta: algunos guardan client_id, otros app_id
+      // ✅ metaAppId fallback (a veces guardan app_id, a veces client_id)
       const metaAppId = credentials.client_id || credentials.app_id;
 
       switch (platform) {
         case 'instagram': {
-          // Instagram Business usa Facebook Graph API (OAuth Meta)
           const igScopes =
             'instagram_basic,instagram_manage_messages,instagram_manage_comments,pages_show_list,pages_read_engagement,business_management';
-
           authUrl =
             `https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth` +
             `?client_id=${encodeURIComponent(metaAppId)}` +
@@ -222,15 +198,11 @@ export default function SocialConnections() {
             `&scope=${encodeURIComponent(igScopes)}` +
             `&response_type=code` +
             `&state=${encodeURIComponent(state)}`;
-
-          console.log('✅ Instagram OAuth URL:', authUrl);
           break;
         }
 
         case 'facebook': {
-          // Facebook pages/engagement
           const fbScopes = 'public_profile,pages_read_engagement,business_management';
-
           authUrl =
             `https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth` +
             `?client_id=${encodeURIComponent(metaAppId)}` +
@@ -238,8 +210,6 @@ export default function SocialConnections() {
             `&scope=${encodeURIComponent(fbScopes)}` +
             `&response_type=code` +
             `&state=${encodeURIComponent(state)}`;
-
-          console.log('✅ Facebook OAuth URL:', authUrl);
           break;
         }
 
@@ -247,16 +217,11 @@ export default function SocialConnections() {
           const scopes = encodeURIComponent(
             'https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.force-ssl'
           );
-
           authUrl =
             `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(credentials.client_id)}` +
             `&redirect_uri=${encodeURIComponent(credentials.redirect_uri)}` +
             `&scope=${scopes}` +
-            `&response_type=code` +
-            `&access_type=offline` +
-            `&prompt=select_account` +
-            `&state=${encodeURIComponent(state)}`;
-
+            `&response_type=code&access_type=offline&prompt=select_account&state=${encodeURIComponent(state)}`;
           break;
         }
 
@@ -265,16 +230,13 @@ export default function SocialConnections() {
             `https://www.tiktok.com/auth/authorize/?client_key=${encodeURIComponent(credentials.client_key)}` +
             `&redirect_uri=${encodeURIComponent(credentials.redirect_uri)}` +
             `&scope=user.info.basic,video.publish,video.list` +
-            `&response_type=code` +
-            `&state=${encodeURIComponent(state)}`;
-
+            `&response_type=code&state=${encodeURIComponent(state)}`;
           break;
         }
 
         case 'whatsapp': {
-          // WhatsApp (según tu implementación actual): token en redirect
+          // Mantengo tu enfoque token (hash). OAuthCallback.jsx ya lo soporta (lo dejo abajo).
           const whatsappScopes = 'whatsapp_business_management,whatsapp_business_messaging';
-
           authUrl =
             `https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth` +
             `?client_id=${encodeURIComponent(metaAppId)}` +
@@ -282,22 +244,18 @@ export default function SocialConnections() {
             `&scope=${encodeURIComponent(whatsappScopes)}` +
             `&response_type=token` +
             `&state=${encodeURIComponent(state)}`;
-
-          console.log('✅ WhatsApp OAuth URL:', authUrl);
           break;
         }
 
-        case 'shopify': {
+        case 'shopify':
           alert('Shopify ya está conectado con tu tienda mediante API');
           return;
-        }
 
         default:
           alert('Plataforma no soportada');
           return;
       }
 
-      // Abrir ventana de OAuth
       const width = 600;
       const height = 700;
       const left = window.screen.width / 2 - width / 2;
@@ -305,8 +263,8 @@ export default function SocialConnections() {
 
       const win = window.open(authUrl, 'oauth', `width=${width},height=${height},left=${left},top=${top}`);
       setOauthWindow(win);
-    } catch (err) {
-      console.error('Error connecting platform:', err);
+    } catch (e) {
+      console.error('Error connecting platform:', e);
       alert('Error al conectar la plataforma');
     }
   };
@@ -314,14 +272,7 @@ export default function SocialConnections() {
   const refreshWhatsAppToken = async () => {
     setRefreshing('whatsapp');
     try {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-
-      if (!session?.access_token) {
-        alert('Sesión inválida, vuelve a iniciar sesión.');
-        return;
-      }
+      const { data: { session } } = await supabase.auth.getSession();
 
       const response = await fetch(`${supabase.supabaseUrl}/functions/v1/whatsapp-token-refresh`, {
         method: 'POST',
@@ -337,10 +288,10 @@ export default function SocialConnections() {
         alert('✅ Token de WhatsApp renovado exitosamente');
         await loadConnections();
       } else {
-        alert('❌ Error al renovar token: ' + (result.error || 'Error desconocido'));
+        alert('❌ Error al renovar token: ' + result.error);
       }
-    } catch (err) {
-      console.error('Error refreshing WhatsApp token:', err);
+    } catch (e) {
+      console.error('Error refreshing WhatsApp token:', e);
       alert('❌ Error al renovar token de WhatsApp');
     } finally {
       setRefreshing(null);
@@ -358,21 +309,22 @@ export default function SocialConnections() {
 
     try {
       setRefreshing(platform);
-
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+      const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
-      // Eliminar el token de la base de datos (tu lógica original)
-      const { error: delError } = await supabase.from('user_social_tokens').delete().eq('user_id', user.id).eq('platform', platform);
+      // tokens OAuth en user_social_tokens
+      const { error: delErr } = await supabase
+        .from('user_social_tokens')
+        .delete()
+        .eq('user_id', user.id)
+        .eq('platform', platform);
 
-      if (delError) throw delError;
+      if (delErr) throw delErr;
 
       alert(`✅ ${platform} desconectado exitosamente`);
       await loadConnections();
-    } catch (err) {
-      console.error('Error disconnecting platform:', err);
+    } catch (e) {
+      console.error('Error disconnecting platform:', e);
       alert(`❌ Error al desconectar ${platform}`);
     } finally {
       setRefreshing(null);
@@ -432,7 +384,7 @@ export default function SocialConnections() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {platforms.map((platform) => {
-          const connection = connections[platform.id] || {};
+          const connection = connections[platform.id] || defaultConnections[platform.id];
           const Icon = platform.icon;
           const isConnected = !!connection.connected;
           const expiresAt = connection.expires ? new Date(connection.expires) : null;
@@ -444,7 +396,7 @@ export default function SocialConnections() {
                 <div className="flex items-center justify-between mb-4">
                   <Icon className="w-12 h-12" />
                   <div className="flex items-center gap-2">
-                    <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`}></div>
+                    <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`} />
                     <span className="text-xs font-semibold">{isConnected ? 'Conectado' : 'Desconectado'}</span>
                   </div>
                 </div>
@@ -517,6 +469,7 @@ export default function SocialConnections() {
                       <div className="w-3 h-3 bg-red-500 rounded-full"></div>
                       <span className="font-semibold text-red-600">Desconectado</span>
                     </div>
+
                     <button
                       onClick={() => connectPlatform(platform.id)}
                       className={`w-full bg-gradient-to-r ${platform.color} text-white py-2 px-4 rounded-lg hover:opacity-90 transition-opacity`}
