@@ -23,50 +23,49 @@ export default function SocialConnections() {
 
   console.log('🚀 SocialConnections OK — Meta OAuth', META_OAUTH_VERSION);
 
-  useEffect(() => {
-    loadConnections();
+ useEffect(() => {
+  loadConnections();
 
-    const handleMessage = (event) => {
-      // Solo aceptar mensajes desde TU mismo dominio (tu /oauth/callback)
-      if (APP_ORIGIN && event.origin !== APP_ORIGIN) return;
+  const handleMessage = (event) => {
+    if (APP_ORIGIN && event.origin !== APP_ORIGIN) return;
 
-      let data = event.data;
-      if (typeof data === 'string') {
-        try {
-          data = JSON.parse(data);
-        } catch {
-          return;
-        }
-      }
+    let data = event.data;
+    if (typeof data === 'string') {
+      try { data = JSON.parse(data); } catch { return; }
+    }
 
-      if (data?.success === true) {
-        alert(`✅ ${data.platform} conectado exitosamente${data.account ? ': ' + data.account : ''}`);
-        loadConnections();
-        return;
-      }
+    // ✅ filtro duro
+    if (!data || data.type !== 'OAUTH_RESULT') return;
 
-      if (data?.success === false) {
-        alert(`❌ Error al conectar ${data.platform}: ${data.error || 'Error desconocido'}`);
-        return;
-      }
-    };
+    if (data.success === true) {
+      // opcional: alert
+      alert(`✅ ${data.platform} conectado exitosamente${data.account ? ': ' + data.account : ''}`);
 
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+      // ✅ refrescar estado
+      loadConnections();
 
-  useEffect(() => {
-    if (!oauthWindow) return;
-    const t = setInterval(() => {
-      if (oauthWindow.closed) {
-        clearInterval(t);
-        setOauthWindow(null);
-      }
-    }, 500);
-    return () => clearInterval(t);
-  }, [oauthWindow]);
+      // ✅ cerrar referencia local del popup si existe
+      try { if (oauthWindow && !oauthWindow.closed) oauthWindow.close(); } catch {}
+      setOauthWindow(null);
 
+      return;
+    }
+
+    if (data.success === false) {
+      alert(`❌ Error al conectar ${data.platform}: ${data.error || 'Error desconocido'}`);
+      try { if (oauthWindow && !oauthWindow.closed) oauthWindow.close(); } catch {}
+      setOauthWindow(null);
+      return;
+    }
+  };
+
+  window.addEventListener('message', handleMessage);
+  return () => window.removeEventListener('message', handleMessage);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [oauthWindow]);
+
+
+  
   const loadConnections = async () => {
     const timeout = setTimeout(() => {
       setError('La carga está tardando más de lo esperado. Verifica tu conexión.');
