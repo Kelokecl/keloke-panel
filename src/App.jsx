@@ -28,7 +28,7 @@ function AppRoutes() {
 
   return (
     <Routes>
-      {/* ✅ Callback público, no pasa por auth guard */}
+      {/* ✅ PUBLICA: callback OAuth SIEMPRE debe ser accesible sin auth */}
       <Route path="/oauth/callback" element={<OAuthCallback />} />
 
       <Route path="/login" element={user ? <Navigate to="/dashboard" /> : <Login />} />
@@ -48,7 +48,7 @@ function AppRoutes() {
 
 export default function App() {
   useEffect(() => {
-    initWhatsAppStorage().then(result => {
+    initWhatsAppStorage().then((result) => {
       if (result.success) {
         console.log('✅ Storage inicializado correctamente');
       } else {
