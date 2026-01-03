@@ -2,32 +2,33 @@ import React, { useEffect, useState } from 'react';
 import { Instagram, Facebook, Youtube, Music2, MessageCircle, ShoppingBag, RefreshCw } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
-const APP_ORIGIN = window.location.origin;
 const META_OAUTH_VERSION = 'v24.0';
+const APP_ORIGIN = typeof window !== 'undefined' ? window.location.origin : '';
+
+const DEFAULT_CONNECTIONS = {
+  instagram: { connected: false, username: null, expires: null, lastConnection: null },
+  facebook: { connected: false, username: null, expires: null, lastConnection: null },
+  youtube: { connected: false, username: null, expires: null, lastConnection: null },
+  tiktok: { connected: false, username: null, expires: null, lastConnection: null },
+  whatsapp: { connected: false, phone: null, expires: null, lastConnection: null },
+  shopify: { connected: false, store: null, expires: null, lastConnection: null },
+};
 
 export default function SocialConnections() {
-  const [connections, setConnections] = useState({
-    instagram: { connected: false, username: null, expires: null, lastConnection: null },
-    facebook: { connected: false, username: null, expires: null, lastConnection: null },
-    youtube: { connected: false, username: null, expires: null, lastConnection: null },
-    tiktok: { connected: false, username: null, expires: null, lastConnection: null },
-    whatsapp: { connected: false, phone: null, expires: null, lastConnection: null },
-    shopify: { connected: false, store: null, expires: null, lastConnection: null },
-  });
-
+  const [connections, setConnections] = useState(DEFAULT_CONNECTIONS);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(null);
   const [oauthWindow, setOauthWindow] = useState(null);
 
-  console.log('🚀 SocialConnections OK - Meta OAuth', META_OAUTH_VERSION);
+  console.log('🚀 SocialConnections OK — Meta OAuth', META_OAUTH_VERSION);
 
   useEffect(() => {
     loadConnections();
 
     const handleMessage = (event) => {
-      // Aceptar solo mensajes desde tu propio dominio (tu OAuthCallback.jsx vive en tu app)
-      if (event.origin !== APP_ORIGIN) return;
+      // Solo aceptar mensajes desde TU mismo dominio (tu /oauth/callback)
+      if (APP_ORIGIN && event.origin !== APP_ORIGIN) return;
 
       let data = event.data;
       if (typeof data === 'string') {
@@ -38,13 +39,15 @@ export default function SocialConnections() {
         }
       }
 
-      if (data && data.success === true) {
+      if (data?.success === true) {
         alert(`✅ ${data.platform} conectado exitosamente${data.account ? ': ' + data.account : ''}`);
         loadConnections();
+        return;
       }
 
-      if (data && data.success === false) {
+      if (data?.success === false) {
         alert(`❌ Error al conectar ${data.platform}: ${data.error || 'Error desconocido'}`);
+        return;
       }
     };
 
@@ -53,7 +56,6 @@ export default function SocialConnections() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // si el popup se cerró sin completar
   useEffect(() => {
     if (!oauthWindow) return;
     const t = setInterval(() => {
@@ -81,36 +83,30 @@ export default function SocialConnections() {
         return;
       }
 
-      // Base limpia
-      const base = {
-        instagram: { connected: false, username: null, expires: null, lastConnection: null },
-        facebook: { connected: false, username: null, expires: null, lastConnection: null },
-        youtube: { connected: false, username: null, expires: null, lastConnection: null },
-        tiktok: { connected: false, username: null, expires: null, lastConnection: null },
-        whatsapp: { connected: false, phone: null, expires: null, lastConnection: null },
-        shopify: { connected: false, store: null, expires: null, lastConnection: null },
-      };
-
-      const newConnections = { ...base };
-
       // Tokens (IG/FB/YT/TikTok)
-      const { data: tokens, error: tokErr } = await supabase
+      const { data: tokens, error: tokensErr } = await supabase
         .from('user_social_tokens')
         .select('*')
         .eq('user_id', user.id);
 
-      if (!tokErr && tokens) {
-        tokens.forEach((t) => {
-          newConnections[t.platform] = {
-            connected: !!t.is_active,
-            username: t.account_username || t.account_name || null,
-            expires: t.token_expires_at || null,
-            lastConnection: t.updated_at || t.created_at || null,
+      if (tokensErr) {
+        console.error('user_social_tokens error:', tokensErr);
+      }
+
+      const newConnections = { ...DEFAULT_CONNECTIONS };
+
+      if (tokens && Array.isArray(tokens)) {
+        tokens.forEach((token) => {
+          newConnections[token.platform] = {
+            connected: !!token.is_active,
+            username: token.account_username || token.account_name || null,
+            expires: token.token_expires_at,
+            lastConnection: token.created_at,
           };
         });
       }
 
-      // WhatsApp (tabla social_connections)
+      // WhatsApp (tabla distinta)
       const { data: whatsappConnection } = await supabase
         .from('social_connections')
         .select('*')
@@ -121,7 +117,7 @@ export default function SocialConnections() {
       if (whatsappConnection) {
         const { data: lastMessage } = await supabase
           .from('whatsapp_messages')
-          .select('created_at')
+          .select('created_at, direction')
           .eq('direction', 'inbound')
           .order('created_at', { ascending: false })
           .limit(1)
@@ -158,28 +154,35 @@ export default function SocialConnections() {
   const connectPlatform = async (platform) => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return alert('Debes iniciar sesión primero');
+      if (!user) {
+        alert('Debes iniciar sesión primero');
+        return;
+      }
 
-      const { data: credsRow } = await supabase
+      const { data: row, error: credErr } = await supabase
         .from('oauth_credentials')
         .select('credentials')
         .eq('platform', platform)
         .single();
 
-      if (!credsRow?.credentials) return alert('Credenciales no configuradas para esta plataforma');
+      if (credErr || !row?.credentials) {
+        console.error('oauth_credentials error:', credErr);
+        alert('Credenciales no configuradas para esta plataforma');
+        return;
+      }
 
-      const credentials = credsRow.credentials;
+      const credentials = row.credentials;
       const state = user.id;
 
       let authUrl = '';
 
-      // Meta appId (usa client_id sí o sí)
+      // Meta: usa client_id o app_id
       const metaAppId = credentials.client_id || credentials.app_id;
 
       switch (platform) {
         case 'instagram': {
-          // Mantén scopes mínimos por ahora (después los subimos cuando publiques)
-          const igScopes = 'instagram_basic,pages_show_list';
+          // ✅ para destrabar HOY: scopes mínimos
+          const igScopes = 'instagram_basic';
           authUrl =
             `https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth` +
             `?client_id=${encodeURIComponent(metaAppId)}` +
@@ -191,7 +194,8 @@ export default function SocialConnections() {
         }
 
         case 'facebook': {
-          const fbScopes = 'public_profile,pages_show_list';
+          // ✅ para destrabar HOY: scopes mínimos
+          const fbScopes = 'public_profile';
           authUrl =
             `https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth` +
             `?client_id=${encodeURIComponent(metaAppId)}` +
@@ -207,20 +211,25 @@ export default function SocialConnections() {
             'https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.force-ssl'
           );
           authUrl =
-            `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(credentials.client_id)}` +
+            `https://accounts.google.com/o/oauth2/v2/auth` +
+            `?client_id=${encodeURIComponent(credentials.client_id)}` +
             `&redirect_uri=${encodeURIComponent(credentials.redirect_uri)}` +
             `&scope=${scopes}` +
-            `&response_type=code&access_type=offline&prompt=consent` +
+            `&response_type=code` +
+            `&access_type=offline` +
+            `&prompt=consent` +
             `&state=${encodeURIComponent(state)}`;
           break;
         }
 
         case 'tiktok': {
           authUrl =
-            `https://www.tiktok.com/auth/authorize/?client_key=${encodeURIComponent(credentials.client_key)}` +
+            `https://www.tiktok.com/auth/authorize/` +
+            `?client_key=${encodeURIComponent(credentials.client_key)}` +
             `&redirect_uri=${encodeURIComponent(credentials.redirect_uri)}` +
             `&scope=user.info.basic,video.publish,video.list` +
-            `&response_type=code&state=${encodeURIComponent(state)}`;
+            `&response_type=code` +
+            `&state=${encodeURIComponent(state)}`;
           break;
         }
 
@@ -237,10 +246,12 @@ export default function SocialConnections() {
         }
 
         case 'shopify':
-          return alert('Shopify ya está conectado con tu tienda mediante API');
+          alert('Shopify ya está conectado con tu tienda mediante API');
+          return;
 
         default:
-          return alert('Plataforma no soportada');
+          alert('Plataforma no soportada');
+          return;
       }
 
       const width = 600;
@@ -289,28 +300,34 @@ export default function SocialConnections() {
   };
 
   const disconnectPlatform = async (platform) => {
-    if (!window.confirm(`¿Estás seguro de que deseas desconectar ${platform}? Tendrás que volver a conectar para usar esta plataforma.`)) {
-      return;
-    }
+    const ok = window.confirm(`¿Estás seguro de que deseas desconectar ${platform}? Tendrás que volver a conectar para usar esta plataforma.`);
+    if (!ok) return;
 
     try {
       setRefreshing(platform);
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
-      // WhatsApp vive en social_connections
       if (platform === 'whatsapp') {
-        await supabase
+        const { error: werr } = await supabase
           .from('social_connections')
           .update({ is_active: false })
           .eq('platform', 'whatsapp');
-      } else {
-        await supabase
-          .from('user_social_tokens')
-          .delete()
-          .eq('user_id', user.id)
-          .eq('platform', platform);
+
+        if (werr) throw werr;
+
+        alert('✅ whatsapp desconectado exitosamente');
+        await loadConnections();
+        return;
       }
+
+      const { error: derr } = await supabase
+        .from('user_social_tokens')
+        .delete()
+        .eq('user_id', user.id)
+        .eq('platform', platform);
+
+      if (derr) throw derr;
 
       alert(`✅ ${platform} desconectado exitosamente`);
       await loadConnections();
@@ -377,9 +394,9 @@ export default function SocialConnections() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {platforms.map((platform) => {
-          const connection = connections[platform.id];
+          const connection = connections[platform.id] || DEFAULT_CONNECTIONS[platform.id];
           const Icon = platform.icon;
-          const isConnected = connection.connected;
+          const isConnected = !!connection.connected;
           const expiresAt = connection.expires ? new Date(connection.expires) : null;
           const isExpiringSoon = expiresAt && (expiresAt - new Date()) < 2 * 60 * 60 * 1000;
 
@@ -469,7 +486,6 @@ export default function SocialConnections() {
                       <div className="w-3 h-3 bg-red-500 rounded-full"></div>
                       <span className="font-semibold text-red-600">Desconectado</span>
                     </div>
-
                     <button
                       onClick={() => connectPlatform(platform.id)}
                       className={`w-full bg-gradient-to-r ${platform.color} text-white py-2 px-4 rounded-lg hover:opacity-90 transition-opacity`}
@@ -493,11 +509,11 @@ export default function SocialConnections() {
           </li>
           <li className="flex items-start">
             <span className="mr-2">•</span>
-            <span><strong>Instagram/Facebook:</strong> Usa credenciales de Meta. Debes tener los callbacks en Supabase Functions.</span>
+            <span><strong>Instagram/Facebook:</strong> Usa las mismas credenciales de Meta (App ID + App Secret). Conecta ambas para publicar en ambas plataformas.</span>
           </li>
           <li className="flex items-start">
             <span className="mr-2">•</span>
-            <span><strong>YouTube:</strong> Requiere Google OAuth + callback funcionando.</span>
+            <span><strong>YouTube:</strong> Requiere Google Cloud con YouTube Data API v3 habilitada y OAuth funcionando.</span>
           </li>
           <li className="flex items-start">
             <span className="mr-2">•</span>
@@ -505,7 +521,7 @@ export default function SocialConnections() {
           </li>
           <li className="flex items-start">
             <span className="mr-2">•</span>
-            <span><strong>Shopify:</strong> Conectado mediante API para sincronización automática.</span>
+            <span><strong>Shopify:</strong> Conectado mediante API para sincronización automática de productos, órdenes e inventario.</span>
           </li>
         </ul>
       </div>
