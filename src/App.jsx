@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import Login from './components/Login';
 import MainApp from './components/MainApp';
+import OAuthCallback from './components/OAuthCallback';
 import { initWhatsAppStorage } from './lib/initStorage';
 
 function PrivateRoute({ children }) {
@@ -28,7 +29,12 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/dashboard" /> : <Login />} />
+
+      {/* ✅ RUTA PÚBLICA: OAuth callback (NO debe pasar por PrivateRoute) */}
+      <Route path="/oauth/callback" element={<OAuthCallback />} />
+
       <Route path="/" element={<Navigate to="/login" />} />
+
       <Route
         path="/*"
         element={
@@ -42,7 +48,6 @@ function AppRoutes() {
 }
 
 export default function App() {
-  // Inicializar Supabase Storage automáticamente al cargar la app
   useEffect(() => {
     initWhatsAppStorage().then(result => {
       if (result.success) {
