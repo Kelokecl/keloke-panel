@@ -1,7 +1,6 @@
 import React, { useEffect } from 'react';
 
 function parseHashParams(hash) {
-  // hash viene como "#access_token=...&expires_in=..."
   const clean = (hash || '').replace(/^#/, '');
   return new URLSearchParams(clean);
 }
@@ -11,40 +10,59 @@ export default function OAuthCallback() {
     const qs = new URLSearchParams(window.location.search);
     const hs = parseHashParams(window.location.hash);
 
-    // ✅ Soporta ambos estilos:
-    // - query params: ?success=true&platform=...&account=...
-    // - code: ?code=...&state=...
-    // - token hash: #access_token=...&expires_in=...&state=...
-    const success = qs.get('success') === 'true' || (!!hs.get('access_token') || !!qs.get('code'));
-    const platform = qs.get('platform') || qs.get('p') || hs.get('platform') || 'unknown';
+    const platform =
+      qs.get('platform') ||
+      qs.get('p') ||
+      hs.get('platform') ||
+      'unknown';
+
     const account = qs.get('account') || qs.get('account_name') || null;
 
     const code = qs.get('code');
     const state = qs.get('state') || hs.get('state');
+
     const access_token = hs.get('access_token');
     const expires_in = hs.get('expires_in');
 
-    const error = qs.get('error') || qs.get('error_description') || hs.get('error') || null;
+    const error =
+      qs.get('error') ||
+      qs.get('error_description') ||
+      hs.get('error') ||
+      null;
+
+    // success explícito, o inferido si viene code/token
+    const success =
+      qs.get('success') === 'true' ||
+      (!!code || !!access_token);
+
+    const message = {
+      type: 'OAUTH_RESULT',
+      success: !!success && !error,
+      platform,
+      account,
+      error,
+      code,
+      access_token,
+      expires_in,
+      state,
+    };
+
+    // Tu app (misma origin porque /oauth/callback vive en keloke-panel.vercel.app)
+    const targetOrigin = window.location.origin;
 
     if (window.opener && !window.opener.closed) {
-      const message = {
-        success: !!success && !error,
-        platform,
-        account,
-        error,
-        // extra data (para que tu app/edge function haga exchange/guardar token)
-        code,
-        access_token,
-        expires_in,
-        state,
-      };
+      try {
+        window.opener.postMessage(message, targetOrigin);
+      } catch (e) {
+        // fallback por si algo raro ocurre
+        window.opener.postMessage(message, '*');
+      }
 
-      const targetOrigin = window.location.origin; // tu app
-      window.opener.postMessage(message, targetOrigin);
-
-      setTimeout(() => window.close(), 500);
+      // Cerrar ASAP
+      setTimeout(() => window.close(), 150);
     } else {
-      setTimeout(() => window.close(), 2000);
+      // si el popup se abrió directo
+      setTimeout(() => window.close(), 1200);
     }
   }, []);
 
@@ -62,7 +80,7 @@ export default function OAuthCallback() {
           <h2 className="text-2xl font-bold text-gray-800 mb-2">Conectando…</h2>
           <p className="text-gray-600 mb-6">Estamos cerrando esta ventana automáticamente.</p>
           <div className="flex items-center justify-center">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-600"></div>
+            <div className="animate-spin rounded-full h-8 h-8 w-8 border-b-2 border-purple-600"></div>
             <span className="ml-3 text-gray-600">Cerrando…</span>
           </div>
         </div>
