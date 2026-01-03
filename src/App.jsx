@@ -28,11 +28,10 @@ function AppRoutes() {
 
   return (
     <Routes>
-      <Route path="/login" element={user ? <Navigate to="/dashboard" /> : <Login />} />
-
-      {/* ✅ RUTA PÚBLICA: OAuth callback (NO debe pasar por PrivateRoute) */}
+      {/* ✅ Callback público, no pasa por auth guard */}
       <Route path="/oauth/callback" element={<OAuthCallback />} />
 
+      <Route path="/login" element={user ? <Navigate to="/dashboard" /> : <Login />} />
       <Route path="/" element={<Navigate to="/login" />} />
 
       <Route
