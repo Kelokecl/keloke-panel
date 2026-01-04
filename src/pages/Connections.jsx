@@ -34,22 +34,21 @@ export default function Connections() {
   };
 
   // Listen oauth callback results
-  useEffect(() => {
-    const onMsg = (ev) => {
-      if (ev.origin !== window.location.origin) return;
-      if (!ev.data || !ev.data.type) return;
+ useEffect(() => {
+  const handler = (event) => {
+    if (event.data?.type !== "OAUTH_RESULT") return;
 
-      if (ev.data.type === "oauth_success") {
-        showToast(`✅ Conectado: ${ev.data.platform}`);
-      }
-      if (ev.data.type === "oauth_error") {
-        showToast(`❌ Error ${ev.data.platform}: ${ev.data.error}`);
-      }
-    };
+    if (event.data.success) {
+      refreshConnections(); // 🔁 vuelve a consultar user_social_tokens
+    } else {
+      alert(`Error al conectar ${event.data.platform}: ${event.data.error}`);
+    }
+  };
 
-    window.addEventListener("message", onMsg);
-    return () => window.removeEventListener("message", onMsg);
-  }, []);
+  window.addEventListener("message", handler);
+  return () => window.removeEventListener("message", handler);
+}, []);
+
 
   const connect = useCallback(async (platform) => {
     setLoading(true);
