@@ -1,8 +1,17 @@
 // src/pages/Connections.jsx
 import { useEffect, useState } from "react";
-import { supabase } from "../supabaseClient"; // <-- AJUSTA SI TU RUTA ES OTRA
+import { supabase } from "../supabaseClient";
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+
+/**
+ * Base64URL encode (sin padding, +/ por -_)
+ * Compatible con edge functions que esperan base64.
+ */
+function base64UrlEncode(str) {
+  const b64 = btoa(unescape(encodeURIComponent(str))); // UTF-8 safe
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
 
 export default function Connections() {
   const [loading, setLoading] = useState(false);
@@ -16,8 +25,6 @@ export default function Connections() {
 
       if (success) {
         alert(`✅ Conectado: ${platform}`);
-        // aquí puedes llamar a tu refresh real si tienes algo
-        // refreshConnections();
       } else {
         alert(`❌ Error al conectar ${platform}: ${error || "unknown"}`);
       }
@@ -27,7 +34,7 @@ export default function Connections() {
     return () => window.removeEventListener("message", handler);
   }, []);
 
-  // ✅ INICIO OAUTH (CLAVE) — CÓDIGO COMPLETO
+  // ✅ INICIO OAUTH (CLAVE) — COMPLETO
   const startOAuth = async (platform) => {
     try {
       setLoading(true);
@@ -41,23 +48,29 @@ export default function Connections() {
         return;
       }
 
-      // STATE va como JSON (NO base64)
-      const state = JSON.stringify({
+      /**
+       * 🔥 IMPORTANTÍSIMO:
+       * Tus Edge Functions están esperando state en base64.
+       * Por eso lo mandamos como base64url.
+       *
+       * Además agregamos app_origin (para postMessage seguro)
+       * y platform (por si la edge lo usa).
+       */
+      const stateObj = {
         user_id: userId,
         platform,
         ts: Date.now(),
-      });
+        app_origin: window.location.origin, // para postMessage targetOrigin
+      };
 
-      // OJO: estos nombres deben calzar con tus Edge Functions reales
-      // Si tus funciones se llaman:
-      // - instagram-oauth-callback
-      // - facebook-oauth-callback
-      // - google-oauth-callback
-      // entonces acá mapeamos:
+      const stateJson = JSON.stringify(stateObj);
+      const stateB64Url = base64UrlEncode(stateJson);
+
+      // Mapea tus Edge Functions reales
       const fnMap = {
         instagram: "instagram-oauth-callback",
         facebook: "facebook-oauth-callback",
-        youtube: "google-oauth-callback", // youtube usa google oauth
+        youtube: "google-oauth-callback",
         google: "google-oauth-callback",
       };
 
@@ -67,10 +80,13 @@ export default function Connections() {
         return;
       }
 
-      // Abrimos la Edge Function en popup
+      /**
+       * Abrimos la Edge Function en popup
+       * OJO: mandamos state base64url
+       */
       const popupUrl =
         `${SUPABASE_URL}/functions/v1/${fnName}` +
-        `?state=${encodeURIComponent(state)}`;
+        `?state=${encodeURIComponent(stateB64Url)}`;
 
       window.open(popupUrl, "_blank", "width=520,height=720");
     } catch (e) {
