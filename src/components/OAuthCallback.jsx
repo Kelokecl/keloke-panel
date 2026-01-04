@@ -19,13 +19,16 @@ export default function OAuthCallback() {
   const hs = useMemo(() => parseHashParams(window.location.hash), []);
 
   const payload = useMemo(() => {
-    const platform = qs.get("platform") || qs.get("p") || hs.get("platform") || "unknown";
+    const platform =
+      qs.get("platform") || qs.get("p") || hs.get("platform") || "unknown";
 
     const success =
       qs.get("success") === "true" ||
-      (!!hs.get("access_token") || !!qs.get("code"));
+      Boolean(hs.get("access_token")) ||
+      Boolean(qs.get("code"));
 
-    const account = qs.get("account") || qs.get("account_name") || null;
+    const account =
+      qs.get("account") || qs.get("account_name") || null;
 
     const code = qs.get("code");
     const stateRaw = qs.get("state") || hs.get("state");
@@ -40,10 +43,11 @@ export default function OAuthCallback() {
       hs.get("error") ||
       null;
 
-    const targetOrigin = stateObj?.app_origin || window.location.origin;
+    const targetOrigin =
+      stateObj?.app_origin || window.location.origin;
 
     return {
-      success: !!success && !error,
+      success: Boolean(success && !error),
       platform,
       account,
       error,
@@ -56,7 +60,6 @@ export default function OAuthCallback() {
   }, [qs, hs]);
 
   useEffect(() => {
-    // ✅ SIEMPRE mandar type: "OAUTH_RESULT" para que Connections.jsx lo capture
     const message = {
       type: "OAUTH_RESULT",
       success: payload.success,
@@ -69,20 +72,12 @@ export default function OAuthCallback() {
       state: payload.state,
     };
 
+    // ✅ Enviar mensaje al opener (Connections.jsx)
     if (window.opener && !window.opener.closed) {
-     window.opener.postMessage(
-      type: "OAUTH_RESULT",
-    success: payload.success,
-    platform: payload.platform,
-    account: payload.account,
-    error: payload.error,
-    code: payload.code,
-    access_token: payload.access_token,
-    expires_in: payload.expires_in,
-    state: payload.state,
-  },
-  "*"
-);
+      window.opener.postMessage(message, "*");
+      setTimeout(() => window.close(), 500);
+      return;
+    }
 
     // fallback si no hay opener
     setTimeout(() => window.close(), 1500);
@@ -104,28 +99,63 @@ export default function OAuthCallback() {
               }`}
             >
               {payload.success ? (
-                <svg className="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                <svg
+                  className="w-8 h-8 text-green-600"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M5 13l4 4L19 7"
+                  />
                 </svg>
               ) : (
-                <svg className="w-8 h-8 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                <svg
+                  className="w-8 h-8 text-red-600"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M6 18L18 6M6 6l12 12"
+                  />
                 </svg>
               )}
             </div>
           </div>
 
-          <h2 className="text-2xl font-bold text-gray-800 mb-2">{title}</h2>
-          <p className="text-gray-600 mb-6">{subtitle}</p>
+          <h2 className="text-2xl font-bold text-gray-800 mb-2">
+            {title}
+          </h2>
+          <p className="text-gray-600 mb-6">
+            {subtitle}
+          </p>
 
           <div className="text-xs text-gray-500 mb-4">
-            Plataforma: <span className="font-semibold">{payload.platform}</span>
-            {payload.account ? <> · Cuenta: <span className="font-semibold">{payload.account}</span></> : null}
+            Plataforma:{" "}
+            <span className="font-semibold">{payload.platform}</span>
+            {payload.account && (
+              <>
+                {" "}
+                · Cuenta:{" "}
+                <span className="font-semibold">
+                  {payload.account}
+                </span>
+              </>
+            )}
           </div>
 
           <div className="flex items-center justify-center">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-600"></div>
-            <span className="ml-3 text-gray-600">Cerrando…</span>
+            <span className="ml-3 text-gray-600">
+              Cerrando…
+            </span>
           </div>
         </div>
       </div>
