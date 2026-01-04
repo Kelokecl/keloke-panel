@@ -71,8 +71,7 @@ export default function OAuthCallback() {
 
     if (window.opener && !window.opener.closed) {
      window.opener.postMessage(
-  {
-    type: "OAUTH_RESULT",
+      type: "OAUTH_RESULT",
     success: payload.success,
     platform: payload.platform,
     account: payload.account,
