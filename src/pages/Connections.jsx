@@ -1,6 +1,6 @@
 // src/pages/Connections.jsx
 import { useEffect, useState } from "react";
-import { supabase } from "../lib/supabaseClient"; // <-- AJUSTA SI TU RUTA ES OTRA
+import { supabase } from "../supabaseClient"; // <-- AJUSTA SI TU RUTA ES OTRA
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 
