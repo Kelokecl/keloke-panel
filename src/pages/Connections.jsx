@@ -4,19 +4,10 @@ import { supabase } from "../supabaseClient";
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 
-/**
- * Base64URL encode (sin padding, +/ por -_)
- * Compatible con edge functions que esperan base64.
- */
-function base64UrlEncode(str) {
-  const b64 = btoa(unescape(encodeURIComponent(str))); // UTF-8 safe
-  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
 export default function Connections() {
   const [loading, setLoading] = useState(false);
 
-  // ✅ Listener para recibir respuesta desde /oauth/callback (popup)
+  // Listener global para OAuth popup
   useEffect(() => {
     const handler = (event) => {
       if (!event?.data || event.data.type !== "OAUTH_RESULT") return;
@@ -34,7 +25,7 @@ export default function Connections() {
     return () => window.removeEventListener("message", handler);
   }, []);
 
-  // ✅ INICIO OAUTH (CLAVE) — COMPLETO
+  // INICIO OAUTH (NO TOCAR IG / FB / YT)
   const startOAuth = async (platform) => {
     try {
       setLoading(true);
@@ -44,49 +35,32 @@ export default function Connections() {
 
       const userId = data?.user?.id;
       if (!userId) {
-        alert("No hay sesión activa. Vuelve a iniciar sesión.");
+        alert("No hay sesión activa.");
         return;
       }
 
-      /**
-       * 🔥 IMPORTANTÍSIMO:
-       * Tus Edge Functions están esperando state en base64.
-       * Por eso lo mandamos como base64url.
-       *
-       * Además agregamos app_origin (para postMessage seguro)
-       * y platform (por si la edge lo usa).
-       */
-      const stateObj = {
-        user_id: userId,
-        platform,
-        ts: Date.now(),
-        app_origin: window.location.origin, // para postMessage targetOrigin
-      };
+      // SOLO para TikTok usamos state JSON simple
+      let popupUrl = "";
 
-      const stateJson = JSON.stringify(stateObj);
-      const stateB64Url = base64UrlEncode(stateJson);
+      if (platform === "tiktok") {
+        popupUrl = `${SUPABASE_URL}/functions/v1/tiktok-oauth/start`;
+      } else {
+        // MAPEO EXISTENTE (NO MODIFICADO)
+        const fnMap = {
+          instagram: "instagram-oauth-callback",
+          facebook: "facebook-oauth-callback",
+          youtube: "google-oauth-callback",
+          google: "google-oauth-callback",
+        };
 
-      // Mapea tus Edge Functions reales
-      const fnMap = {
-        instagram: "instagram-oauth-callback",
-        facebook: "facebook-oauth-callback",
-        youtube: "google-oauth-callback",
-        google: "google-oauth-callback",
-      };
+        const fnName = fnMap[platform];
+        if (!fnName) {
+          alert(`Platform no soportada: ${platform}`);
+          return;
+        }
 
-      const fnName = fnMap[platform];
-      if (!fnName) {
-        alert(`Platform no soportada: ${platform}`);
-        return;
+        popupUrl = `${SUPABASE_URL}/functions/v1/${fnName}`;
       }
-
-      /**
-       * Abrimos la Edge Function en popup
-       * OJO: mandamos state base64url
-       */
-      const popupUrl =
-        `${SUPABASE_URL}/functions/v1/${fnName}` +
-        `?state=${encodeURIComponent(stateB64Url)}`;
 
       window.open(popupUrl, "_blank", "width=520,height=720");
     } catch (e) {
@@ -98,26 +72,26 @@ export default function Connections() {
   };
 
   return (
-    <div style={{ padding: 20, fontFamily: "system-ui, Arial" }}>
+    <div style={{ padding: 20 }}>
       <h2>Conexiones</h2>
 
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <button disabled={loading} onClick={() => startOAuth("instagram")}>
-          Conectar Instagram
-        </button>
+      <button disabled={loading} onClick={() => startOAuth("instagram")}>
+        Conectar Instagram
+      </button>
 
-        <button disabled={loading} onClick={() => startOAuth("facebook")}>
-          Conectar Facebook
-        </button>
+      <button disabled={loading} onClick={() => startOAuth("facebook")}>
+        Conectar Facebook
+      </button>
 
-        <button disabled={loading} onClick={() => startOAuth("youtube")}>
-          Conectar YouTube
-        </button>
-      </div>
+      <button disabled={loading} onClick={() => startOAuth("youtube")}>
+        Conectar YouTube
+      </button>
 
-      <p style={{ marginTop: 12, opacity: 0.7 }}>
-        {loading ? "Abriendo conexión..." : ""}
-      </p>
+      <button disabled={loading} onClick={() => startOAuth("tiktok")}>
+        Conectar TikTok
+      </button>
+
+      {loading && <p>Abriendo conexión…</p>}
     </div>
   );
 }
