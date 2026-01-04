@@ -1,187 +1,107 @@
 // src/pages/Connections.jsx
+import { useEffect, useState } from "react";
+import { supabase } from "../supabaseClient"; // <-- AJUSTA SI TU RUTA ES OTRA
 
-import React, { useCallback, useEffect, useState } from "react";
-import supabase from "../supabaseClient"; // <-- tu cliente supabase
-import { base64UrlEncode } from "../utils/base64url";
-
-function openPopup(url, title = "oauth", w = 520, h = 720) {
-  const dualScreenLeft = window.screenLeft ?? window.screenX;
-  const dualScreenTop = window.screenTop ?? window.screenY;
-
-  const width = window.innerWidth ?? document.documentElement.clientWidth ?? screen.width;
-  const height = window.innerHeight ?? document.documentElement.clientHeight ?? screen.height;
-
-  const left = width / 2 - w / 2 + dualScreenLeft;
-  const top = height / 2 - h / 2 + dualScreenTop;
-
-  const popup = window.open(
-    url,
-    title,
-    `scrollbars=yes,width=${w},height=${h},top=${top},left=${left}`
-  );
-
-  if (popup && popup.focus) popup.focus();
-  return popup;
-}
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 
 export default function Connections() {
   const [loading, setLoading] = useState(false);
-  const [toast, setToast] = useState(null);
 
-  const showToast = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3500);
-  };
+  // ✅ Listener para recibir respuesta desde /oauth/callback (popup)
+  useEffect(() => {
+    const handler = (event) => {
+      if (!event?.data || event.data.type !== "OAUTH_RESULT") return;
 
-  // Listen oauth callback results
- useEffect(() => {
-  const handler = (event) => {
-    if (event.data?.type !== "OAUTH_RESULT") return;
+      const { success, platform, error } = event.data;
 
-    if (event.data.success) {
-      refreshConnections(); // 🔁 vuelve a consultar user_social_tokens
-    } else {
-      alert(`Error al conectar ${event.data.platform}: ${event.data.error}`);
-    }
-  };
+      if (success) {
+        alert(`✅ Conectado: ${platform}`);
+        // aquí puedes llamar a tu refresh real si tienes algo
+        // refreshConnections();
+      } else {
+        alert(`❌ Error al conectar ${platform}: ${error || "unknown"}`);
+      }
+    };
 
-  window.addEventListener("message", handler);
-  return () => window.removeEventListener("message", handler);
-}, []);
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, []);
 
-
-  const connect = useCallback(async (platform) => {
-    setLoading(true);
+  // ✅ INICIO OAUTH (CLAVE) — CÓDIGO COMPLETO
+  const startOAuth = async (platform) => {
     try {
-      // 1) Ensure logged user
-      const { data: userData, error: userErr } = await supabase.auth.getUser();
-      if (userErr) throw userErr;
-      const user = userData?.user;
-      if (!user?.id) throw new Error("no_session");
+      setLoading(true);
 
-      // 2) Load oauth credentials for platform
-      const { data: credRow, error: credErr } = await supabase
-        .from("oauth_credentials")
-        .select("credentials")
-        .eq("platform", platform)
-        .single();
+      const { data, error } = await supabase.auth.getUser();
+      if (error) throw error;
 
-      if (credErr) throw credErr;
-      const creds = credRow?.credentials;
-      if (!creds?.client_id || !creds?.redirect_uri) {
-        throw new Error("missing_client_id_or_redirect_uri");
+      const userId = data?.user?.id;
+      if (!userId) {
+        alert("No hay sesión activa. Vuelve a iniciar sesión.");
+        return;
       }
 
-      // 3) Build state (MUST include user_id)
-      const stateObj = {
-        user_id: user.id,
+      // STATE va como JSON (NO base64)
+      const state = JSON.stringify({
+        user_id: userId,
         platform,
         ts: Date.now(),
-        nonce: (crypto?.randomUUID?.() || String(Math.random())).replace(/\./g, ""),
+      });
+
+      // OJO: estos nombres deben calzar con tus Edge Functions reales
+      // Si tus funciones se llaman:
+      // - instagram-oauth-callback
+      // - facebook-oauth-callback
+      // - google-oauth-callback
+      // entonces acá mapeamos:
+      const fnMap = {
+        instagram: "instagram-oauth-callback",
+        facebook: "facebook-oauth-callback",
+        youtube: "google-oauth-callback", // youtube usa google oauth
+        google: "google-oauth-callback",
       };
 
-      // store fallback
-      localStorage.setItem(`oauth_state_${platform}`, JSON.stringify(stateObj));
-
-      const state = base64UrlEncode(stateObj);
-
-      // 4) Build provider auth URL
-      let authUrl = "";
-
-      if (platform === "youtube") {
-        const scope = encodeURIComponent(
-          [
-            "https://www.googleapis.com/auth/youtube.readonly",
-            "https://www.googleapis.com/auth/youtube.upload",
-            "https://www.googleapis.com/auth/youtube",
-          ].join(" ")
-        );
-
-        authUrl =
-          "https://accounts.google.com/o/oauth2/v2/auth" +
-          `?client_id=${encodeURIComponent(creds.client_id)}` +
-          `&redirect_uri=${encodeURIComponent(creds.redirect_uri)}` +
-          `&response_type=code` +
-          `&access_type=offline` +
-          `&prompt=consent` +
-          `&scope=${scope}` +
-          `&include_granted_scopes=true` +
-          `&state=${encodeURIComponent(state)}`;
-      } else if (platform === "facebook") {
-        // Uses Meta OAuth dialog
-        // Make sure your app has correct Valid OAuth Redirect URIs set to creds.redirect_uri
-        const scope = encodeURIComponent(
-          ["public_profile", "pages_show_list", "pages_read_engagement"].join(",")
-        );
-
-        authUrl =
-          `https://www.facebook.com/v24.0/dialog/oauth` +
-          `?client_id=${encodeURIComponent(creds.client_id)}` +
-          `&redirect_uri=${encodeURIComponent(creds.redirect_uri)}` +
-          `&response_type=code` +
-          `&scope=${scope}` +
-          `&state=${encodeURIComponent(state)}`;
-      } else if (platform === "instagram") {
-        // For IG you often use same Meta app; depending on your flow you may use Facebook login
-        // Keep it consistent with your edge function expectations.
-        const scope = encodeURIComponent(
-          ["instagram_basic", "pages_show_list", "instagram_content_publish"].join(",")
-        );
-
-        authUrl =
-          `https://www.facebook.com/v24.0/dialog/oauth` +
-          `?client_id=${encodeURIComponent(creds.client_id)}` +
-          `&redirect_uri=${encodeURIComponent(creds.redirect_uri)}` +
-          `&response_type=code` +
-          `&scope=${scope}` +
-          `&state=${encodeURIComponent(state)}`;
-      } else {
-        throw new Error("unsupported_platform");
+      const fnName = fnMap[platform];
+      if (!fnName) {
+        alert(`Platform no soportada: ${platform}`);
+        return;
       }
 
-      openPopup(authUrl, `oauth_${platform}`);
-      showToast(`Abriendo login de ${platform}...`);
+      // Abrimos la Edge Function en popup
+      const popupUrl =
+        `${SUPABASE_URL}/functions/v1/${fnName}` +
+        `?state=${encodeURIComponent(state)}`;
+
+      window.open(popupUrl, "_blank", "width=520,height=720");
     } catch (e) {
-      showToast(`❌ ${e?.message || "Error"}`);
+      console.error(e);
+      alert(`Error iniciando OAuth: ${e?.message || e}`);
     } finally {
       setLoading(false);
     }
-  }, []);
+  };
 
   return (
-    <div style={{ padding: 18 }}>
-      <h2 style={{ margin: 0, marginBottom: 12 }}>Conexiones</h2>
+    <div style={{ padding: 20, fontFamily: "system-ui, Arial" }}>
+      <h2>Conexiones</h2>
 
-      {toast && (
-        <div
-          style={{
-            padding: "10px 12px",
-            borderRadius: 10,
-            background: "#111",
-            color: "#fff",
-            marginBottom: 12,
-            width: "fit-content",
-          }}
-        >
-          {toast}
-        </div>
-      )}
-
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        <button disabled={loading} onClick={() => connect("instagram")}>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <button disabled={loading} onClick={() => startOAuth("instagram")}>
           Conectar Instagram
         </button>
-        <button disabled={loading} onClick={() => connect("facebook")}>
+
+        <button disabled={loading} onClick={() => startOAuth("facebook")}>
           Conectar Facebook
         </button>
-        <button disabled={loading} onClick={() => connect("youtube")}>
+
+        <button disabled={loading} onClick={() => startOAuth("youtube")}>
           Conectar YouTube
         </button>
       </div>
 
-      <div style={{ marginTop: 14, opacity: 0.7, fontSize: 13 }}>
-        {loading ? "Procesando..." : "Listo."}
-      </div>
+      <p style={{ marginTop: 12, opacity: 0.7 }}>
+        {loading ? "Abriendo conexión..." : ""}
+      </p>
     </div>
   );
 }
