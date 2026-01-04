@@ -70,10 +70,20 @@ export default function OAuthCallback() {
     };
 
     if (window.opener && !window.opener.closed) {
-      window.opener.postMessage(message, payload.targetOrigin);
-      setTimeout(() => window.close(), 500);
-      return;
-    }
+     window.opener.postMessage(
+  {
+    type: "OAUTH_RESULT",
+    success: payload.success,
+    platform: payload.platform,
+    account: payload.account,
+    error: payload.error,
+    code: payload.code,
+    access_token: payload.access_token,
+    expires_in: payload.expires_in,
+    state: payload.state,
+  },
+  "*"
+);
 
     // fallback si no hay opener
     setTimeout(() => window.close(), 1500);
