@@ -4,10 +4,19 @@ import { supabase } from "../supabaseClient";
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 
+/**
+ * Base64URL encode (sin padding, +/ por -_)
+ * Compatible con edge functions que esperan base64.
+ */
+function base64UrlEncode(str) {
+  const b64 = btoa(unescape(encodeURIComponent(str))); // UTF-8 safe
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
 export default function Connections() {
   const [loading, setLoading] = useState(false);
 
-  // ✅ Listener para recibir respuesta desde el popup (Edge callback)
+  // ✅ Listener para recibir respuesta desde /oauth/callback (popup)
   useEffect(() => {
     const handler = (event) => {
       if (!event?.data || event.data.type !== "OAUTH_RESULT") return;
@@ -16,6 +25,7 @@ export default function Connections() {
 
       if (success) {
         alert(`✅ Conectado: ${platform}`);
+        // aquí normalmente refrescas estado (fetch tokens/connections)
       } else {
         alert(`❌ Error al conectar ${platform}: ${error || "unknown"}`);
       }
@@ -25,48 +35,30 @@ export default function Connections() {
     return () => window.removeEventListener("message", handler);
   }, []);
 
+  // ✅ INICIO OAUTH — PARA REDES QUE YA TIENES
   const startOAuth = async (platform) => {
     try {
       setLoading(true);
 
-      const { data: sessionData, error: sessionError } =
-        await supabase.auth.getSession();
-      if (sessionError) throw sessionError;
+      const { data, error } = await supabase.auth.getUser();
+      if (error) throw error;
 
-      const accessToken = sessionData?.session?.access_token;
-      if (!accessToken) {
+      const userId = data?.user?.id;
+      if (!userId) {
         alert("No hay sesión activa. Vuelve a iniciar sesión.");
         return;
       }
 
-      // ✅ TikTok: SIEMPRE inicia desde la Edge Function /start
-      if (platform === "tiktok") {
-        const startUrl = `${SUPABASE_URL}/functions/v1/tiktok-oauth/start`;
+      const stateObj = {
+        user_id: userId,
+        platform,
+        ts: Date.now(),
+        app_origin: window.location.origin,
+      };
 
-        const res = await fetch(startUrl, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            app_origin: window.location.origin, // para postMessage seguro
-          }),
-        });
+      const stateJson = JSON.stringify(stateObj);
+      const stateB64Url = base64UrlEncode(stateJson);
 
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || !data?.auth_url) {
-          throw new Error(
-            data?.error ||
-              `TikTok start failed (${res.status}). Revisa Edge Function logs.`
-          );
-        }
-
-        window.open(data.auth_url, "_blank", "width=520,height=720");
-        return;
-      }
-
-      // ✅ Resto de plataformas (igual como lo tenías)
       const fnMap = {
         instagram: "instagram-oauth-callback",
         facebook: "facebook-oauth-callback",
@@ -80,11 +72,41 @@ export default function Connections() {
         return;
       }
 
-      const popupUrl = `${SUPABASE_URL}/functions/v1/${fnName}`;
+      const popupUrl =
+        `${SUPABASE_URL}/functions/v1/${fnName}` +
+        `?state=${encodeURIComponent(stateB64Url)}`;
+
       window.open(popupUrl, "_blank", "width=520,height=720");
     } catch (e) {
       console.error(e);
       alert(`Error iniciando OAuth: ${e?.message || e}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ✅ TIKTOK: NO abrir TikTok directo.
+  // Abrimos nuestro popup interno /oauth/tiktok-start que llama a la Edge Function con Authorization.
+  const startTikTokOAuth = async () => {
+    try {
+      setLoading(true);
+
+      // Validar que hay sesión (si no, el popup no podrá obtener token)
+      const { data } = await supabase.auth.getSession();
+      const accessToken = data?.session?.access_token;
+      if (!accessToken) {
+        alert("No hay sesión activa. Inicia sesión en el panel y vuelve a intentar.");
+        return;
+      }
+
+      window.open(
+        `${window.location.origin}/oauth/tiktok-start`,
+        "_blank",
+        "width=520,height=720"
+      );
+    } catch (e) {
+      console.error(e);
+      alert(`Error iniciando TikTok OAuth: ${e?.message || e}`);
     } finally {
       setLoading(false);
     }
@@ -107,7 +129,8 @@ export default function Connections() {
           Conectar YouTube
         </button>
 
-        <button disabled={loading} onClick={() => startOAuth("tiktok")}>
+        {/* ✅ TikTok */}
+        <button disabled={loading} onClick={startTikTokOAuth}>
           Conectar TikTok
         </button>
       </div>
