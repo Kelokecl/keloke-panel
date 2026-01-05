@@ -6,7 +6,7 @@ import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import Login from "./components/Login";
 import MainApp from "./components/MainApp";
 import OAuthCallback from "./components/OAuthCallback";
-import OAuthTikTokStart from "./pages/OAuthTikTokStart"; // ✅ NUEVO: TikTok Start
+import OAuthTikTokStart from "./components/OAuthTikTokStart"; // ✅ NUEVO: TikTok Start
 import { initWhatsAppStorage } from "./lib/initStorage";
 
 function PrivateRoute({ children }) {
