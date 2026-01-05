@@ -1,6 +1,6 @@
 // src/pages/Connections.jsx
 import { useEffect, useState } from "react";
-import { supabase } from "../supabaseClient";
+import { supabase } from "../lib/supabaseClient"; // ✅ este es el correcto en tu repo
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 
@@ -85,23 +85,26 @@ export default function Connections() {
     }
   };
 
-  // ✅ TIKTOK: NO abrir TikTok directo.
-  // Abrimos nuestro popup interno /oauth/tiktok-start que llama a la Edge Function con Authorization.
+  // ✅ TIKTOK: SIEMPRE abrir la ruta interna (NO TikTok directo)
+  // Esta ruta /oauth/tiktok-start es pública (en App.jsx) y ahí se hace el fetch a la edge /start con Authorization.
   const startTikTokOAuth = async () => {
     try {
       setLoading(true);
 
-      // Validar que hay sesión (si no, el popup no podrá obtener token)
-      const { data } = await supabase.auth.getSession();
+      // Solo validamos que exista sesión antes de abrir el popup (para no abrirlo en vano)
+      const { data, error } = await supabase.auth.getSession();
+      if (error) throw error;
+
       const accessToken = data?.session?.access_token;
       if (!accessToken) {
         alert("No hay sesión activa. Inicia sesión en el panel y vuelve a intentar.");
         return;
       }
 
+      // ✅ abrir popup a tu app, NO a tiktok.com
       window.open(
         `${window.location.origin}/oauth/tiktok-start`,
-        "_blank",
+        "tiktok_oauth",
         "width=520,height=720"
       );
     } catch (e) {
