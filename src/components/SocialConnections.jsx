@@ -1,3 +1,4 @@
+// src/components/SocialConnections.jsx
 import React, { useEffect, useState, useRef } from 'react';
 import { Instagram, Facebook, Youtube, Music2, MessageCircle, ShoppingBag, RefreshCw } from 'lucide-react';
 import { supabase } from '../lib/supabase';
@@ -31,7 +32,6 @@ export default function SocialConnections() {
   const [refreshing, setRefreshing] = useState(null);
 
   const oauthWindowRef = useRef(null);
-
   const APP_ORIGIN = typeof window !== 'undefined' ? window.location.origin : '';
 
   console.log('🚀 SocialConnections OK — Meta OAuth', META_OAUTH_VERSION);
@@ -40,7 +40,6 @@ export default function SocialConnections() {
     loadConnections();
 
     const handleMessage = (event) => {
-      // Solo aceptar mensajes desde tu propio dominio (callback corre en keloke-panel.vercel.app)
       if (APP_ORIGIN && event.origin !== APP_ORIGIN) return;
 
       const data = safeParseJson(event.data) ?? event.data;
@@ -49,7 +48,6 @@ export default function SocialConnections() {
       if (data?.success === true) {
         alert(`✅ ${data.platform} conectado exitosamente${data.account ? ': ' + data.account : ''}`);
 
-        // Intentar cerrar popup si sigue abierto (por si window.close fue bloqueado)
         try {
           if (oauthWindowRef.current && !oauthWindowRef.current.closed) oauthWindowRef.current.close();
         } catch {
@@ -160,150 +158,143 @@ export default function SocialConnections() {
   };
 
   const connectPlatform = async (platform) => {
-  try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) {
-      alert('Debes iniciar sesión primero');
-      return;
-    }
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        alert('Debes iniciar sesión primero');
+        return;
+      }
 
-    // ✅ FIX TIKTOK (CLAVE): NO abrir TikTok directo.
-    // Abrimos nuestra ruta interna /oauth/tiktok-start (misma app),
-    // que es la que llama a la Edge Function /tiktok-oauth/start con Authorization.
-    if (platform === 'tiktok') {
+      // ✅ TikTok: NO abrir TikTok directo (ESO ES LO QUE TE ROMPE)
+      if (platform === 'tiktok') {
+        const width = 600;
+        const height = 700;
+        const left = window.screen.width / 2 - width / 2;
+        const top = window.screen.height / 2 - height / 2;
+
+        const win = window.open(
+          `${window.location.origin}/oauth/tiktok-start`,
+          'oauth_tiktok',
+          `width=${width},height=${height},left=${left},top=${top}`
+        );
+
+        oauthWindowRef.current = win;
+        return;
+      }
+
+      const { data: row, error: credErr } = await supabase
+        .from('oauth_credentials')
+        .select('credentials')
+        .eq('platform', platform)
+        .single();
+
+      if (credErr || !row?.credentials) {
+        console.error('oauth_credentials error:', credErr);
+        alert('Credenciales no configuradas para esta plataforma');
+        return;
+      }
+
+      const credentials = row.credentials;
+      const state = JSON.stringify({ user_id: user.id, app_origin: window.location.origin });
+      let authUrl = '';
+
+      const metaAppId =
+        credentials.client_id ||
+        credentials.app_id ||
+        credentials.appId ||
+        credentials.META_APP_ID;
+
+      switch (platform) {
+        case 'instagram': {
+          if (!metaAppId) {
+            alert('❌ Falta App ID de Meta en oauth_credentials (instagram).');
+            return;
+          }
+          const igScopes = 'instagram_basic';
+          authUrl =
+            `https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth` +
+            `?client_id=${encodeURIComponent(metaAppId)}` +
+            `&redirect_uri=${encodeURIComponent(credentials.redirect_uri)}` +
+            `&scope=${encodeURIComponent(igScopes)}` +
+            `&response_type=code` +
+            `&state=${encodeURIComponent(state)}`;
+          break;
+        }
+
+        case 'facebook': {
+          if (!metaAppId) {
+            alert('❌ Falta App ID de Meta en oauth_credentials (facebook).');
+            return;
+          }
+          const fbScopes = 'public_profile';
+          authUrl =
+            `https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth` +
+            `?client_id=${encodeURIComponent(metaAppId)}` +
+            `&redirect_uri=${encodeURIComponent(credentials.redirect_uri)}` +
+            `&scope=${encodeURIComponent(fbScopes)}` +
+            `&response_type=code` +
+            `&state=${encodeURIComponent(state)}`;
+          break;
+        }
+
+        case 'youtube': {
+          if (!credentials.client_id) {
+            alert('❌ Falta GOOGLE client_id en oauth_credentials (youtube).');
+            return;
+          }
+          const scopes = encodeURIComponent(
+            'https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.force-ssl'
+          );
+          authUrl =
+            `https://accounts.google.com/o/oauth2/v2/auth` +
+            `?client_id=${encodeURIComponent(credentials.client_id)}` +
+            `&redirect_uri=${encodeURIComponent(credentials.redirect_uri)}` +
+            `&scope=${scopes}` +
+            `&response_type=code` +
+            `&access_type=offline` +
+            `&prompt=consent` +
+            `&include_granted_scopes=true` +
+            `&state=${encodeURIComponent(state)}`;
+          break;
+        }
+
+        case 'whatsapp': {
+          if (!metaAppId) {
+            alert('❌ Falta App ID de Meta en oauth_credentials (whatsapp).');
+            return;
+          }
+          const whatsappScopes = 'whatsapp_business_management,whatsapp_business_messaging';
+          authUrl =
+            `https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth` +
+            `?client_id=${encodeURIComponent(metaAppId)}` +
+            `&redirect_uri=${encodeURIComponent(credentials.redirect_uri)}` +
+            `&scope=${encodeURIComponent(whatsappScopes)}` +
+            `&response_type=token` +
+            `&state=${encodeURIComponent(state)}`;
+          break;
+        }
+
+        case 'shopify':
+          alert('Shopify ya está conectado con tu tienda mediante API');
+          return;
+
+        default:
+          alert('Plataforma no soportada');
+          return;
+      }
+
       const width = 600;
       const height = 700;
       const left = window.screen.width / 2 - width / 2;
       const top = window.screen.height / 2 - height / 2;
 
-      const win = window.open(
-        `${window.location.origin}/oauth/tiktok-start`,
-        'oauth',
-        `width=${width},height=${height},left=${left},top=${top}`
-      );
-
+      const win = window.open(authUrl, 'oauth', `width=${width},height=${height},left=${left},top=${top}`);
       oauthWindowRef.current = win;
-      return;
+    } catch (e) {
+      console.error('Error connecting platform:', e);
+      alert('Error al conectar la plataforma');
     }
-
-    // ⬇️ Todo lo demás queda EXACTAMENTE igual (IG/FB/YT/WhatsApp/Shopify)
-    const { data: row, error: credErr } = await supabase
-      .from('oauth_credentials')
-      .select('credentials')
-      .eq('platform', platform)
-      .single();
-
-    if (credErr || !row?.credentials) {
-      console.error('oauth_credentials error:', credErr);
-      alert('Credenciales no configuradas para esta plataforma');
-      return;
-    }
-
-    const credentials = row.credentials;
-
-    // ✅ State robusto
-    const state = JSON.stringify({ user_id: user.id, app_origin: window.location.origin });
-
-    let authUrl = '';
-
-    // ✅ Meta app id con más variantes de key
-    const metaAppId =
-      credentials.client_id ||
-      credentials.app_id ||
-      credentials.appId ||
-      credentials.META_APP_ID;
-
-    switch (platform) {
-      case 'instagram': {
-        if (!metaAppId) {
-          alert('❌ Falta App ID de Meta en oauth_credentials (instagram).');
-          return;
-        }
-        const igScopes = 'instagram_basic';
-        authUrl =
-          `https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth` +
-          `?client_id=${encodeURIComponent(metaAppId)}` +
-          `&redirect_uri=${encodeURIComponent(credentials.redirect_uri)}` +
-          `&scope=${encodeURIComponent(igScopes)}` +
-          `&response_type=code` +
-          `&state=${encodeURIComponent(state)}`;
-        break;
-      }
-
-      case 'facebook': {
-        if (!metaAppId) {
-          alert('❌ Falta App ID de Meta en oauth_credentials (facebook).');
-          return;
-        }
-        const fbScopes = 'public_profile';
-        authUrl =
-          `https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth` +
-          `?client_id=${encodeURIComponent(metaAppId)}` +
-          `&redirect_uri=${encodeURIComponent(credentials.redirect_uri)}` +
-          `&scope=${encodeURIComponent(fbScopes)}` +
-          `&response_type=code` +
-          `&state=${encodeURIComponent(state)}`;
-        break;
-      }
-
-      case 'youtube': {
-        if (!credentials.client_id) {
-          alert('❌ Falta GOOGLE client_id en oauth_credentials (youtube).');
-          return;
-        }
-        const scopes = encodeURIComponent(
-          'https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.force-ssl'
-        );
-        authUrl =
-          `https://accounts.google.com/o/oauth2/v2/auth` +
-          `?client_id=${encodeURIComponent(credentials.client_id)}` +
-          `&redirect_uri=${encodeURIComponent(credentials.redirect_uri)}` +
-          `&scope=${scopes}` +
-          `&response_type=code` +
-          `&access_type=offline` +
-          `&prompt=consent` +
-          `&include_granted_scopes=true` +
-          `&state=${encodeURIComponent(state)}`;
-        break;
-      }
-
-      case 'whatsapp': {
-        if (!metaAppId) {
-          alert('❌ Falta App ID de Meta en oauth_credentials (whatsapp).');
-          return;
-        }
-        const whatsappScopes = 'whatsapp_business_management,whatsapp_business_messaging';
-        authUrl =
-          `https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth` +
-          `?client_id=${encodeURIComponent(metaAppId)}` +
-          `&redirect_uri=${encodeURIComponent(credentials.redirect_uri)}` +
-          `&scope=${encodeURIComponent(whatsappScopes)}` +
-          `&response_type=token` +
-          `&state=${encodeURIComponent(state)}`;
-        break;
-      }
-
-      case 'shopify':
-        alert('Shopify ya está conectado con tu tienda mediante API');
-        return;
-
-      default:
-        alert('Plataforma no soportada');
-        return;
-    }
-
-    const width = 600;
-    const height = 700;
-    const left = window.screen.width / 2 - width / 2;
-    const top = window.screen.height / 2 - height / 2;
-
-    const win = window.open(authUrl, 'oauth', `width=${width},height=${height},left=${left},top=${top}`);
-    oauthWindowRef.current = win;
-  } catch (e) {
-    console.error('Error connecting platform:', e);
-    alert('Error al conectar la plataforma');
-  }
-};
+  };
 
   const refreshWhatsAppToken = async () => {
     setRefreshing('whatsapp');
@@ -386,6 +377,11 @@ export default function SocialConnections() {
     { id: 'shopify', name: 'Shopify', icon: ShoppingBag, color: 'from-green-700 to-green-500', account: 'csn703-10.myshopify.com' },
   ];
 
+  // (resto del render igual que tu archivo)
+  // ... NO CAMBIADO ...
+  // Por brevedad, deja el resto tal cual lo tienes.
+  // -------------------------------------------------
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -439,10 +435,7 @@ export default function SocialConnections() {
           const isExpiringSoon = expiresAt && (expiresAt - new Date()) < 2 * 60 * 60 * 1000;
 
           return (
-            <div
-              key={platform.id}
-              className="bg-white rounded-xl shadow-lg overflow-hidden hover:shadow-xl transition-shadow"
-            >
+            <div key={platform.id} className="bg-white rounded-xl shadow-lg overflow-hidden hover:shadow-xl transition-shadow">
               <div className={`bg-gradient-to-r ${platform.color} p-6 text-white`}>
                 <div className="flex items-center justify-between mb-4">
                   <Icon className="w-12 h-12" />
