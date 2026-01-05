@@ -1,61 +1,58 @@
-// src/pages/OAuthTikTokStart.jsx
-import { useEffect } from "react";
-import { supabase } from "../lib/supabaseClient";
+import React, { useEffect, useState } from "react";
+import { supabase } from "../lib/supabase";
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 
 export default function OAuthTikTokStart() {
+  const [msg, setMsg] = useState("Conectando TikTok…");
+
   useEffect(() => {
     (async () => {
       try {
-        const { data: sessionData, error: sErr } = await supabase.auth.getSession();
-        if (sErr) throw sErr;
+        const { data } = await supabase.auth.getSession();
+        const token = data?.session?.access_token;
 
-        const accessToken = sessionData?.session?.access_token;
-        if (!accessToken) {
-          throw new Error("No hay sesión activa. Inicia sesión en el panel y reintenta.");
+        if (!token) {
+          setMsg("No hay sesión activa. Cierra esta ventana e inicia sesión nuevamente.");
+          return;
         }
 
-        // Llamamos a la Edge Function /start con Authorization
-        const startUrl =
-          `${SUPABASE_URL}/functions/v1/tiktok-oauth/start` +
-          `?app_origin=${encodeURIComponent(window.location.origin)}`;
+        setMsg("Abriendo login de TikTok…");
 
-        const res = await fetch(startUrl, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-          },
-          redirect: "manual",
-        });
+        const res = await fetch(
+          `${SUPABASE_URL}/functions/v1/tiktok-oauth/start?app_origin=${encodeURIComponent(window.location.origin)}`,
+          {
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
 
-        // Si el navegador bloquea leer Location por CORS, igual TikTok no debería fallar:
-        // pero en Edge, al ser redirect 302, normalmente Location viene acá.
-        const location = res.headers.get("Location");
-        if (!location) {
-          const txt = await res.text().catch(() => "");
-          throw new Error(`No se recibió redirect desde /start. Status=${res.status}. ${txt}`);
+        const json = await res.json();
+
+        if (!res.ok || !json?.url) {
+          console.error("TikTok start error:", json);
+          setMsg("Error iniciando TikTok OAuth. Revisa consola.");
+          return;
         }
 
-        // Redirige el popup a TikTok (acá recién aparece el login)
-        window.location.href = location;
+        // redirige el popup al login de TikTok
+        window.location.href = json.url;
       } catch (e) {
         console.error(e);
-        if (window.opener) {
-          window.opener.postMessage(
-            { type: "OAUTH_RESULT", platform: "tiktok", success: false, error: e?.message || String(e) },
-            "*"
-          );
-        }
-        window.close();
+        setMsg(`Error: ${e?.message || e}`);
       }
     })();
   }, []);
 
   return (
-    <div style={{ fontFamily: "system-ui", padding: 16 }}>
-      <h3>Conectando TikTok…</h3>
-      <p>Se abrirá el login de TikTok en este popup.</p>
+    <div style={{ padding: 20, fontFamily: "system-ui, Arial" }}>
+      <h3>{msg}</h3>
+      <p style={{ opacity: 0.7 }}>
+        Esta ventana se cerrará automáticamente cuando TikTok termine el proceso.
+      </p>
     </div>
   );
 }
