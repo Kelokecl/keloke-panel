@@ -6,7 +6,7 @@ import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import Login from "./components/Login";
 import MainApp from "./components/MainApp";
 import OAuthCallback from "./components/OAuthCallback";
-import OAuthTikTokStart from "./pages/OAuthTikTokStart";
+import OAuthTikTokStart from "./components/OAuthTikTokStart"; // ✅ NUEVO
 import { initWhatsAppStorage } from "./lib/initStorage";
 
 function PrivateRoute({ children }) {
@@ -37,17 +37,20 @@ function AppRoutes() {
 
   return (
     <Routes>
-      {/* ✅ PUBLICAS: NO deben requerir login */}
+      {/* ✅ PUBLICAS */}
       <Route path="/oauth/callback" element={<OAuthCallback />} />
-      <Route path="/oauth/tiktok-start" element={<OAuthTikTokStart />} />
+      <Route path="/oauth/tiktok-start" element={<OAuthTikTokStart />} /> {/* ✅ NUEVO */}
 
       {/* Login */}
-      <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <Login />} />
+      <Route
+        path="/login"
+        element={user ? <Navigate to="/dashboard" replace /> : <Login />}
+      />
 
       {/* Root */}
       <Route path="/" element={<Navigate to={user ? "/dashboard" : "/login"} replace />} />
 
-      {/* Todo lo demás protegido */}
+      {/* Protegidas */}
       <Route
         path="/*"
         element={
@@ -63,8 +66,11 @@ function AppRoutes() {
 export default function App() {
   useEffect(() => {
     initWhatsAppStorage().then((result) => {
-      if (result.success) console.log("✅ Storage inicializado correctamente");
-      else console.warn("⚠️ No se pudo inicializar storage:", result.error);
+      if (result.success) {
+        console.log("✅ Storage inicializado correctamente");
+      } else {
+        console.warn("⚠️ No se pudo inicializar storage:", result.error);
+      }
     });
   }, []);
 
