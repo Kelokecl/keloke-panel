@@ -37,12 +37,17 @@ function AppRoutes() {
 
   return (
     <Routes>
-      {/* ✅ PUBLICAS SIEMPRE */}
+      {/* ✅ PUBLICA SIEMPRE: Callback OAuth (popup) NO debe requerir login */}
       <Route path="/oauth/callback" element={<OAuthCallback />} />
+
+      {/* ✅ PUBLICA SIEMPRE: Start TikTok (popup) */}
       <Route path="/oauth/tiktok-start" element={<OAuthTikTokStart />} />
 
       {/* Login */}
-      <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <Login />} />
+      <Route
+        path="/login"
+        element={user ? <Navigate to="/dashboard" replace /> : <Login />}
+      />
 
       {/* Root */}
       <Route path="/" element={<Navigate to={user ? "/dashboard" : "/login"} replace />} />
