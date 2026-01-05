@@ -6,7 +6,7 @@ import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import Login from "./components/Login";
 import MainApp from "./components/MainApp";
 import OAuthCallback from "./components/OAuthCallback";
-import OAuthTikTokStart from "./components/OAuthTikTokStart";
+import OAuthTikTokStart from "./pages/OAuthTikTokStart";
 import { initWhatsAppStorage } from "./lib/initStorage";
 
 function PrivateRoute({ children }) {
@@ -37,17 +37,12 @@ function AppRoutes() {
 
   return (
     <Routes>
-      {/* ✅ PUBLICA SIEMPRE: Callback OAuth (popup) NO debe requerir login */}
+      {/* ✅ PUBLICAS: NO deben requerir login */}
       <Route path="/oauth/callback" element={<OAuthCallback />} />
-
-      {/* ✅ PUBLICA SIEMPRE: Start TikTok (popup) */}
       <Route path="/oauth/tiktok-start" element={<OAuthTikTokStart />} />
 
       {/* Login */}
-      <Route
-        path="/login"
-        element={user ? <Navigate to="/dashboard" replace /> : <Login />}
-      />
+      <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <Login />} />
 
       {/* Root */}
       <Route path="/" element={<Navigate to={user ? "/dashboard" : "/login"} replace />} />
