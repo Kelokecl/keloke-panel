@@ -74,10 +74,10 @@ export default function OAuthCallback() {
 
     // ✅ Enviar mensaje al opener (Connections.jsx)
     if (window.opener && !window.opener.closed) {
-      window.opener.postMessage(message, "*");
-      setTimeout(() => window.close(), 500);
-      return;
-    }
+  window.opener.postMessage(message, payload.targetOrigin || "*");
+  setTimeout(() => window.close(), 500);
+  return;
+}
 
     // fallback si no hay opener
     setTimeout(() => window.close(), 1500);
