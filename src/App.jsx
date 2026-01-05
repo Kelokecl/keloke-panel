@@ -6,7 +6,7 @@ import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import Login from "./components/Login";
 import MainApp from "./components/MainApp";
 import OAuthCallback from "./components/OAuthCallback";
-import OAuthTikTokStart from "./components/OAuthTikTokStart"; // ✅ NUEVO: TikTok Start
+import OAuthTikTokStart from "./components/OAuthTikTokStart";
 import { initWhatsAppStorage } from "./lib/initStorage";
 
 function PrivateRoute({ children }) {
@@ -37,24 +37,12 @@ function AppRoutes() {
 
   return (
     <Routes>
-      {/* ✅ PUBLICA SIEMPRE: Callback OAuth (popup) NO debe requerir login */}
+      {/* ✅ PUBLICAS SIEMPRE */}
       <Route path="/oauth/callback" element={<OAuthCallback />} />
-
-      {/* ✅ NUEVO: TikTok Start (DEBE estar logueado porque necesita tu sesión para pedir el JWT) */}
-      <Route
-        path="/oauth/tiktok-start"
-        element={
-          <PrivateRoute>
-            <OAuthTikTokStart />
-          </PrivateRoute>
-        }
-      />
+      <Route path="/oauth/tiktok-start" element={<OAuthTikTokStart />} />
 
       {/* Login */}
-      <Route
-        path="/login"
-        element={user ? <Navigate to="/dashboard" replace /> : <Login />}
-      />
+      <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <Login />} />
 
       {/* Root */}
       <Route path="/" element={<Navigate to={user ? "/dashboard" : "/login"} replace />} />
@@ -75,11 +63,8 @@ function AppRoutes() {
 export default function App() {
   useEffect(() => {
     initWhatsAppStorage().then((result) => {
-      if (result.success) {
-        console.log("✅ Storage inicializado correctamente");
-      } else {
-        console.warn("⚠️ No se pudo inicializar storage:", result.error);
-      }
+      if (result.success) console.log("✅ Storage inicializado correctamente");
+      else console.warn("⚠️ No se pudo inicializar storage:", result.error);
     });
   }, []);
 
