@@ -1,17 +1,28 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { 
-  FileText, Image, Video, MessageSquare, Sparkles, 
+import {
+  FileText, Image, Video, MessageSquare, Sparkles,
   Download, Copy, Share2, Eye, Wand2, RefreshCw,
   TrendingUp, Target, Users, Zap
 } from 'lucide-react';
 
+/**
+ * ContentGenerator.jsx (FULL)
+ * - UI se mantiene como la tuya.
+ * - Generación: llama a Supabase Edge Function "generate-content" (sin axios).
+ * - Persistencia: guarda en generated_content.
+ * - Publicación: llama a Edge Function "publish-content" (tokens/credenciales deben vivir en backend).
+ * - TikTok: placeholder (no publica).
+ */
+
 export default function ContentGenerator() {
   const [loading, setLoading] = useState(false);
+  const [publishLoading, setPublishLoading] = useState(false);
+
   const [products, setProducts] = useState([]);
   const [generatedContent, setGeneratedContent] = useState(null);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
-  
+
   // Estados del formulario
   const [campaignType, setCampaignType] = useState('organic');
   const [platform, setPlatform] = useState('instagram');
@@ -23,105 +34,439 @@ export default function ContentGenerator() {
   const [interests, setInterests] = useState('');
   const [tone, setTone] = useState('profesional');
 
+  // Para reintentos/regeneración
+  const [lastRequest, setLastRequest] = useState(null);
+
+  // Mensajes UI
+  const [statusMsg, setStatusMsg] = useState(null); // {type:'ok'|'err'|'info', text:''}
+
   useEffect(() => {
     loadProducts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const loadProducts = async () => {
-    const { data, error } = await supabase
-      .from('products')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(20);
-    
-    if (data) setProducts(data);
+  const platformMeta = useMemo(() => ([
+    { id: 'instagram', name: 'Instagram', emoji: '📸' },
+    { id: 'tiktok', name: 'TikTok', emoji: '🎵' },
+    { id: 'facebook', name: 'Facebook', emoji: '👥' },
+    { id: 'youtube', name: 'YouTube', emoji: '▶️' },
+    { id: 'whatsapp', name: 'WhatsApp', emoji: '💬' }
+  ]), []);
+
+  const clearStatusSoon = (ms = 2500) => {
+    window.setTimeout(() => setStatusMsg(null), ms);
   };
 
-  const generateContent = async () => {
-    setLoading(true);
-    
+  const loadProducts = async () => {
     try {
-      // Simulación de generación con IA (aquí integrarías OpenAI/Claude)
-      const product = products.find(p => p.id === selectedProduct) || products[0];
-      
-      const contentData = {
-        campaign_type: campaignType,
-        platform: platform,
-        content_type: contentType,
-        product_id: product?.id,
-        product_name: product?.name || 'Producto Keloke',
-        strategy: strategy,
-        ab_variant: campaignType === 'paid' ? abVariant : null,
-        age_range: campaignType === 'paid' ? ageRange : null,
-        interests: campaignType === 'paid' ? interests : null,
-        tone: tone,
-        generated_at: new Date().toISOString()
-      };
+      const { data, error } = await supabase
+        .from('products')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(50);
 
-      // Generar contenido basado en estrategia
-      const content = generateContentByStrategy(contentData, product);
-      
-      // Guardar en Supabase
-      const { data: savedContent, error } = await supabase
+      if (error) throw error;
+      if (data) setProducts(data);
+    } catch (e) {
+      console.error('loadProducts error:', e);
+      setStatusMsg({ type: 'err', text: 'No pude cargar productos desde Supabase.' });
+      clearStatusSoon();
+    }
+  };
+
+  const buildPayload = (product) => {
+    return {
+      campaign_type: campaignType,
+      platform,
+      content_type: contentType,
+      product_id: product?.id ?? null,
+      product_name: product?.name || 'Producto Keloke',
+      product_price: product?.price || null,
+      strategy,
+      tone,
+      ab_variant: campaignType === 'paid' ? abVariant : null,
+      age_range: campaignType === 'paid' ? ageRange : null,
+      interests: campaignType === 'paid' ? interests : null,
+      generated_at: new Date().toISOString(),
+    };
+  };
+
+  const normalizeGenerated = (raw, payload, product) => {
+    // Si tu Edge Function devuelve JSON con campos diferentes, aquí lo normalizamos.
+    // Esperado:
+    // { title, body, caption, hashtags, cta, preview_url, asset_url?, asset_type? }
+    const fallback = generateContentByStrategy(payload, product);
+
+    if (!raw || typeof raw !== 'object') return fallback;
+
+    return {
+      title: raw.title ?? fallback.title,
+      body: raw.body ?? fallback.body,
+      caption: raw.caption ?? fallback.caption,
+      hashtags: raw.hashtags ?? fallback.hashtags,
+      cta: raw.cta ?? fallback.cta,
+      preview_url: raw.preview_url ?? fallback.preview_url,
+      asset_url: raw.asset_url ?? null,        // opcional (video/imagen real)
+      asset_type: raw.asset_type ?? null,      // 'image'|'video'|'text' opcional
+      provider: raw.provider ?? 'supabase',
+      model: raw.model ?? null,
+    };
+  };
+
+  const generateViaEdgeFunction = async (payload) => {
+    // Sin axios: supabase.functions.invoke
+    // IMPORTANTE: "generate-content" debe estar desplegada en Supabase.
+    const { data, error } = await supabase.functions.invoke('generate-content', {
+      body: payload
+    });
+
+    if (error) throw error;
+    return data;
+  };
+
+  const saveGeneratedToSupabase = async (payload, product, content) => {
+    const insertRow = {
+      campaign_type: payload.campaign_type,
+      platform: payload.platform,
+      content_type: payload.content_type,
+      product_id: product?.id ?? null,
+
+      title: content.title,
+      body: content.body,
+      caption: content.caption,
+      hashtags: content.hashtags,
+      cta: content.cta,
+
+      strategy: payload.strategy,
+      ab_variant: payload.campaign_type === 'paid' ? payload.ab_variant : null,
+      target_age_range: payload.campaign_type === 'paid' ? payload.age_range : null,
+      target_interests: payload.campaign_type === 'paid' ? payload.interests : null,
+      tone: payload.tone,
+
+      preview_url: content.preview_url ?? null,
+      status: 'draft',
+
+      // opcionales (si tu tabla los tiene, si no, no pasa nada si Supabase rechaza: por eso los envolvemos)
+      asset_url: content.asset_url ?? null,
+      asset_type: content.asset_type ?? null,
+    };
+
+    // Intento 1: con campos opcionales
+    try {
+      const { data: saved, error } = await supabase
         .from('generated_content')
-        .insert([{
-          campaign_type: campaignType,
-          platform: platform,
-          content_type: contentType,
-          product_id: product?.id,
-          title: content.title,
-          body: content.body,
-          caption: content.caption,
-          hashtags: content.hashtags,
-          cta: content.cta,
-          strategy: strategy,
-          ab_variant: campaignType === 'paid' ? abVariant : null,
-          target_age_range: campaignType === 'paid' ? ageRange : null,
-          target_interests: campaignType === 'paid' ? interests : null,
-          tone: tone,
-          preview_url: content.preview_url,
-          status: 'draft'
-        }])
+        .insert([insertRow])
         .select()
         .single();
 
-      if (savedContent) {
-        setGeneratedContent({ ...content, id: savedContent.id });
+      if (error) throw error;
+      return saved;
+    } catch (e) {
+      // Si tu tabla no tiene asset_url/asset_type, reintenta sin esos campos
+      console.warn('saveGeneratedToSupabase fallback:', e);
+
+      const { asset_url, asset_type, ...safeRow } = insertRow;
+
+      const { data: saved2, error: err2 } = await supabase
+        .from('generated_content')
+        .insert([safeRow])
+        .select()
+        .single();
+
+      if (err2) throw err2;
+      return saved2;
+    }
+  };
+
+  const generateContent = async () => {
+    if (!selectedProduct && products.length > 0) {
+      setStatusMsg({ type: 'err', text: 'Selecciona un producto.' });
+      clearStatusSoon();
+      return;
+    }
+
+    setLoading(true);
+    setStatusMsg(null);
+
+    try {
+      const product = products.find(p => String(p.id) === String(selectedProduct)) || products[0] || null;
+      const payload = buildPayload(product);
+      setLastRequest({ payload, product });
+
+      // 1) Intento Edge Function (real)
+      let raw = null;
+      try {
+        raw = await generateViaEdgeFunction(payload);
+      } catch (edgeErr) {
+        console.error('Edge function generate-content failed:', edgeErr);
+        // 2) Fallback local para que nunca quede “muerto”
+        raw = null;
+        setStatusMsg({
+          type: 'info',
+          text: 'La función generate-content no respondió. Usé el generador local como respaldo.'
+        });
+        clearStatusSoon(3500);
       }
-      
+
+      const content = normalizeGenerated(raw, payload, product);
+
+      // 3) Guardar en Supabase
+      const savedContent = await saveGeneratedToSupabase(payload, product, content);
+
+      // 4) Estado UI
+      setGeneratedContent({
+        ...content,
+        id: savedContent?.id ?? null,
+        saved_at: new Date().toISOString(),
+      });
+
+      setStatusMsg({ type: 'ok', text: '✅ Contenido generado y guardado.' });
+      clearStatusSoon();
     } catch (error) {
       console.error('Error generando contenido:', error);
+      setStatusMsg({ type: 'err', text: '❌ Error al generar contenido. Revisa logs.' });
+      clearStatusSoon(3500);
       alert('Error al generar contenido. Intenta nuevamente.');
     } finally {
       setLoading(false);
     }
   };
 
+  const regenerateContent = async () => {
+    if (!lastRequest) {
+      // si no hay lastRequest, usa generate normal
+      await generateContent();
+      return;
+    }
+
+    setLoading(true);
+    setStatusMsg(null);
+
+    try {
+      const { payload, product } = lastRequest;
+
+      let raw = null;
+      try {
+        raw = await generateViaEdgeFunction({ ...payload, regenerate: true });
+      } catch (edgeErr) {
+        console.error('Edge function regenerate failed:', edgeErr);
+        raw = null;
+        setStatusMsg({
+          type: 'info',
+          text: 'No respondió generate-content (regenerate). Usé respaldo local.'
+        });
+        clearStatusSoon(3500);
+      }
+
+      const content = normalizeGenerated(raw, payload, product);
+      const savedContent = await saveGeneratedToSupabase(payload, product, content);
+
+      setGeneratedContent({
+        ...content,
+        id: savedContent?.id ?? null,
+        saved_at: new Date().toISOString(),
+      });
+
+      setStatusMsg({ type: 'ok', text: '✅ Regenerado y guardado.' });
+      clearStatusSoon();
+    } catch (e) {
+      console.error('regenerateContent error:', e);
+      setStatusMsg({ type: 'err', text: '❌ No pude regenerar.' });
+      clearStatusSoon(3500);
+      alert('Error al regenerar contenido.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const publishContent = async () => {
+    if (!generatedContent) return;
+
+    // Placeholder TikTok (según tu pedido)
+    if (platform === 'tiktok') {
+      setStatusMsg({ type: 'info', text: 'TikTok queda en placeholder por ahora (no publica).' });
+      clearStatusSoon(3500);
+      return;
+    }
+
+    setPublishLoading(true);
+    setStatusMsg(null);
+
+    try {
+      // publish-content debe existir en Supabase (Edge Function) y manejar tokens en backend:
+      // IG/FB/YT/Shopify/WhatsApp ya conectadas en tu sistema -> el backend decide cómo publicar.
+      const payload = {
+        platform,
+        content_type: contentType,
+        campaign_type: campaignType,
+        generated_content_id: generatedContent.id ?? null,
+        content: {
+          title: generatedContent.title,
+          body: generatedContent.body,
+          caption: generatedContent.caption,
+          hashtags: generatedContent.hashtags,
+          cta: generatedContent.cta,
+          preview_url: generatedContent.preview_url ?? null,
+          asset_url: generatedContent.asset_url ?? null,
+          asset_type: generatedContent.asset_type ?? null,
+        },
+        // datos extra por si backend los quiere
+        targeting: campaignType === 'paid'
+          ? { ab_variant: abVariant, age_range: ageRange, interests }
+          : null,
+      };
+
+      const { data, error } = await supabase.functions.invoke('publish-content', { body: payload });
+      if (error) throw error;
+
+      // marcar status publicado en DB si existe id
+      if (generatedContent.id) {
+        await supabase
+          .from('generated_content')
+          .update({
+            status: 'published',
+            published_at: new Date().toISOString(),
+            publish_response: typeof data === 'object' ? data : { data }
+          })
+          .eq('id', generatedContent.id);
+      }
+
+      setStatusMsg({ type: 'ok', text: '✅ Publicación enviada al backend.' });
+      clearStatusSoon();
+      alert('✅ Publicación enviada. (El backend procesa la publicación a la red seleccionada)');
+    } catch (e) {
+      console.error('publishContent error:', e);
+      setStatusMsg({ type: 'err', text: '❌ Error al publicar (backend publish-content).' });
+      clearStatusSoon(3500);
+      alert('❌ Error al publicar. Revisa logs de Supabase Edge Function publish-content.');
+    } finally {
+      setPublishLoading(false);
+    }
+  };
+
+  const copyToClipboard = (text) => {
+    try {
+      navigator.clipboard.writeText(text);
+      setStatusMsg({ type: 'ok', text: '✅ Copiado al portapapeles.' });
+      clearStatusSoon();
+    } catch (e) {
+      console.error('clipboard error:', e);
+      alert('No pude copiar al portapapeles.');
+    }
+  };
+
+  const downloadText = () => {
+    if (!generatedContent) return;
+
+    const content = `${generatedContent.title}\n\n${generatedContent.body}\n\n${generatedContent.caption}\n\n${generatedContent.hashtags}\n\n${generatedContent.cta}`;
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `contenido-${platform}-${Date.now()}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadAsset = async () => {
+    if (!generatedContent) return;
+
+    // Si tu Edge Function retorna asset_url real (video/imagen), lo descarga.
+    const assetUrl = generatedContent.asset_url || generatedContent.preview_url;
+    if (!assetUrl) {
+      alert('No hay asset para descargar.');
+      return;
+    }
+
+    try {
+      const res = await fetch(assetUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+
+      const extGuess =
+        generatedContent.asset_type === 'video' ? 'mp4' :
+        generatedContent.asset_type === 'image' ? 'png' :
+        'bin';
+
+      a.download = `asset-${platform}-${Date.now()}.${extGuess}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('downloadAsset error:', e);
+      alert('No pude descargar el asset (revisa la URL).');
+    }
+  };
+
+  const scheduleContent = async (scheduleData) => {
+    try {
+      if (!generatedContent) return;
+
+      const { error } = await supabase
+        .from('content_calendar')
+        .insert([{
+          platform,
+          content_type: contentType,
+          title: generatedContent.title,
+          description: generatedContent.body,
+          caption: generatedContent.caption,
+          hashtags: generatedContent.hashtags,
+          cta: generatedContent.cta,
+          scheduled_date: scheduleData.date,
+          scheduled_time: scheduleData.time,
+          product_id: selectedProduct || null,
+          status: 'scheduled',
+          campaign_type: campaignType,
+          ab_variant: campaignType === 'paid' ? abVariant : null,
+          target_age_range: campaignType === 'paid' ? ageRange : null,
+          target_interests: campaignType === 'paid' ? interests : null
+        }]);
+
+      if (error) throw error;
+
+      setShowScheduleModal(false);
+      alert('✅ Contenido programado exitosamente en el calendario');
+    } catch (error) {
+      console.error('Error scheduling content:', error);
+      alert('❌ Error al programar contenido');
+    }
+  };
+
   const generateContentByStrategy = (data, product) => {
     const productName = product?.name || 'Producto Keloke';
     const price = product?.price || '29.990';
-    
+
     let title = '';
     let body = '';
     let caption = '';
     let cta = '';
     let hashtags = [];
 
-    // Estrategias de contenido
     switch (data.strategy) {
       case 'aida':
-        // Atención, Interés, Deseo, Acción
         title = `🔥 ¡Descubre el ${productName}!`;
-        body = `¿Cansado de [problema]? 🤔\n\nEl ${productName} es la solución que estabas buscando. ✨\n\nImagina poder [beneficio principal] sin complicaciones. Con nuestro producto, podrás:\n\n✅ [Beneficio 1]\n✅ [Beneficio 2]\n✅ [Beneficio 3]\n\n💰 Solo $${price} CLP\n🚚 Envío gratis a todo Chile`;
+        body =
+          `¿Cansado de [problema]? 🤔\n\n` +
+          `El ${productName} es la solución que estabas buscando. ✨\n\n` +
+          `Imagina poder [beneficio principal] sin complicaciones. Con nuestro producto, podrás:\n\n` +
+          `✅ [Beneficio 1]\n✅ [Beneficio 2]\n✅ [Beneficio 3]\n\n` +
+          `💰 Solo $${price} CLP\n🚚 Envío gratis a todo Chile`;
         caption = `¡Transforma tu vida con ${productName}! 🚀`;
         cta = '¡Compra ahora con envío gratis!';
         hashtags = ['#Keloke', '#Chile', '#Innovacion', '#Tecnologia', '#Ofertas'];
         break;
 
       case 'pas':
-        // Problema, Agitación, Solución
         title = `😰 ¿Sufres de [problema]?`;
-        body = `Sabemos lo frustrante que es [problema específico]. Cada día pierdes tiempo y dinero sin una solución real.\n\n❌ Ya probaste todo y nada funciona\n❌ Gastas más de lo necesario\n❌ Te sientes estancado\n\n✅ PERO HAY UNA SOLUCIÓN:\n\n${productName} cambia las reglas del juego. Con tecnología de punta y diseño inteligente, resuelve tu problema de raíz.\n\n💎 Solo $${price} CLP\n🎁 Oferta limitada`;
+        body =
+          `Sabemos lo frustrante que es [problema específico]. Cada día pierdes tiempo y dinero sin una solución real.\n\n` +
+          `❌ Ya probaste todo y nada funciona\n❌ Gastas más de lo necesario\n❌ Te sientes estancado\n\n` +
+          `✅ PERO HAY UNA SOLUCIÓN:\n\n` +
+          `${productName} cambia las reglas del juego. Con tecnología de punta y diseño inteligente, resuelve tu problema de raíz.\n\n` +
+          `💎 Solo $${price} CLP\n🎁 Oferta limitada`;
         caption = `La solución que necesitabas está aquí 💪`;
         cta = '¡Soluciona tu problema HOY!';
         hashtags = ['#Solucion', '#Keloke', '#Chile', '#Calidad', '#Innovacion'];
@@ -129,7 +474,11 @@ export default function ContentGenerator() {
 
       case 'storytelling':
         title = `📖 La historia de María y su ${productName}`;
-        body = `María estaba cansada de [problema]. Un día descubrió ${productName} y su vida cambió por completo.\n\n"Antes perdía horas en [tarea]. Ahora lo hago en minutos y con mejores resultados" - María, Santiago.\n\n¿Quieres vivir la misma transformación?\n\n🌟 ${productName}\n💰 $${price} CLP\n🚚 Envío express disponible`;
+        body =
+          `María estaba cansada de [problema]. Un día descubrió ${productName} y su vida cambió por completo.\n\n` +
+          `"Antes perdía horas en [tarea]. Ahora lo hago en minutos y con mejores resultados" - María, Santiago.\n\n` +
+          `¿Quieres vivir la misma transformación?\n\n` +
+          `🌟 ${productName}\n💰 $${price} CLP\n🚚 Envío express disponible`;
         caption = `Tu historia de éxito comienza aquí 🌟`;
         cta = '¡Únete a miles de clientes felices!';
         hashtags = ['#Testimonios', '#Keloke', '#Exito', '#Chile', '#Transformacion'];
@@ -137,7 +486,14 @@ export default function ContentGenerator() {
 
       case 'gatillo':
         title = `⏰ ÚLTIMA OPORTUNIDAD - ${productName}`;
-        body = `🚨 ALERTA DE STOCK LIMITADO 🚨\n\nQuedan solo 12 unidades del ${productName} a este precio especial.\n\n❌ Mañana vuelve a su precio normal de $${parseInt(price.replace(/\./g, '')) + 10000}\n✅ HOY solo $${price} CLP\n\n⚡ Los primeros 10 compradores reciben:\n🎁 Envío gratis\n🎁 Garantía extendida\n🎁 Soporte prioritario\n\n⏰ Oferta válida por 6 horas`;
+        body =
+          `🚨 ALERTA DE STOCK LIMITADO 🚨\n\n` +
+          `Quedan solo 12 unidades del ${productName} a este precio especial.\n\n` +
+          `❌ Mañana vuelve a su precio normal de $${(parseInt(String(price).replace(/\./g, ''), 10) || 29990) + 10000}\n` +
+          `✅ HOY solo $${price} CLP\n\n` +
+          `⚡ Los primeros 10 compradores reciben:\n` +
+          `🎁 Envío gratis\n🎁 Garantía extendida\n🎁 Soporte prioritario\n\n` +
+          `⏰ Oferta válida por 6 horas`;
         caption = `¡No dejes pasar esta oportunidad! ⚡`;
         cta = '¡COMPRAR AHORA antes que se agote!';
         hashtags = ['#OfertaLimitada', '#Urgente', '#Keloke', '#Chile', '#Descuento'];
@@ -172,70 +528,26 @@ export default function ContentGenerator() {
       caption,
       cta,
       hashtags: hashtags.join(' '),
-      preview_url: generatePreviewUrl(data.content_type, data.platform)
+      preview_url: generatePreviewUrl(data.content_type, data.platform),
+      asset_url: null,
+      asset_type: null
     };
   };
 
-  const generatePreviewUrl = (contentType, platform) => {
-    // Aquí generarías URLs reales de previews con IA de imágenes/videos
+  const generatePreviewUrl = (type) => {
     const mockPreviews = {
       post: 'https://via.placeholder.com/1080x1080/2D5016/FFFFFF?text=Post+Preview',
       reel: 'https://via.placeholder.com/1080x1920/2D5016/FFFFFF?text=Reel+Preview',
       story: 'https://via.placeholder.com/1080x1920/2D5016/FFFFFF?text=Story+Preview',
       carousel: 'https://via.placeholder.com/1080x1080/2D5016/FFFFFF?text=Carousel+Preview'
     };
-    return mockPreviews[contentType] || mockPreviews.post;
+    return mockPreviews[type] || mockPreviews.post;
   };
 
-  const copyToClipboard = (text) => {
-    navigator.clipboard.writeText(text);
-    alert('¡Contenido copiado al portapapeles!');
-  };
-
-  const downloadContent = () => {
-    if (!generatedContent) return;
-    
-    const content = `${generatedContent.title}\n\n${generatedContent.body}\n\n${generatedContent.caption}\n\n${generatedContent.hashtags}\n\n${generatedContent.cta}`;
-    const blob = new Blob([content], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `contenido-${platform}-${Date.now()}.txt`;
-    a.click();
-  };
-
-  const scheduleContent = async (scheduleData) => {
-    try {
-      const { data, error } = await supabase
-        .from('content_calendar')
-        .insert([{
-          platform: platform,
-          content_type: contentType,
-          title: generatedContent.title,
-          description: generatedContent.body,
-          caption: generatedContent.caption,
-          hashtags: generatedContent.hashtags,
-          cta: generatedContent.cta,
-          scheduled_date: scheduleData.date,
-          scheduled_time: scheduleData.time,
-          product_id: selectedProduct,
-          status: 'scheduled',
-          campaign_type: campaignType,
-          ab_variant: campaignType === 'paid' ? abVariant : null,
-          target_age_range: campaignType === 'paid' ? ageRange : null,
-          target_interests: campaignType === 'paid' ? interests : null
-        }])
-        .select();
-
-      if (error) throw error;
-      
-      setShowScheduleModal(false);
-      alert('✅ Contenido programado exitosamente en el calendario');
-    } catch (error) {
-      console.error('Error scheduling content:', error);
-      alert('❌ Error al programar contenido');
-    }
-  };
+  const compiledTextForCopy = useMemo(() => {
+    if (!generatedContent) return '';
+    return `${generatedContent.title}\n\n${generatedContent.body}\n\n${generatedContent.caption}\n\n${generatedContent.hashtags}\n\n${generatedContent.cta}`;
+  }, [generatedContent]);
 
   return (
     <div className="p-6 space-y-6">
@@ -256,6 +568,21 @@ export default function ContentGenerator() {
           </span>
         </div>
       </div>
+
+      {/* Status */}
+      {statusMsg && (
+        <div
+          className={`rounded-lg border px-4 py-3 text-sm ${
+            statusMsg.type === 'ok'
+              ? 'bg-green-50 border-green-200 text-green-800'
+              : statusMsg.type === 'info'
+              ? 'bg-yellow-50 border-yellow-200 text-yellow-800'
+              : 'bg-red-50 border-red-200 text-red-800'
+          }`}
+        >
+          {statusMsg.text}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Panel de Configuración */}
@@ -298,13 +625,7 @@ export default function ContentGenerator() {
           <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
             <h3 className="font-bold mb-3" style={{ color: '#2D5016' }}>Plataforma</h3>
             <div className="grid grid-cols-2 gap-2">
-              {[
-                { id: 'instagram', name: 'Instagram', emoji: '📸' },
-                { id: 'tiktok', name: 'TikTok', emoji: '🎵' },
-                { id: 'facebook', name: 'Facebook', emoji: '👥' },
-                { id: 'youtube', name: 'YouTube', emoji: '▶️' },
-                { id: 'whatsapp', name: 'WhatsApp', emoji: '💬' }
-              ].map((p) => (
+              {platformMeta.map((p) => (
                 <button
                   key={p.id}
                   onClick={() => setPlatform(p.id)}
@@ -370,11 +691,10 @@ export default function ContentGenerator() {
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Producto o Tema
                 </label>
-                <select 
+                <select
                   value={selectedProduct}
                   onChange={(e) => setSelectedProduct(e.target.value)}
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-opacity-50 outline-none"
-                  style={{ focusRingColor: '#2D5016' }}
                 >
                   <option value="">Selecciona un producto</option>
                   {products.map(product => (
@@ -390,7 +710,7 @@ export default function ContentGenerator() {
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Estrategia de Contenido
                 </label>
-                <select 
+                <select
                   value={strategy}
                   onChange={(e) => setStrategy(e.target.value)}
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-opacity-50 outline-none"
@@ -407,7 +727,7 @@ export default function ContentGenerator() {
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Tono de Comunicación
                 </label>
-                <select 
+                <select
                   value={tone}
                   onChange={(e) => setTone(e.target.value)}
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-opacity-50 outline-none"
@@ -426,7 +746,7 @@ export default function ContentGenerator() {
                     <h4 className="font-medium text-sm mb-3" style={{ color: '#2D5016' }}>
                       🎯 Configuración de Campaña Pagada
                     </h4>
-                    
+
                     <div className="space-y-3">
                       {/* Variante A/B */}
                       <div>
@@ -486,7 +806,7 @@ export default function ContentGenerator() {
               {/* Botón Generar */}
               <button
                 onClick={generateContent}
-                disabled={loading || !selectedProduct}
+                disabled={loading || (!selectedProduct && products.length > 0)}
                 className="w-full py-4 rounded-lg text-white font-medium flex items-center justify-center gap-2 transition-all hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
                 style={{ backgroundColor: '#2D5016' }}
               >
@@ -513,24 +833,39 @@ export default function ContentGenerator() {
                   <Eye className="w-5 h-5" />
                   Vista Previa del Contenido
                 </h3>
+
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => copyToClipboard(`${generatedContent.title}\n\n${generatedContent.body}\n\n${generatedContent.caption}\n\n${generatedContent.hashtags}\n\n${generatedContent.cta}`)}
+                    onClick={() => copyToClipboard(compiledTextForCopy)}
                     className="p-2 rounded-lg hover:bg-gray-100 transition-all"
                     title="Copiar contenido"
                   >
                     <Copy className="w-4 h-4" style={{ color: '#2D5016' }} />
                   </button>
+
                   <button
-                    onClick={downloadContent}
+                    onClick={downloadText}
                     className="p-2 rounded-lg hover:bg-gray-100 transition-all"
-                    title="Descargar contenido"
+                    title="Descargar texto"
                   >
                     <Download className="w-4 h-4" style={{ color: '#2D5016' }} />
                   </button>
+
+                  <button
+                    onClick={downloadAsset}
+                    className="p-2 rounded-lg hover:bg-gray-100 transition-all"
+                    title="Descargar imagen/video (si existe)"
+                  >
+                    <Image className="w-4 h-4" style={{ color: '#2D5016' }} />
+                  </button>
+
                   <button
                     className="p-2 rounded-lg hover:bg-gray-100 transition-all"
-                    title="Compartir"
+                    title="Compartir (placeholder UI)"
+                    onClick={() => {
+                      setStatusMsg({ type: 'info', text: 'Compartir queda como placeholder (se implementa si lo necesitas).' });
+                      clearStatusSoon(3000);
+                    }}
                   >
                     <Share2 className="w-4 h-4" style={{ color: '#2D5016' }} />
                   </button>
@@ -541,12 +876,13 @@ export default function ContentGenerator() {
                 {/* Preview Visual */}
                 <div>
                   <div className="aspect-square bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg flex items-center justify-center border-2 border-gray-200 overflow-hidden">
-                    <img 
-                      src={generatedContent.preview_url} 
+                    <img
+                      src={generatedContent.preview_url}
                       alt="Preview"
                       className="w-full h-full object-cover"
                     />
                   </div>
+
                   <div className="mt-3 flex items-center justify-center gap-2 text-sm text-gray-600">
                     <span className="capitalize">{platform}</span>
                     <span>•</span>
@@ -599,7 +935,7 @@ export default function ContentGenerator() {
                   {/* CTA */}
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">LLAMADO A LA ACCIÓN</label>
-                    <div 
+                    <div
                       className="inline-block px-4 py-2 rounded-lg text-white font-medium text-sm"
                       style={{ backgroundColor: '#2D5016' }}
                     >
@@ -626,7 +962,7 @@ export default function ContentGenerator() {
                 </div>
               </div>
 
-              {/* Acciones */}
+              {/* Acciones (las que pediste) */}
               <div className="mt-6 flex items-center gap-3">
                 <button
                   onClick={() => setShowScheduleModal(true)}
@@ -635,19 +971,58 @@ export default function ContentGenerator() {
                 >
                   📅 Programar Publicación
                 </button>
+
+                <button
+                  onClick={publishContent}
+                  disabled={publishLoading}
+                  className="flex-1 py-3 rounded-lg font-medium text-white transition-all hover:opacity-90 disabled:opacity-50"
+                  style={{ backgroundColor: '#D4A017' }}
+                >
+                  {publishLoading ? 'Publicando...' : '🚀 Publicar'}
+                </button>
+
                 <button
                   className="flex-1 py-3 rounded-lg font-medium border-2 transition-all hover:bg-gray-50"
                   style={{ borderColor: '#2D5016', color: '#2D5016' }}
+                  onClick={async () => {
+                    // Guardar como draft explícito
+                    if (!generatedContent?.id) {
+                      setStatusMsg({ type: 'info', text: 'Ya está guardado (draft). Genera o regenera para crear uno nuevo.' });
+                      clearStatusSoon(3500);
+                      return;
+                    }
+                    try {
+                      await supabase
+                        .from('generated_content')
+                        .update({ status: 'draft' })
+                        .eq('id', generatedContent.id);
+                      setStatusMsg({ type: 'ok', text: '✅ Guardado como borrador.' });
+                      clearStatusSoon();
+                    } catch (e) {
+                      console.error(e);
+                      setStatusMsg({ type: 'err', text: '❌ No pude marcar como borrador.' });
+                      clearStatusSoon(3500);
+                    }
+                  }}
                 >
                   💾 Guardar como Borrador
                 </button>
+
                 <button
-                  onClick={generateContent}
+                  onClick={regenerateContent}
                   className="px-6 py-3 rounded-lg font-medium border-2 border-gray-300 text-gray-700 transition-all hover:bg-gray-50"
+                  title="Regenerar"
                 >
-                  <RefreshCw className="w-5 h-5" />
+                  <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
                 </button>
               </div>
+
+              {/* Nota TikTok */}
+              {platform === 'tiktok' && (
+                <div className="mt-4 rounded-lg border border-yellow-200 bg-yellow-50 px-4 py-3 text-sm text-yellow-800">
+                  TikTok está en placeholder por ahora (se activa al final cuando esté aprobado).
+                </div>
+              )}
             </div>
           )}
 
