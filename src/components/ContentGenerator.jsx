@@ -58,21 +58,24 @@ export default function ContentGenerator() {
   };
 
   const loadProducts = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('products')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(50);
+  try {
+    // 1) (Opcional) disparar sync para que siempre esté actualizado
+    // Si prefieres NO sync automático, comenta este bloque.
+    await supabase.functions.invoke('sync-shopify-products', { body: { limit: 100 } });
 
-      if (error) throw error;
-      if (data) setProducts(data);
-    } catch (e) {
-      console.error('loadProducts error:', e);
-      setStatusMsg({ type: 'err', text: 'No pude cargar productos desde Supabase.' });
-      clearStatusSoon();
-    }
-  };
+    // 2) Leer desde la tabla products (ya sincronizada con Shopify)
+    const { data, error } = await supabase
+      .from('products')
+      .select('id, name, price, shopify_product_id')
+      .order('updated_at', { ascending: false })
+      .limit(200);
+
+    if (error) throw error;
+    if (data) setProducts(data);
+  } catch (e) {
+    console.error('loadProducts error:', e);
+  }
+};
 
   const buildPayload = (product) => {
     return {
