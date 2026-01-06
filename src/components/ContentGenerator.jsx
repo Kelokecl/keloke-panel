@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import {
-  FileText, Image, Video, MessageSquare, Sparkles,
+  FileText, Image, Video, Sparkles,
   Download, Copy, Share2, Eye, Wand2, RefreshCw,
   TrendingUp, Target, Users, Zap
 } from 'lucide-react';
@@ -11,7 +11,7 @@ import {
  * - UI se mantiene como la tuya.
  * - Generación: llama a Supabase Edge Function "generate-content" (sin axios).
  * - Persistencia: guarda en generated_content.
- * - Publicación: llama a Edge Function "publish-content" (tokens/credenciales deben vivir en backend).
+ * - Publicación: llama a Edge Function "publish-content".
  * - TikTok: placeholder (no publica).
  */
 
@@ -58,24 +58,26 @@ export default function ContentGenerator() {
   };
 
   const loadProducts = async () => {
-  try {
-    // 1) (Opcional) disparar sync para que siempre esté actualizado
-    // Si prefieres NO sync automático, comenta este bloque.
-    await supabase.functions.invoke('sync-shopify-products', { body: { limit: 100 } });
+    try {
+      // 1) (Opcional) disparar sync para que siempre esté actualizado
+      // Si prefieres NO sync automático, comenta este bloque.
+      await supabase.functions.invoke('sync-shopify-products', { body: { limit: 100 } });
 
-    // 2) Leer desde la tabla products (ya sincronizada con Shopify)
-    const { data, error } = await supabase
-      .from('products')
-      .select('id, name, price, shopify_product_id')
-      .order('updated_at', { ascending: false })
-      .limit(200);
+      // 2) Leer desde la tabla products (ya sincronizada con Shopify)
+      const { data, error } = await supabase
+        .from('products')
+        .select('id, name, price, shopify_product_id')
+        .order('updated_at', { ascending: false })
+        .limit(200);
 
-    if (error) throw error;
-    if (data) setProducts(data);
-  } catch (e) {
-    console.error('loadProducts error:', e);
-  }
-};
+      if (error) throw error;
+      if (data) setProducts(data);
+    } catch (e) {
+      console.error('loadProducts error:', e);
+      setStatusMsg({ type: 'info', text: 'No pude sincronizar/leer productos. Revisa sync-shopify-products o la tabla products.' });
+      clearStatusSoon(4000);
+    }
+  };
 
   const buildPayload = (product) => {
     return {
@@ -95,7 +97,6 @@ export default function ContentGenerator() {
   };
 
   const normalizeGenerated = (raw, payload, product) => {
-    // Si tu Edge Function devuelve JSON con campos diferentes, aquí lo normalizamos.
     // Esperado:
     // { title, body, caption, hashtags, cta, preview_url, asset_url?, asset_type? }
     const fallback = generateContentByStrategy(payload, product);
@@ -117,12 +118,7 @@ export default function ContentGenerator() {
   };
 
   const generateViaEdgeFunction = async (payload) => {
-    // Sin axios: supabase.functions.invoke
-    // IMPORTANTE: "generate-content" debe estar desplegada en Supabase.
-    const { data, error } = await supabase.functions.invoke('generate-content', {
-      body: payload
-    });
-
+    const { data, error } = await supabase.functions.invoke('generate-content', { body: payload });
     if (error) throw error;
     return data;
   };
@@ -149,7 +145,7 @@ export default function ContentGenerator() {
       preview_url: content.preview_url ?? null,
       status: 'draft',
 
-      // opcionales (si tu tabla los tiene, si no, no pasa nada si Supabase rechaza: por eso los envolvemos)
+      // opcionales (si tu tabla los tiene)
       asset_url: content.asset_url ?? null,
       asset_type: content.asset_type ?? null,
     };
@@ -202,7 +198,6 @@ export default function ContentGenerator() {
         raw = await generateViaEdgeFunction(payload);
       } catch (edgeErr) {
         console.error('Edge function generate-content failed:', edgeErr);
-        // 2) Fallback local para que nunca quede “muerto”
         raw = null;
         setStatusMsg({
           type: 'info',
@@ -237,7 +232,6 @@ export default function ContentGenerator() {
 
   const regenerateContent = async () => {
     if (!lastRequest) {
-      // si no hay lastRequest, usa generate normal
       await generateContent();
       return;
     }
@@ -282,6 +276,30 @@ export default function ContentGenerator() {
     }
   };
 
+  const rejectContent = async () => {
+    if (!generatedContent?.id) {
+      setGeneratedContent(null);
+      setStatusMsg({ type: 'ok', text: '✅ Preview limpiado.' });
+      clearStatusSoon();
+      return;
+    }
+
+    try {
+      await supabase
+        .from('generated_content')
+        .update({ status: 'rejected', rejected_at: new Date().toISOString() })
+        .eq('id', generatedContent.id);
+
+      setGeneratedContent(null);
+      setStatusMsg({ type: 'ok', text: '✅ Contenido rechazado. Puedes regenerar otro.' });
+      clearStatusSoon(3500);
+    } catch (e) {
+      console.error('rejectContent error:', e);
+      setStatusMsg({ type: 'err', text: '❌ No pude marcar como rechazado.' });
+      clearStatusSoon(3500);
+    }
+  };
+
   const publishContent = async () => {
     if (!generatedContent) return;
 
@@ -296,8 +314,6 @@ export default function ContentGenerator() {
     setStatusMsg(null);
 
     try {
-      // publish-content debe existir en Supabase (Edge Function) y manejar tokens en backend:
-      // IG/FB/YT/Shopify/WhatsApp ya conectadas en tu sistema -> el backend decide cómo publicar.
       const payload = {
         platform,
         content_type: contentType,
@@ -313,7 +329,6 @@ export default function ContentGenerator() {
           asset_url: generatedContent.asset_url ?? null,
           asset_type: generatedContent.asset_type ?? null,
         },
-        // datos extra por si backend los quiere
         targeting: campaignType === 'paid'
           ? { ab_variant: abVariant, age_range: ageRange, interests }
           : null,
@@ -322,7 +337,6 @@ export default function ContentGenerator() {
       const { data, error } = await supabase.functions.invoke('publish-content', { body: payload });
       if (error) throw error;
 
-      // marcar status publicado en DB si existe id
       if (generatedContent.id) {
         await supabase
           .from('generated_content')
@@ -374,7 +388,6 @@ export default function ContentGenerator() {
   const downloadAsset = async () => {
     if (!generatedContent) return;
 
-    // Si tu Edge Function retorna asset_url real (video/imagen), lo descarga.
     const assetUrl = generatedContent.asset_url || generatedContent.preview_url;
     if (!assetUrl) {
       alert('No hay asset para descargar.');
@@ -510,7 +523,6 @@ export default function ContentGenerator() {
         hashtags = ['#Keloke', '#Chile', '#Productos'];
     }
 
-    // Ajustar según plataforma
     if (data.platform === 'tiktok') {
       caption = caption + ' #TikTokMadeMeBuyIt #ChileTikTok';
       hashtags.push('TikTokChile', 'Viral', 'FYP');
@@ -519,7 +531,6 @@ export default function ContentGenerator() {
       caption = `*${caption}*`;
     }
 
-    // Ajustar según tipo de campaña
     if (data.campaign_type === 'paid') {
       cta = `${cta} - Variante ${data.ab_variant}`;
       body = `🎯 Audiencia: ${data.age_range} años | Intereses: ${data.interests}\n\n${body}`;
@@ -531,7 +542,7 @@ export default function ContentGenerator() {
       caption,
       cta,
       hashtags: hashtags.join(' '),
-      preview_url: generatePreviewUrl(data.content_type, data.platform),
+      preview_url: generatePreviewUrl(data.content_type),
       asset_url: null,
       asset_type: null
     };
@@ -678,7 +689,7 @@ export default function ContentGenerator() {
 
         {/* Panel de Generación */}
         <div className="lg:col-span-2 space-y-4">
-          {/* Formulario de Generación */}
+          {/* Formulario */}
           <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-bold flex items-center gap-2" style={{ color: '#2D5016' }}>
@@ -742,71 +753,67 @@ export default function ContentGenerator() {
                 </select>
               </div>
 
-              {/* Opciones para Campañas Pagadas */}
+              {/* Opciones pagadas */}
               {campaignType === 'paid' && (
-                <>
-                  <div className="border-t pt-4">
-                    <h4 className="font-medium text-sm mb-3" style={{ color: '#2D5016' }}>
-                      🎯 Configuración de Campaña Pagada
-                    </h4>
+                <div className="border-t pt-4">
+                  <h4 className="font-medium text-sm mb-3" style={{ color: '#2D5016' }}>
+                    🎯 Configuración de Campaña Pagada
+                  </h4>
 
-                    <div className="space-y-3">
-                      {/* Variante A/B */}
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Variante A/B Testing
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {['A', 'B', 'C'].map(variant => (
+                          <button
+                            key={variant}
+                            onClick={() => setAbVariant(variant)}
+                            className={`p-2 rounded-lg border-2 transition-all font-medium ${
+                              abVariant === variant
+                                ? 'border-opacity-100'
+                                : 'border-gray-200 hover:border-gray-300'
+                            }`}
+                            style={abVariant === variant ? { borderColor: '#2D5016', backgroundColor: '#F5E6D3' } : {}}
+                          >
+                            Variante {variant}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-2">
-                          Variante A/B Testing
+                          Rango de Edad
                         </label>
-                        <div className="grid grid-cols-3 gap-2">
-                          {['A', 'B', 'C'].map(variant => (
-                            <button
-                              key={variant}
-                              onClick={() => setAbVariant(variant)}
-                              className={`p-2 rounded-lg border-2 transition-all font-medium ${
-                                abVariant === variant
-                                  ? 'border-opacity-100'
-                                  : 'border-gray-200 hover:border-gray-300'
-                              }`}
-                              style={abVariant === variant ? { borderColor: '#2D5016', backgroundColor: '#F5E6D3' } : {}}
-                            >
-                              Variante {variant}
-                            </button>
-                          ))}
-                        </div>
+                        <input
+                          type="text"
+                          value={ageRange}
+                          onChange={(e) => setAgeRange(e.target.value)}
+                          placeholder="ej: 25-45"
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-opacity-50 outline-none"
+                        />
                       </div>
-
-                      {/* Segmentación */}
-                      <div className="grid grid-cols-2 gap-3">
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-2">
-                            Rango de Edad
-                          </label>
-                          <input
-                            type="text"
-                            value={ageRange}
-                            onChange={(e) => setAgeRange(e.target.value)}
-                            placeholder="ej: 25-45"
-                            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-opacity-50 outline-none"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-2">
-                            Intereses
-                          </label>
-                          <input
-                            type="text"
-                            value={interests}
-                            onChange={(e) => setInterests(e.target.value)}
-                            placeholder="ej: Cocina, Hogar"
-                            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-opacity-50 outline-none"
-                          />
-                        </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Intereses
+                        </label>
+                        <input
+                          type="text"
+                          value={interests}
+                          onChange={(e) => setInterests(e.target.value)}
+                          placeholder="ej: Cocina, Hogar"
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-opacity-50 outline-none"
+                        />
                       </div>
                     </div>
                   </div>
-                </>
+                </div>
               )}
 
-              {/* Botón Generar */}
+              {/* Generar */}
               <button
                 onClick={generateContent}
                 disabled={loading || (!selectedProduct && products.length > 0)}
@@ -828,7 +835,7 @@ export default function ContentGenerator() {
             </div>
           </div>
 
-          {/* Vista Previa del Contenido Generado */}
+          {/* Preview */}
           {generatedContent && (
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
               <div className="flex items-center justify-between mb-4">
@@ -876,7 +883,6 @@ export default function ContentGenerator() {
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {/* Preview Visual */}
                 <div>
                   <div className="aspect-square bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg flex items-center justify-center border-2 border-gray-200 overflow-hidden">
                     <img
@@ -901,9 +907,7 @@ export default function ContentGenerator() {
                   </div>
                 </div>
 
-                {/* Contenido de Texto */}
                 <div className="space-y-4">
-                  {/* Título */}
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">TÍTULO</label>
                     <p className="font-bold text-lg" style={{ color: '#2D5016' }}>
@@ -911,7 +915,6 @@ export default function ContentGenerator() {
                     </p>
                   </div>
 
-                  {/* Cuerpo */}
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">DESCRIPCIÓN</label>
                     <p className="text-sm text-gray-700 whitespace-pre-line">
@@ -919,7 +922,6 @@ export default function ContentGenerator() {
                     </p>
                   </div>
 
-                  {/* Caption */}
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">CAPTION</label>
                     <p className="text-sm font-medium" style={{ color: '#2D5016' }}>
@@ -927,7 +929,6 @@ export default function ContentGenerator() {
                     </p>
                   </div>
 
-                  {/* Hashtags */}
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">HASHTAGS</label>
                     <p className="text-sm text-blue-600">
@@ -935,7 +936,6 @@ export default function ContentGenerator() {
                     </p>
                   </div>
 
-                  {/* CTA */}
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">LLAMADO A LA ACCIÓN</label>
                     <div
@@ -946,7 +946,6 @@ export default function ContentGenerator() {
                     </div>
                   </div>
 
-                  {/* Segmentación (si es campaña pagada) */}
                   {campaignType === 'paid' && (
                     <div className="border-t pt-3">
                       <label className="block text-xs font-medium text-gray-500 mb-2">SEGMENTACIÓN</label>
@@ -965,11 +964,11 @@ export default function ContentGenerator() {
                 </div>
               </div>
 
-              {/* Acciones (las que pediste) */}
-              <div className="mt-6 flex items-center gap-3">
+              {/* Acciones */}
+              <div className="mt-6 flex flex-wrap items-center gap-3">
                 <button
                   onClick={() => setShowScheduleModal(true)}
-                  className="flex-1 py-3 rounded-lg font-medium text-white transition-all hover:opacity-90"
+                  className="flex-1 min-w-[220px] py-3 rounded-lg font-medium text-white transition-all hover:opacity-90"
                   style={{ backgroundColor: '#2D5016' }}
                 >
                   📅 Programar Publicación
@@ -978,37 +977,18 @@ export default function ContentGenerator() {
                 <button
                   onClick={publishContent}
                   disabled={publishLoading}
-                  className="flex-1 py-3 rounded-lg font-medium text-white transition-all hover:opacity-90 disabled:opacity-50"
+                  className="flex-1 min-w-[160px] py-3 rounded-lg font-medium text-white transition-all hover:opacity-90 disabled:opacity-50"
                   style={{ backgroundColor: '#D4A017' }}
                 >
                   {publishLoading ? 'Publicando...' : '🚀 Publicar'}
                 </button>
 
                 <button
-                  className="flex-1 py-3 rounded-lg font-medium border-2 transition-all hover:bg-gray-50"
-                  style={{ borderColor: '#2D5016', color: '#2D5016' }}
-                  onClick={async () => {
-                    // Guardar como draft explícito
-                    if (!generatedContent?.id) {
-                      setStatusMsg({ type: 'info', text: 'Ya está guardado (draft). Genera o regenera para crear uno nuevo.' });
-                      clearStatusSoon(3500);
-                      return;
-                    }
-                    try {
-                      await supabase
-                        .from('generated_content')
-                        .update({ status: 'draft' })
-                        .eq('id', generatedContent.id);
-                      setStatusMsg({ type: 'ok', text: '✅ Guardado como borrador.' });
-                      clearStatusSoon();
-                    } catch (e) {
-                      console.error(e);
-                      setStatusMsg({ type: 'err', text: '❌ No pude marcar como borrador.' });
-                      clearStatusSoon(3500);
-                    }
-                  }}
+                  onClick={rejectContent}
+                  className="flex-1 min-w-[160px] py-3 rounded-lg font-medium border-2 transition-all hover:bg-gray-50"
+                  style={{ borderColor: '#b91c1c', color: '#b91c1c' }}
                 >
-                  💾 Guardar como Borrador
+                  ❌ Rechazar
                 </button>
 
                 <button
@@ -1020,7 +1000,6 @@ export default function ContentGenerator() {
                 </button>
               </div>
 
-              {/* Nota TikTok */}
               {platform === 'tiktok' && (
                 <div className="mt-4 rounded-lg border border-yellow-200 bg-yellow-50 px-4 py-3 text-sm text-yellow-800">
                   TikTok está en placeholder por ahora (se activa al final cuando esté aprobado).
@@ -1029,7 +1008,6 @@ export default function ContentGenerator() {
             </div>
           )}
 
-          {/* Placeholder si no hay contenido */}
           {!generatedContent && !loading && (
             <div className="bg-white p-12 rounded-xl shadow-sm border border-gray-100">
               <div className="text-center">
