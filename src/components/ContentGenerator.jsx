@@ -8,11 +8,16 @@ import {
 
 /**
  * ContentGenerator.jsx (FULL)
- * - UI se mantiene como la tuya.
- * - Generación: llama a Supabase Edge Function "generate-content" (sin axios).
+ * - UI se mantiene.
+ * - Generación: llama a Supabase Edge Function "generate-content".
  * - Persistencia: guarda en generated_content.
  * - Publicación: llama a Edge Function "publish-content".
- * - TikTok: placeholder (no publica).
+ * - Productos: sincroniza Shopify -> tabla products y lista actualizada.
+ *
+ * FIXES:
+ * - Placeholder preview: via.placeholder.com -> placehold.co
+ * - products.order: updated_at -> created_at (tu tabla products no tiene updated_at)
+ * - img fallback para que nunca quede blanco
  */
 
 export default function ContentGenerator() {
@@ -57,24 +62,41 @@ export default function ContentGenerator() {
     window.setTimeout(() => setStatusMsg(null), ms);
   };
 
+  const formatPrice = (price, currency = 'CLP') => {
+    if (price === null || price === undefined || price === '') return '';
+    const n = Number(price);
+    if (Number.isNaN(n)) return String(price);
+
+    try {
+      // Formato CL
+      const formatted = new Intl.NumberFormat('es-CL').format(n);
+      // Si no es CLP, mostramos el código
+      return currency ? `${formatted} ${currency}` : formatted;
+    } catch {
+      return `${n} ${currency || ''}`.trim();
+    }
+  };
+
   const loadProducts = async () => {
     try {
-      // 1) (Opcional) disparar sync para que siempre esté actualizado
-      // Si prefieres NO sync automático, comenta este bloque.
+      // 1) (Opcional) disparar sync para mantener actualizado
       await supabase.functions.invoke('sync-shopify-products', { body: { limit: 100 } });
 
-      // 2) Leer desde la tabla products (ya sincronizada con Shopify)
+      // 2) Leer desde la tabla products (tu tabla tiene created_at, NO updated_at)
       const { data, error } = await supabase
         .from('products')
-        .select('id, name, price, shopify_product_id')
-        .order('updated_at', { ascending: false })
+        .select('id, name, price, currency, image_url, shopify_product_id')
+        .order('created_at', { ascending: false })
         .limit(200);
 
       if (error) throw error;
       if (data) setProducts(data);
     } catch (e) {
       console.error('loadProducts error:', e);
-      setStatusMsg({ type: 'info', text: 'No pude sincronizar/leer productos. Revisa sync-shopify-products o la tabla products.' });
+      setStatusMsg({
+        type: 'info',
+        text: 'No pude sincronizar/leer productos. Revisa sync-shopify-products o la tabla products.'
+      });
       clearStatusSoon(4000);
     }
   };
@@ -87,6 +109,8 @@ export default function ContentGenerator() {
       product_id: product?.id ?? null,
       product_name: product?.name || 'Producto Keloke',
       product_price: product?.price || null,
+      product_currency: product?.currency || 'CLP',
+      product_image_url: product?.image_url || null,
       strategy,
       tone,
       ab_variant: campaignType === 'paid' ? abVariant : null,
@@ -303,7 +327,7 @@ export default function ContentGenerator() {
   const publishContent = async () => {
     if (!generatedContent) return;
 
-    // Placeholder TikTok (según tu pedido)
+    // Placeholder TikTok
     if (platform === 'tiktok') {
       setStatusMsg({ type: 'info', text: 'TikTok queda en placeholder por ahora (no publica).' });
       clearStatusSoon(3500);
@@ -453,13 +477,16 @@ export default function ContentGenerator() {
 
   const generateContentByStrategy = (data, product) => {
     const productName = product?.name || 'Producto Keloke';
-    const price = product?.price || '29.990';
+    const price = product?.price ?? '29.990';
+    const currency = product?.currency || 'CLP';
 
     let title = '';
     let body = '';
     let caption = '';
     let cta = '';
     let hashtags = [];
+
+    const priceLabel = formatPrice(price, currency);
 
     switch (data.strategy) {
       case 'aida':
@@ -469,7 +496,7 @@ export default function ContentGenerator() {
           `El ${productName} es la solución que estabas buscando. ✨\n\n` +
           `Imagina poder [beneficio principal] sin complicaciones. Con nuestro producto, podrás:\n\n` +
           `✅ [Beneficio 1]\n✅ [Beneficio 2]\n✅ [Beneficio 3]\n\n` +
-          `💰 Solo $${price} CLP\n🚚 Envío gratis a todo Chile`;
+          `💰 Solo $${priceLabel}\n🚚 Envío gratis a todo Chile`;
         caption = `¡Transforma tu vida con ${productName}! 🚀`;
         cta = '¡Compra ahora con envío gratis!';
         hashtags = ['#Keloke', '#Chile', '#Innovacion', '#Tecnologia', '#Ofertas'];
@@ -482,7 +509,7 @@ export default function ContentGenerator() {
           `❌ Ya probaste todo y nada funciona\n❌ Gastas más de lo necesario\n❌ Te sientes estancado\n\n` +
           `✅ PERO HAY UNA SOLUCIÓN:\n\n` +
           `${productName} cambia las reglas del juego. Con tecnología de punta y diseño inteligente, resuelve tu problema de raíz.\n\n` +
-          `💎 Solo $${price} CLP\n🎁 Oferta limitada`;
+          `💎 Solo $${priceLabel}\n🎁 Oferta limitada`;
         caption = `La solución que necesitabas está aquí 💪`;
         cta = '¡Soluciona tu problema HOY!';
         hashtags = ['#Solucion', '#Keloke', '#Chile', '#Calidad', '#Innovacion'];
@@ -494,7 +521,7 @@ export default function ContentGenerator() {
           `María estaba cansada de [problema]. Un día descubrió ${productName} y su vida cambió por completo.\n\n` +
           `"Antes perdía horas en [tarea]. Ahora lo hago en minutos y con mejores resultados" - María, Santiago.\n\n` +
           `¿Quieres vivir la misma transformación?\n\n` +
-          `🌟 ${productName}\n💰 $${price} CLP\n🚚 Envío express disponible`;
+          `🌟 ${productName}\n💰 $${priceLabel}\n🚚 Envío express disponible`;
         caption = `Tu historia de éxito comienza aquí 🌟`;
         cta = '¡Únete a miles de clientes felices!';
         hashtags = ['#Testimonios', '#Keloke', '#Exito', '#Chile', '#Transformacion'];
@@ -505,8 +532,7 @@ export default function ContentGenerator() {
         body =
           `🚨 ALERTA DE STOCK LIMITADO 🚨\n\n` +
           `Quedan solo 12 unidades del ${productName} a este precio especial.\n\n` +
-          `❌ Mañana vuelve a su precio normal de $${(parseInt(String(price).replace(/\./g, ''), 10) || 29990) + 10000}\n` +
-          `✅ HOY solo $${price} CLP\n\n` +
+          `✅ HOY solo $${priceLabel}\n\n` +
           `⚡ Los primeros 10 compradores reciben:\n` +
           `🎁 Envío gratis\n🎁 Garantía extendida\n🎁 Soporte prioritario\n\n` +
           `⏰ Oferta válida por 6 horas`;
@@ -517,7 +543,7 @@ export default function ContentGenerator() {
 
       default:
         title = `✨ ${productName} - Lo mejor para ti`;
-        body = `Descubre ${productName}, el producto que revolucionará tu día a día.\n\n💰 Precio especial: $${price} CLP\n🚚 Envío a todo Chile`;
+        body = `Descubre ${productName}, el producto que revolucionará tu día a día.\n\n💰 Precio especial: $${priceLabel}\n🚚 Envío a todo Chile`;
         caption = `¡Conoce nuestro ${productName}! 🎉`;
         cta = '¡Compra ahora!';
         hashtags = ['#Keloke', '#Chile', '#Productos'];
@@ -542,18 +568,23 @@ export default function ContentGenerator() {
       caption,
       cta,
       hashtags: hashtags.join(' '),
-      preview_url: generatePreviewUrl(data.content_type),
+
+      // Si el producto tiene image_url úsala de preview, si no usa placeholder
+      preview_url: product?.image_url || generatePreviewUrl(data.content_type),
+
       asset_url: null,
       asset_type: null
     };
   };
 
+  // FIX: placeholder robusto (placehold.co) — NO via.placeholder.com
   const generatePreviewUrl = (type) => {
+    const base = 'https://placehold.co';
     const mockPreviews = {
-      post: 'https://via.placeholder.com/1080x1080/2D5016/FFFFFF?text=Post+Preview',
-      reel: 'https://via.placeholder.com/1080x1920/2D5016/FFFFFF?text=Reel+Preview',
-      story: 'https://via.placeholder.com/1080x1920/2D5016/FFFFFF?text=Story+Preview',
-      carousel: 'https://via.placeholder.com/1080x1080/2D5016/FFFFFF?text=Carousel+Preview'
+      post: `${base}/1080x1080/png?text=Post+Preview`,
+      reel: `${base}/1080x1920/png?text=Reel+Preview`,
+      story: `${base}/1080x1920/png?text=Story+Preview`,
+      carousel: `${base}/1080x1080/png?text=Carousel+Preview`
     };
     return mockPreviews[type] || mockPreviews.post;
   };
@@ -713,7 +744,7 @@ export default function ContentGenerator() {
                   <option value="">Selecciona un producto</option>
                   {products.map(product => (
                     <option key={product.id} value={product.id}>
-                      {product.name} - ${product.price}
+                      {product.name} - ${formatPrice(product.price, product.currency || 'CLP')}
                     </option>
                   ))}
                 </select>
@@ -889,6 +920,9 @@ export default function ContentGenerator() {
                       src={generatedContent.preview_url}
                       alt="Preview"
                       className="w-full h-full object-cover"
+                      onError={(e) => {
+                        e.currentTarget.src = 'https://placehold.co/1080x1080/png?text=Preview';
+                      }}
                     />
                   </div>
 
