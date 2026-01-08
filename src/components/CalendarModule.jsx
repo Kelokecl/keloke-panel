@@ -182,14 +182,18 @@ export default function CalendarModule() {
     return days;
   };
 
-  const getContentForDateTime = (date, time) => {
-    const dateStr = date.toISOString().split('T')[0];
-    return scheduledContent.filter(content => {
-      const contentDate = toDateStr(content.scheduled_date);
-      const contentTime = content.scheduled_time || '';
-      return contentDate === dateStr && contentTime === time;
-    });
-  };
+ const getContentForDateTime = (date, time) => {
+  const dateStr = date.toISOString().split('T')[0];
+
+  return scheduledContent.filter((content) => {
+    if (!content.scheduled_date) return false;
+
+    const contentDate = String(content.scheduled_date).split('T')[0]; // sirve si viene date o timestamptz
+    const contentTime = String(content.scheduled_time || '').slice(0, 5); // <-- FIX
+
+    return contentDate === dateStr && contentTime === time;
+  });
+};
 
   const navigateWeek = (direction) => {
     const newDate = new Date(selectedDate);
