@@ -129,10 +129,19 @@ export default function ContentGenerator() {
   });
 
   const generateViaEdgeFunction = async (payload) => {
-    const { data, error } = await supabase.functions.invoke('generate-content', { body: payload });
-    if (error) throw error;
-    return data;
-  };
+  const timeoutMs = 20000; // 20s
+
+  const call = supabase.functions.invoke('generate-content', { body: payload });
+
+  const timer = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('Timeout generate-content')), timeoutMs)
+  );
+
+  const { data, error } = await Promise.race([call, timer]);
+
+  if (error) throw error;
+  return data;
+};
 
   const normalizeGenerated = (raw, payload, product) => {
     const fallback = generateContentByStrategy(payload, product);
