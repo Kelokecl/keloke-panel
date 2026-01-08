@@ -9,15 +9,17 @@ import {
 /**
  * ContentGenerator.jsx (FULL)
  * - UI se mantiene.
- * - Generación: llama a Supabase Edge Function "generate-content".
+ * - Generación: Supabase Edge Function "generate-content".
  * - Persistencia: guarda en generated_content.
- * - Publicación: llama a Edge Function "publish-content".
- * - Productos: sincroniza Shopify -> tabla products y lista actualizada.
+ * - Publicación: Edge Function "publish-content".
+ * - Productos: sync Shopify -> tabla products y lista actualizada.
  *
  * FIXES:
- * - Placeholder preview: via.placeholder.com -> placehold.co
- * - products.order: updated_at -> created_at (tu tabla products no tiene updated_at)
- * - img fallback para que nunca quede blanco
+ * - Instagram solo usa "caption": ahora caption incluye title+body+cta+hashtags.
+ * - Placeholder preview: placehold.co (no via.placeholder.com).
+ * - products.order: created_at (por si no tienes updated_at).
+ * - img fallback para que nunca quede blanco.
+ * - Programar: inserta en content_calendar y dispara evento para refrescar calendario.
  */
 
 export default function ContentGenerator() {
@@ -66,26 +68,34 @@ export default function ContentGenerator() {
     if (price === null || price === undefined || price === '') return '';
     const n = Number(price);
     if (Number.isNaN(n)) return String(price);
-
     try {
-      // Formato CL
       const formatted = new Intl.NumberFormat('es-CL').format(n);
-      // Si no es CLP, mostramos el código
       return currency ? `${formatted} ${currency}` : formatted;
     } catch {
       return `${n} ${currency || ''}`.trim();
     }
   };
 
+  const safePlaceholder = (type) => {
+    const base = 'https://placehold.co';
+    const map = {
+      post: `${base}/1080x1080/png?text=Post+Preview`,
+      reel: `${base}/1080x1920/png?text=Reel+Preview`,
+      story: `${base}/1080x1920/png?text=Story+Preview`,
+      carousel: `${base}/1080x1080/png?text=Carousel+Preview`
+    };
+    return map[type] || map.post;
+  };
+
   const loadProducts = async () => {
     try {
-      // 1) (Opcional) disparar sync para mantener actualizado
+      // (Opcional) sync para mantener actualizado
       await supabase.functions.invoke('sync-shopify-products', { body: { limit: 100 } });
 
-      // 2) Leer desde la tabla products (tu tabla tiene created_at, NO updated_at)
+      // Lee products (ajusta campos a tu tabla real)
       const { data, error } = await supabase
         .from('products')
-        .select('id, name, price, currency, image_url, shopify_product_id')
+        .select('id, name, price, currency, image_url, shopify_product_id, created_at')
         .order('created_at', { ascending: false })
         .limit(200);
 
@@ -97,32 +107,34 @@ export default function ContentGenerator() {
         type: 'info',
         text: 'No pude sincronizar/leer productos. Revisa sync-shopify-products o la tabla products.'
       });
-      clearStatusSoon(4000);
+      clearStatusSoon(4500);
     }
   };
 
-  const buildPayload = (product) => {
-    return {
-      campaign_type: campaignType,
-      platform,
-      content_type: contentType,
-      product_id: product?.id ?? null,
-      product_name: product?.name || 'Producto Keloke',
-      product_price: product?.price || null,
-      product_currency: product?.currency || 'CLP',
-      product_image_url: product?.image_url || null,
-      strategy,
-      tone,
-      ab_variant: campaignType === 'paid' ? abVariant : null,
-      age_range: campaignType === 'paid' ? ageRange : null,
-      interests: campaignType === 'paid' ? interests : null,
-      generated_at: new Date().toISOString(),
-    };
+  const buildPayload = (product) => ({
+    campaign_type: campaignType,
+    platform,
+    content_type: contentType,
+    product_id: product?.id ?? null,
+    product_name: product?.name || 'Producto Keloke',
+    product_price: product?.price ?? null,
+    product_currency: product?.currency || 'CLP',
+    product_image_url: product?.image_url || null,
+    strategy,
+    tone,
+    ab_variant: campaignType === 'paid' ? abVariant : null,
+    age_range: campaignType === 'paid' ? ageRange : null,
+    interests: campaignType === 'paid' ? interests : null,
+    generated_at: new Date().toISOString(),
+  });
+
+  const generateViaEdgeFunction = async (payload) => {
+    const { data, error } = await supabase.functions.invoke('generate-content', { body: payload });
+    if (error) throw error;
+    return data;
   };
 
   const normalizeGenerated = (raw, payload, product) => {
-    // Esperado:
-    // { title, body, caption, hashtags, cta, preview_url, asset_url?, asset_type? }
     const fallback = generateContentByStrategy(payload, product);
 
     if (!raw || typeof raw !== 'object') return fallback;
@@ -133,18 +145,16 @@ export default function ContentGenerator() {
       caption: raw.caption ?? fallback.caption,
       hashtags: raw.hashtags ?? fallback.hashtags,
       cta: raw.cta ?? fallback.cta,
-      preview_url: raw.preview_url ?? fallback.preview_url,
-      asset_url: raw.asset_url ?? null,        // opcional (video/imagen real)
-      asset_type: raw.asset_type ?? null,      // 'image'|'video'|'text' opcional
+
+      // preview_url: prioriza lo que venga de la función, si no la imagen del producto, si no placeholder
+      preview_url: raw.preview_url ?? product?.image_url ?? fallback.preview_url,
+
+      asset_url: raw.asset_url ?? null,
+      asset_type: raw.asset_type ?? null,
+
       provider: raw.provider ?? 'supabase',
       model: raw.model ?? null,
     };
-  };
-
-  const generateViaEdgeFunction = async (payload) => {
-    const { data, error } = await supabase.functions.invoke('generate-content', { body: payload });
-    if (error) throw error;
-    return data;
   };
 
   const saveGeneratedToSupabase = async (payload, product, content) => {
@@ -169,36 +179,19 @@ export default function ContentGenerator() {
       preview_url: content.preview_url ?? null,
       status: 'draft',
 
-      // opcionales (si tu tabla los tiene)
       asset_url: content.asset_url ?? null,
       asset_type: content.asset_type ?? null,
     };
 
-    // Intento 1: con campos opcionales
-    try {
-      const { data: saved, error } = await supabase
-        .from('generated_content')
-        .insert([insertRow])
-        .select()
-        .single();
+    // Inserta (tu tabla ya tiene asset_url/asset_type según tu captura)
+    const { data: saved, error } = await supabase
+      .from('generated_content')
+      .insert([insertRow])
+      .select()
+      .single();
 
-      if (error) throw error;
-      return saved;
-    } catch (e) {
-      // Si tu tabla no tiene asset_url/asset_type, reintenta sin esos campos
-      console.warn('saveGeneratedToSupabase fallback:', e);
-
-      const { asset_url, asset_type, ...safeRow } = insertRow;
-
-      const { data: saved2, error: err2 } = await supabase
-        .from('generated_content')
-        .insert([safeRow])
-        .select()
-        .single();
-
-      if (err2) throw err2;
-      return saved2;
-    }
+    if (error) throw error;
+    return saved;
   };
 
   const generateContent = async () => {
@@ -216,7 +209,6 @@ export default function ContentGenerator() {
       const payload = buildPayload(product);
       setLastRequest({ payload, product });
 
-      // 1) Intento Edge Function (real)
       let raw = null;
       try {
         raw = await generateViaEdgeFunction(payload);
@@ -231,11 +223,8 @@ export default function ContentGenerator() {
       }
 
       const content = normalizeGenerated(raw, payload, product);
-
-      // 3) Guardar en Supabase
       const savedContent = await saveGeneratedToSupabase(payload, product, content);
 
-      // 4) Estado UI
       setGeneratedContent({
         ...content,
         id: savedContent?.id ?? null,
@@ -324,6 +313,50 @@ export default function ContentGenerator() {
     }
   };
 
+  // --- 🔥 IMPORTANT: Instagram solo publica caption.
+  // Acá armamos un caption final "listo para IG", SIN etiquetas AIDA/PAS.
+  const stripFrameworkLabels = (text) => {
+    if (!text) return '';
+    // Quita etiquetas tipo "ATENCIÓN:", "INTERÉS:", "PROBLEMA:", etc.
+    return String(text)
+      .replace(/^ATENCIÓN:\s*/gim, '')
+      .replace(/^INTERÉS:\s*/gim, '')
+      .replace(/^DESEO:\s*/gim, '')
+      .replace(/^ACCIÓN:\s*/gim, '')
+      .replace(/^PROBLEMA:\s*/gim, '')
+      .replace(/^AGITACIÓN:\s*/gim, '')
+      .replace(/^SOLUCIÓN:\s*/gim, '')
+      .trim();
+  };
+
+  const buildPublishCaption = ({ title, body, cta, hashtags }, p) => {
+    const cleanBody = stripFrameworkLabels(body);
+    const cleanTitle = stripFrameworkLabels(title);
+
+    // Hashtags: asegura string
+    const hash = (hashtags || '').trim();
+    const ctaLine = cta ? `\n\n${cta}` : '';
+
+    // Instagram/Facebook usan caption como texto principal.
+    if (p === 'instagram' || p === 'facebook') {
+      return `${cleanTitle}\n\n${cleanBody}${ctaLine}\n\n${hash}`.trim();
+    }
+
+    // WhatsApp: más corto (y con saltos simples)
+    if (p === 'whatsapp') {
+      const short = `${cleanTitle}\n${cleanBody}${ctaLine}\n${hash}`.replace(/\n{3,}/g, '\n\n');
+      return short.slice(0, 900).trim();
+    }
+
+    // YouTube: permite descripción larga, dejamos completo
+    if (p === 'youtube') {
+      return `${cleanTitle}\n\n${cleanBody}${ctaLine}\n\n${hash}`.trim();
+    }
+
+    // TikTok placeholder
+    return `${cleanTitle}\n\n${cleanBody}${ctaLine}\n\n${hash}`.trim();
+  };
+
   const publishContent = async () => {
     if (!generatedContent) return;
 
@@ -338,17 +371,31 @@ export default function ContentGenerator() {
     setStatusMsg(null);
 
     try {
+      // ⚡ Caption final listo para red (especialmente IG)
+      const finalCaption = buildPublishCaption(
+        {
+          title: generatedContent.title,
+          body: generatedContent.body,
+          cta: generatedContent.cta,
+          hashtags: generatedContent.hashtags,
+        },
+        platform
+      );
+
       const payload = {
         platform,
         content_type: contentType,
         campaign_type: campaignType,
         generated_content_id: generatedContent.id ?? null,
         content: {
+          // mantenemos campos separados por si tu backend los usa
           title: generatedContent.title,
           body: generatedContent.body,
-          caption: generatedContent.caption,
+          caption: finalCaption,
           hashtags: generatedContent.hashtags,
           cta: generatedContent.cta,
+
+          // asset / preview
           preview_url: generatedContent.preview_url ?? null,
           asset_url: generatedContent.asset_url ?? null,
           asset_type: generatedContent.asset_type ?? null,
@@ -445,29 +492,40 @@ export default function ContentGenerator() {
     try {
       if (!generatedContent) return;
 
+      const row = {
+        platform,
+        content_type: contentType,
+        title: generatedContent.title,
+        description: generatedContent.body,
+        caption: generatedContent.caption,
+        hashtags: generatedContent.hashtags,
+        cta: generatedContent.cta,
+        preview_url: generatedContent.preview_url ?? null,
+        asset_url: generatedContent.asset_url ?? null,
+        asset_type: generatedContent.asset_type ?? null,
+
+        scheduled_date: scheduleData.date,
+        scheduled_time: scheduleData.time,
+        product_id: selectedProduct || null,
+        status: 'scheduled',
+
+        campaign_type: campaignType,
+        ab_variant: campaignType === 'paid' ? abVariant : null,
+        target_age_range: campaignType === 'paid' ? ageRange : null,
+        target_interests: campaignType === 'paid' ? interests : null
+      };
+
       const { error } = await supabase
         .from('content_calendar')
-        .insert([{
-          platform,
-          content_type: contentType,
-          title: generatedContent.title,
-          description: generatedContent.body,
-          caption: generatedContent.caption,
-          hashtags: generatedContent.hashtags,
-          cta: generatedContent.cta,
-          scheduled_date: scheduleData.date,
-          scheduled_time: scheduleData.time,
-          product_id: selectedProduct || null,
-          status: 'scheduled',
-          campaign_type: campaignType,
-          ab_variant: campaignType === 'paid' ? abVariant : null,
-          target_age_range: campaignType === 'paid' ? ageRange : null,
-          target_interests: campaignType === 'paid' ? interests : null
-        }]);
+        .insert([row]);
 
       if (error) throw error;
 
       setShowScheduleModal(false);
+
+      // 🔔 Para que el módulo calendario refresque al toque (si lo escuchas)
+      window.dispatchEvent(new CustomEvent('calendar:refresh'));
+
       alert('✅ Contenido programado exitosamente en el calendario');
     } catch (error) {
       console.error('Error scheduling content:', error);
@@ -475,6 +533,7 @@ export default function ContentGenerator() {
     }
   };
 
+  // Fallback local por estrategia (si Edge falla)
   const generateContentByStrategy = (data, product) => {
     const productName = product?.name || 'Producto Keloke';
     const price = product?.price ?? '29.990';
@@ -490,70 +549,60 @@ export default function ContentGenerator() {
 
     switch (data.strategy) {
       case 'aida':
-        title = `🔥 ¡Descubre el ${productName}!`;
+        title = `🔥 ¡Descubre ${productName}!`;
         body =
-          `¿Cansado de [problema]? 🤔\n\n` +
-          `El ${productName} es la solución que estabas buscando. ✨\n\n` +
-          `Imagina poder [beneficio principal] sin complicaciones. Con nuestro producto, podrás:\n\n` +
-          `✅ [Beneficio 1]\n✅ [Beneficio 2]\n✅ [Beneficio 3]\n\n` +
-          `💰 Solo $${priceLabel}\n🚚 Envío gratis a todo Chile`;
-        caption = `¡Transforma tu vida con ${productName}! 🚀`;
-        cta = '¡Compra ahora con envío gratis!';
-        hashtags = ['#Keloke', '#Chile', '#Innovacion', '#Tecnologia', '#Ofertas'];
+          `ATENCIÓN: ¿Cansado de lo mismo y quieres una solución real?\n\n` +
+          `INTERÉS: ${productName} está pensado para ayudarte con un beneficio clave sin complicarte.\n\n` +
+          `DESEO: Imagina lograr resultados en minutos y con mejor calidad.\n\n` +
+          `ACCIÓN: Llévalo hoy por $${priceLabel}.\n🚚 Envío a todo Chile.`;
+        caption = `¡${productName} puede ser tu mejor compra! 🚀`;
+        cta = '¡Compra ahora con envío a todo Chile!';
+        hashtags = ['#Keloke', '#Chile', '#Innovacion', '#Ofertas'];
         break;
 
       case 'pas':
-        title = `😰 ¿Sufres de [problema]?`;
+        title = `😰 ¿Te pasa esto? ${productName} lo soluciona`;
         body =
-          `Sabemos lo frustrante que es [problema específico]. Cada día pierdes tiempo y dinero sin una solución real.\n\n` +
-          `❌ Ya probaste todo y nada funciona\n❌ Gastas más de lo necesario\n❌ Te sientes estancado\n\n` +
-          `✅ PERO HAY UNA SOLUCIÓN:\n\n` +
-          `${productName} cambia las reglas del juego. Con tecnología de punta y diseño inteligente, resuelve tu problema de raíz.\n\n` +
-          `💎 Solo $${priceLabel}\n🎁 Oferta limitada`;
-        caption = `La solución que necesitabas está aquí 💪`;
-        cta = '¡Soluciona tu problema HOY!';
-        hashtags = ['#Solucion', '#Keloke', '#Chile', '#Calidad', '#Innovacion'];
+          `PROBLEMA: ¿Cansado de ese problema típico?\n\n` +
+          `AGITACIÓN: Te hace perder tiempo y plata todos los días.\n\n` +
+          `SOLUCIÓN: ${productName} te lo deja resuelto en minutos.\n\n` +
+          `💰 $${priceLabel}\n🚚 Envío a todo Chile`;
+        caption = `La solución real: ${productName} ✅`;
+        cta = '¡Pídelo ahora!';
+        hashtags = ['#Keloke', '#Chile', '#Solucion', '#Ofertas'];
         break;
 
       case 'storytelling':
-        title = `📖 La historia de María y su ${productName}`;
+        title = `📖 La historia de alguien que probó ${productName}`;
         body =
-          `María estaba cansada de [problema]. Un día descubrió ${productName} y su vida cambió por completo.\n\n` +
-          `"Antes perdía horas en [tarea]. Ahora lo hago en minutos y con mejores resultados" - María, Santiago.\n\n` +
-          `¿Quieres vivir la misma transformación?\n\n` +
-          `🌟 ${productName}\n💰 $${priceLabel}\n🚚 Envío express disponible`;
-        caption = `Tu historia de éxito comienza aquí 🌟`;
-        cta = '¡Únete a miles de clientes felices!';
-        hashtags = ['#Testimonios', '#Keloke', '#Exito', '#Chile', '#Transformacion'];
+          `“Antes me costaba resolver [problema]. Probé ${productName} y cambió todo.”\n\n` +
+          `✨ ${productName}\n💰 $${priceLabel}\n🚚 Envío a todo Chile`;
+        caption = `Tu historia puede ser la próxima 🌟`;
+        cta = '¡Compra hoy!';
+        hashtags = ['#Keloke', '#Testimonio', '#Chile', '#Transformacion'];
         break;
 
       case 'gatillo':
-        title = `⏰ ÚLTIMA OPORTUNIDAD - ${productName}`;
+        title = `⏰ Últimas unidades de ${productName}`;
         body =
-          `🚨 ALERTA DE STOCK LIMITADO 🚨\n\n` +
-          `Quedan solo 12 unidades del ${productName} a este precio especial.\n\n` +
-          `✅ HOY solo $${priceLabel}\n\n` +
-          `⚡ Los primeros 10 compradores reciben:\n` +
-          `🎁 Envío gratis\n🎁 Garantía extendida\n🎁 Soporte prioritario\n\n` +
-          `⏰ Oferta válida por 6 horas`;
-        caption = `¡No dejes pasar esta oportunidad! ⚡`;
-        cta = '¡COMPRAR AHORA antes que se agote!';
-        hashtags = ['#OfertaLimitada', '#Urgente', '#Keloke', '#Chile', '#Descuento'];
+          `🚨 STOCK LIMITADO 🚨\n\n` +
+          `Quedan pocas unidades a $${priceLabel}.\n` +
+          `✅ Envío a todo Chile\n✅ Compra segura`;
+        caption = `No lo dejes pasar ⚡`;
+        cta = '¡Comprar ahora!';
+        hashtags = ['#OfertaLimitada', '#Keloke', '#Chile', '#Urgente'];
         break;
 
       default:
-        title = `✨ ${productName} - Lo mejor para ti`;
-        body = `Descubre ${productName}, el producto que revolucionará tu día a día.\n\n💰 Precio especial: $${priceLabel}\n🚚 Envío a todo Chile`;
-        caption = `¡Conoce nuestro ${productName}! 🎉`;
+        title = `✨ ${productName}`;
+        body = `Descubre ${productName}.\n💰 $${priceLabel}\n🚚 Envío a todo Chile`;
+        caption = `¡Conoce ${productName}! 🎉`;
         cta = '¡Compra ahora!';
         hashtags = ['#Keloke', '#Chile', '#Productos'];
     }
 
-    if (data.platform === 'tiktok') {
-      caption = caption + ' #TikTokMadeMeBuyIt #ChileTikTok';
-      hashtags.push('TikTokChile', 'Viral', 'FYP');
-    } else if (data.platform === 'whatsapp') {
-      body = body.replace(/\n\n/g, '\n').substring(0, 500);
+    if (data.platform === 'whatsapp') {
+      body = body.replace(/\n\n/g, '\n').substring(0, 650);
       caption = `*${caption}*`;
     }
 
@@ -568,25 +617,10 @@ export default function ContentGenerator() {
       caption,
       cta,
       hashtags: hashtags.join(' '),
-
-      // Si el producto tiene image_url úsala de preview, si no usa placeholder
-      preview_url: product?.image_url || generatePreviewUrl(data.content_type),
-
+      preview_url: product?.image_url || safePlaceholder(data.content_type),
       asset_url: null,
       asset_type: null
     };
-  };
-
-  // FIX: placeholder robusto (placehold.co) — NO via.placeholder.com
-  const generatePreviewUrl = (type) => {
-    const base = 'https://placehold.co';
-    const mockPreviews = {
-      post: `${base}/1080x1080/png?text=Post+Preview`,
-      reel: `${base}/1080x1920/png?text=Reel+Preview`,
-      story: `${base}/1080x1920/png?text=Story+Preview`,
-      carousel: `${base}/1080x1080/png?text=Carousel+Preview`
-    };
-    return mockPreviews[type] || mockPreviews.post;
   };
 
   const compiledTextForCopy = useMemo(() => {
@@ -651,6 +685,7 @@ export default function ContentGenerator() {
                 <p className="font-medium text-sm">📱 Contenido Orgánico</p>
                 <p className="text-xs text-gray-500 mt-1">Posts, reels, historias</p>
               </button>
+
               <button
                 onClick={() => setCampaignType('paid')}
                 className={`w-full p-3 rounded-lg border-2 transition-all text-left ${
@@ -917,11 +952,11 @@ export default function ContentGenerator() {
                 <div>
                   <div className="aspect-square bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg flex items-center justify-center border-2 border-gray-200 overflow-hidden">
                     <img
-                      src={generatedContent.preview_url}
+                      src={generatedContent.preview_url || safePlaceholder(contentType)}
                       alt="Preview"
                       className="w-full h-full object-cover"
                       onError={(e) => {
-                        e.currentTarget.src = 'https://placehold.co/1080x1080/png?text=Preview';
+                        e.currentTarget.src = safePlaceholder(contentType);
                       }}
                     />
                   </div>
@@ -957,9 +992,20 @@ export default function ContentGenerator() {
                   </div>
 
                   <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">CAPTION</label>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">CAPTION (PUBLICACIÓN)</label>
                     <p className="text-sm font-medium" style={{ color: '#2D5016' }}>
-                      {generatedContent.caption}
+                      {buildPublishCaption(
+                        {
+                          title: generatedContent.title,
+                          body: generatedContent.body,
+                          cta: generatedContent.cta,
+                          hashtags: generatedContent.hashtags,
+                        },
+                        platform
+                      )}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      *Esto es lo que realmente se enviará a la red (IG usa solo caption).*
                     </p>
                   </div>
 
