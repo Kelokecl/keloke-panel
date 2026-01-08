@@ -43,8 +43,29 @@ export default function CalendarModule() {
     ]
   };
 
+  // ✅ Normaliza scheduled_date venga como "YYYY-MM-DD" o ISO
+  const toDateStr = (val) => {
+    if (!val) return '';
+    // si viene "2026-01-08"
+    if (typeof val === 'string' && val.length >= 10) return val.slice(0, 10);
+    try {
+      return new Date(val).toISOString().slice(0, 10);
+    } catch {
+      return '';
+    }
+  };
+
   useEffect(() => {
     loadScheduledContent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate, selectedPlatform]);
+
+  // ✅ Escuchar evento disparado por ContentGenerator: calendar:refresh
+  useEffect(() => {
+    const handler = () => loadScheduledContent();
+    window.addEventListener('calendar:refresh', handler);
+    return () => window.removeEventListener('calendar:refresh', handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDate, selectedPlatform]);
 
   const loadScheduledContent = async () => {
@@ -60,7 +81,7 @@ export default function CalendarModule() {
       }
 
       const { data, error } = await query;
-      
+
       if (error) throw error;
       setScheduledContent(data || []);
     } catch (error) {
@@ -82,9 +103,13 @@ export default function CalendarModule() {
         .select();
 
       if (error) throw error;
-      
+
       await loadScheduledContent();
       setShowScheduleModal(false);
+
+      // ✅ también dispara refresh para otros módulos si lo necesitan
+      window.dispatchEvent(new CustomEvent('calendar:refresh'));
+
       alert('✅ Contenido programado exitosamente');
     } catch (error) {
       console.error('Error scheduling content:', error);
@@ -94,7 +119,7 @@ export default function CalendarModule() {
 
   const deleteScheduledContent = async (id) => {
     if (!confirm('¿Eliminar este contenido programado?')) return;
-    
+
     try {
       const { error } = await supabase
         .from('content_calendar')
@@ -102,8 +127,9 @@ export default function CalendarModule() {
         .eq('id', id);
 
       if (error) throw error;
-      
+
       await loadScheduledContent();
+      window.dispatchEvent(new CustomEvent('calendar:refresh'));
       alert('✅ Contenido eliminado');
     } catch (error) {
       console.error('Error deleting content:', error);
@@ -111,13 +137,21 @@ export default function CalendarModule() {
     }
   };
 
+  // ✅ FIX duplicado: mantiene scheduled_time y suma +1 día solo en la fecha (YYYY-MM-DD)
   const duplicateContent = async (content) => {
     try {
+      const baseDateStr = toDateStr(content.scheduled_date);
+      const baseDate = new Date(`${baseDateStr}T00:00:00.000Z`);
+      const nextDate = new Date(baseDate.getTime() + 86400000);
+      const nextDateStr = nextDate.toISOString().slice(0, 10);
+
       const newContent = {
         ...content,
         id: undefined,
-        scheduled_date: new Date(new Date(content.scheduled_date).getTime() + 86400000).toISOString(),
-        status: 'scheduled'
+        scheduled_date: nextDateStr,
+        scheduled_time: content.scheduled_time || '09:00',
+        status: 'scheduled',
+        created_at: new Date().toISOString()
       };
 
       const { error } = await supabase
@@ -125,8 +159,9 @@ export default function CalendarModule() {
         .insert([newContent]);
 
       if (error) throw error;
-      
+
       await loadScheduledContent();
+      window.dispatchEvent(new CustomEvent('calendar:refresh'));
       alert('✅ Contenido duplicado para el día siguiente');
     } catch (error) {
       console.error('Error duplicating content:', error);
@@ -137,7 +172,7 @@ export default function CalendarModule() {
   const getWeekDays = () => {
     const start = new Date(selectedDate);
     start.setDate(start.getDate() - start.getDay());
-    
+
     const days = [];
     for (let i = 0; i < 7; i++) {
       const day = new Date(start);
@@ -147,18 +182,10 @@ export default function CalendarModule() {
     return days;
   };
 
-  const getContentForDate = (date) => {
-    const dateStr = date.toISOString().split('T')[0];
-    return scheduledContent.filter(content => 
-      content.scheduled_date?.startsWith(dateStr)
-    );
-  };
-
   const getContentForDateTime = (date, time) => {
     const dateStr = date.toISOString().split('T')[0];
     return scheduledContent.filter(content => {
-      if (!content.scheduled_date) return false;
-      const contentDate = content.scheduled_date.split('T')[0];
+      const contentDate = toDateStr(content.scheduled_date);
       const contentTime = content.scheduled_time || '';
       return contentDate === dateStr && contentTime === time;
     });
@@ -218,7 +245,7 @@ export default function CalendarModule() {
             >
               <ChevronLeft className="w-5 h-5" />
             </button>
-            
+
             <div className="text-center min-w-[200px]">
               <p className="font-bold text-lg" style={{ color: '#2D5016' }}>
                 {selectedDate.toLocaleDateString('es-CL', { month: 'long', year: 'numeric' })}
@@ -643,7 +670,7 @@ function ContentDetailModal({ content, onClose, onDelete, onDuplicate }) {
 
           <div>
             <p className="text-sm font-medium text-gray-700 mb-1">Descripción</p>
-            <p className="text-gray-800">{content.description}</p>
+            <p className="text-gray-800 whitespace-pre-line">{content.description}</p>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
