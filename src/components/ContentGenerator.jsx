@@ -489,49 +489,52 @@ export default function ContentGenerator() {
   };
 
   const scheduleContent = async (scheduleData) => {
-    try {
-      if (!generatedContent) return;
+  try {
+    if (!generatedContent) return;
 
-      const row = {
+    const { error } = await supabase
+      .from('content_calendar')
+      .insert([{
         platform,
         content_type: contentType,
+
+        // ✅ Lo que se ve en el cuadrado
         title: generatedContent.title,
+
+        // ✅ Aquí guardamos “todo lo publicable”
         description: generatedContent.body,
         caption: generatedContent.caption,
         hashtags: generatedContent.hashtags,
         cta: generatedContent.cta,
+
+        // ✅ IMPORTANTE: fecha como YYYY-MM-DD (no ISO completo)
+        scheduled_date: scheduleData.date,
+        scheduled_time: scheduleData.time,
+
+        product_id: selectedProduct || null,
+        status: 'scheduled',
+        campaign_type: campaignType,
+        ab_variant: campaignType === 'paid' ? abVariant : null,
+        target_age_range: campaignType === 'paid' ? ageRange : null,
+        target_interests: campaignType === 'paid' ? interests : null,
+
+        // ✅ Para que el calendario pueda mostrar preview después (si agregas UI)
         preview_url: generatedContent.preview_url ?? null,
         asset_url: generatedContent.asset_url ?? null,
         asset_type: generatedContent.asset_type ?? null,
 
-        scheduled_date: scheduleData.date,
-        scheduled_time: scheduleData.time,
-        product_id: selectedProduct || null,
-        status: 'scheduled',
+        created_at: new Date().toISOString()
+      }]);
 
-        campaign_type: campaignType,
-        ab_variant: campaignType === 'paid' ? abVariant : null,
-        target_age_range: campaignType === 'paid' ? ageRange : null,
-        target_interests: campaignType === 'paid' ? interests : null
-      };
+    if (error) throw error;
 
-      const { error } = await supabase
-        .from('content_calendar')
-        .insert([row]);
-
-      if (error) throw error;
-
-      setShowScheduleModal(false);
-
-      // 🔔 Para que el módulo calendario refresque al toque (si lo escuchas)
-      window.dispatchEvent(new CustomEvent('calendar:refresh'));
-
-      alert('✅ Contenido programado exitosamente en el calendario');
-    } catch (error) {
-      console.error('Error scheduling content:', error);
-      alert('❌ Error al programar contenido');
-    }
-  };
+    setShowScheduleModal(false);
+    alert('✅ Contenido programado exitosamente en el calendario');
+  } catch (error) {
+    console.error('Error scheduling content:', error);
+    alert('❌ Error al programar contenido');
+  }
+};
 
   // Fallback local por estrategia (si Edge falla)
   const generateContentByStrategy = (data, product) => {
