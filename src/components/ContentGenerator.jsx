@@ -495,36 +495,28 @@ export default function ContentGenerator() {
     const { error } = await supabase
       .from('content_calendar')
       .insert([{
-        platform,
-        content_type: contentType,
+  platform,
+  content_type: contentType,
+  title: generatedContent.title,
+  description: generatedContent.body,
+  caption: generatedContent.caption,
+  hashtags: generatedContent.hashtags,
+  cta: generatedContent.cta,
 
-        // ✅ Lo que se ve en el cuadrado
-        title: generatedContent.title,
+  // ✅ nuevo (para preview en calendario)
+  preview_url: generatedContent.preview_url ?? null,
+  asset_url: generatedContent.asset_url ?? null,
+  asset_type: generatedContent.asset_type ?? null,
 
-        // ✅ Aquí guardamos “todo lo publicable”
-        description: generatedContent.body,
-        caption: generatedContent.caption,
-        hashtags: generatedContent.hashtags,
-        cta: generatedContent.cta,
-
-        // ✅ IMPORTANTE: fecha como YYYY-MM-DD (no ISO completo)
-        scheduled_date: scheduleData.date,
-        scheduled_time: scheduleData.time,
-
-        product_id: selectedProduct || null,
-        status: 'scheduled',
-        campaign_type: campaignType,
-        ab_variant: campaignType === 'paid' ? abVariant : null,
-        target_age_range: campaignType === 'paid' ? ageRange : null,
-        target_interests: campaignType === 'paid' ? interests : null,
-
-        // ✅ Para que el calendario pueda mostrar preview después (si agregas UI)
-        preview_url: generatedContent.preview_url ?? null,
-        asset_url: generatedContent.asset_url ?? null,
-        asset_type: generatedContent.asset_type ?? null,
-
-        created_at: new Date().toISOString()
-      }]);
+  scheduled_date: scheduleData.date,
+  scheduled_time: scheduleData.time,
+  product_id: selectedProduct || null,
+  status: 'scheduled',
+  campaign_type: campaignType,
+  ab_variant: campaignType === 'paid' ? abVariant : null,
+  target_age_range: campaignType === 'paid' ? ageRange : null,
+  target_interests: campaignType === 'paid' ? interests : null
+}])
 
     if (error) throw error;
 
