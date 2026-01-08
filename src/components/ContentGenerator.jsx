@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import {
   FileText, Image, Video, Sparkles,
@@ -7,19 +7,22 @@ import {
 } from 'lucide-react';
 
 /**
- * ContentGenerator.jsx (FULL)
- * - UI se mantiene.
- * - Generación: Supabase Edge Function "generate-content".
- * - Persistencia: guarda en generated_content.
- * - Publicación: Edge Function "publish-content".
- * - Productos: sync Shopify -> tabla products y lista actualizada.
+ * ContentGenerator.jsx (FULL - FIXED)
  *
- * FIXES:
- * - Instagram solo usa "caption": ahora caption incluye title+body+cta+hashtags.
- * - Placeholder preview: placehold.co (no via.placeholder.com).
- * - products.order: created_at (por si no tienes updated_at).
- * - img fallback para que nunca quede blanco.
- * - Programar: inserta en content_calendar y dispara evento para refrescar calendario.
+ * FIXES IMPORTANTES:
+ * 1) Anti-freeze UI:
+ *    - Evita requests concurrentes (lock).
+ *    - AbortController en ref (cancela request previo).
+ *    - Timeout real + manejo de AbortError.
+ *    - Watchdog que SIEMPRE suelta loading si algo se queda colgado.
+ *
+ * 2) Edge Function:
+ *    - Generación: supabase.functions.invoke('generate-content') desde aquí (frontend).
+ *    - Publicación: supabase.functions.invoke('publish-content').
+ *
+ * 3) Scheduling:
+ *    - Solo inserta en content_calendar (eso NO publica solo).
+ *      Para autopublicar necesitas un scheduler/cron en backend.
  */
 
 export default function ContentGenerator() {
@@ -47,8 +50,20 @@ export default function ContentGenerator() {
   // Mensajes UI
   const [statusMsg, setStatusMsg] = useState(null); // {type:'ok'|'err'|'info', text:''}
 
+  // --- FIX anti “se queda cargando”
+  const requestLockRef = useRef(false);
+  const genAbortRef = useRef(null);
+  const watchdogRef = useRef(null);
+
   useEffect(() => {
     loadProducts();
+    return () => {
+      // cleanup
+      try {
+        if (genAbortRef.current) genAbortRef.current.abort();
+      } catch {}
+      if (watchdogRef.current) clearTimeout(watchdogRef.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -89,10 +104,9 @@ export default function ContentGenerator() {
 
   const loadProducts = async () => {
     try {
-      // (Opcional) sync para mantener actualizado
+      // OJO: si esto pega mucho, lo puedes comentar para que NO sync en cada carga
       await supabase.functions.invoke('sync-shopify-products', { body: { limit: 100 } });
 
-      // Lee products (ajusta campos a tu tabla real)
       const { data, error } = await supabase
         .from('products')
         .select('id, name, price, currency, image_url, shopify_product_id, created_at')
@@ -128,26 +142,33 @@ export default function ContentGenerator() {
     generated_at: new Date().toISOString(),
   });
 
- const generateViaEdgeFunction = async (payload) => {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 25000); // 25s
+  // --- Edge Function call (FIX: abort + timeout + cancela anterior)
+  const generateViaEdgeFunction = async (payload) => {
+    // Cancela cualquier request anterior
+    try {
+      if (genAbortRef.current) genAbortRef.current.abort();
+    } catch {}
 
-  try {
-    const { data, error } = await supabase.functions.invoke('generate-content', {
-      body: payload,
-      signal: controller.signal,
-    });
-    if (error) throw error;
-    return data;
-  } finally {
-    clearTimeout(t);
-  }
-};
+    const controller = new AbortController();
+    genAbortRef.current = controller;
 
+    const timeoutMs = 25000; // 25s
+    const t = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const { data, error } = await supabase.functions.invoke('generate-content', {
+        body: payload,
+        signal: controller.signal,
+      });
+      if (error) throw error;
+      return data;
+    } finally {
+      clearTimeout(t);
+    }
+  };
 
   const normalizeGenerated = (raw, payload, product) => {
     const fallback = generateContentByStrategy(payload, product);
-
     if (!raw || typeof raw !== 'object') return fallback;
 
     return {
@@ -156,13 +177,9 @@ export default function ContentGenerator() {
       caption: raw.caption ?? fallback.caption,
       hashtags: raw.hashtags ?? fallback.hashtags,
       cta: raw.cta ?? fallback.cta,
-
-      // preview_url: prioriza lo que venga de la función, si no la imagen del producto, si no placeholder
       preview_url: raw.preview_url ?? product?.image_url ?? fallback.preview_url,
-
       asset_url: raw.asset_url ?? null,
       asset_type: raw.asset_type ?? null,
-
       provider: raw.provider ?? 'supabase',
       model: raw.model ?? null,
     };
@@ -194,7 +211,6 @@ export default function ContentGenerator() {
       asset_type: content.asset_type ?? null,
     };
 
-    // Inserta (tu tabla ya tiene asset_url/asset_type según tu captura)
     const { data: saved, error } = await supabase
       .from('generated_content')
       .insert([insertRow])
@@ -205,15 +221,38 @@ export default function ContentGenerator() {
     return saved;
   };
 
+  const startWatchdog = () => {
+    if (watchdogRef.current) clearTimeout(watchdogRef.current);
+    // Si por cualquier motivo queda colgado, suelta el UI
+    watchdogRef.current = setTimeout(() => {
+      requestLockRef.current = false;
+      setLoading(false);
+      setPublishLoading(false);
+      setStatusMsg({
+        type: 'info',
+        text: 'Se liberó el estado de carga por seguridad (watchdog). Si esto pasa seguido, el timeout viene del backend.'
+      });
+      clearStatusSoon(4500);
+    }, 35000);
+  };
+
+  const stopWatchdog = () => {
+    if (watchdogRef.current) clearTimeout(watchdogRef.current);
+    watchdogRef.current = null;
+  };
+
   const generateContent = async () => {
+    if (requestLockRef.current) return; // evita doble disparo
     if (!selectedProduct && products.length > 0) {
       setStatusMsg({ type: 'err', text: 'Selecciona un producto.' });
       clearStatusSoon();
       return;
     }
 
+    requestLockRef.current = true;
     setLoading(true);
     setStatusMsg(null);
+    startWatchdog();
 
     try {
       const product = products.find(p => String(p.id) === String(selectedProduct)) || products[0] || null;
@@ -224,13 +263,18 @@ export default function ContentGenerator() {
       try {
         raw = await generateViaEdgeFunction(payload);
       } catch (edgeErr) {
+        const msg = String(edgeErr?.message || edgeErr);
         console.error('Edge function generate-content failed:', edgeErr);
+
+        // Abort / timeout
+        if (msg.toLowerCase().includes('aborted') || msg.toLowerCase().includes('abort') || msg.toLowerCase().includes('timeout')) {
+          setStatusMsg({ type: 'info', text: 'Timeout en generate-content. Usé generador local como respaldo.' });
+          clearStatusSoon(3500);
+        } else {
+          setStatusMsg({ type: 'info', text: 'generate-content falló. Usé generador local como respaldo.' });
+          clearStatusSoon(3500);
+        }
         raw = null;
-        setStatusMsg({
-          type: 'info',
-          text: 'La función generate-content no respondió. Usé el generador local como respaldo.'
-        });
-        clearStatusSoon(3500);
       }
 
       const content = normalizeGenerated(raw, payload, product);
@@ -250,18 +294,23 @@ export default function ContentGenerator() {
       clearStatusSoon(3500);
       alert('Error al generar contenido. Intenta nuevamente.');
     } finally {
+      stopWatchdog();
       setLoading(false);
+      requestLockRef.current = false;
     }
   };
 
   const regenerateContent = async () => {
+    if (requestLockRef.current) return;
     if (!lastRequest) {
       await generateContent();
       return;
     }
 
+    requestLockRef.current = true;
     setLoading(true);
     setStatusMsg(null);
+    startWatchdog();
 
     try {
       const { payload, product } = lastRequest;
@@ -271,12 +320,9 @@ export default function ContentGenerator() {
         raw = await generateViaEdgeFunction({ ...payload, regenerate: true });
       } catch (edgeErr) {
         console.error('Edge function regenerate failed:', edgeErr);
-        raw = null;
-        setStatusMsg({
-          type: 'info',
-          text: 'No respondió generate-content (regenerate). Usé respaldo local.'
-        });
+        setStatusMsg({ type: 'info', text: 'Timeout/fallo en regenerate. Usé respaldo local.' });
         clearStatusSoon(3500);
+        raw = null;
       }
 
       const content = normalizeGenerated(raw, payload, product);
@@ -296,7 +342,9 @@ export default function ContentGenerator() {
       clearStatusSoon(3500);
       alert('Error al regenerar contenido.');
     } finally {
+      stopWatchdog();
       setLoading(false);
+      requestLockRef.current = false;
     }
   };
 
@@ -324,11 +372,9 @@ export default function ContentGenerator() {
     }
   };
 
-  // --- 🔥 IMPORTANT: Instagram solo publica caption.
-  // Acá armamos un caption final "listo para IG", SIN etiquetas AIDA/PAS.
+  // --- Instagram solo publica caption: armamos caption final SIN etiquetas
   const stripFrameworkLabels = (text) => {
     if (!text) return '';
-    // Quita etiquetas tipo "ATENCIÓN:", "INTERÉS:", "PROBLEMA:", etc.
     return String(text)
       .replace(/^ATENCIÓN:\s*/gim, '')
       .replace(/^INTERÉS:\s*/gim, '')
@@ -343,46 +389,36 @@ export default function ContentGenerator() {
   const buildPublishCaption = ({ title, body, cta, hashtags }, p) => {
     const cleanBody = stripFrameworkLabels(body);
     const cleanTitle = stripFrameworkLabels(title);
-
-    // Hashtags: asegura string
     const hash = (hashtags || '').trim();
     const ctaLine = cta ? `\n\n${cta}` : '';
 
-    // Instagram/Facebook usan caption como texto principal.
     if (p === 'instagram' || p === 'facebook') {
       return `${cleanTitle}\n\n${cleanBody}${ctaLine}\n\n${hash}`.trim();
     }
-
-    // WhatsApp: más corto (y con saltos simples)
     if (p === 'whatsapp') {
       const short = `${cleanTitle}\n${cleanBody}${ctaLine}\n${hash}`.replace(/\n{3,}/g, '\n\n');
       return short.slice(0, 900).trim();
     }
-
-    // YouTube: permite descripción larga, dejamos completo
     if (p === 'youtube') {
       return `${cleanTitle}\n\n${cleanBody}${ctaLine}\n\n${hash}`.trim();
     }
-
-    // TikTok placeholder
     return `${cleanTitle}\n\n${cleanBody}${ctaLine}\n\n${hash}`.trim();
   };
 
   const publishContent = async () => {
     if (!generatedContent) return;
-
-    // Placeholder TikTok
     if (platform === 'tiktok') {
       setStatusMsg({ type: 'info', text: 'TikTok queda en placeholder por ahora (no publica).' });
       clearStatusSoon(3500);
       return;
     }
+    if (publishLoading) return;
 
     setPublishLoading(true);
     setStatusMsg(null);
+    startWatchdog();
 
     try {
-      // ⚡ Caption final listo para red (especialmente IG)
       const finalCaption = buildPublishCaption(
         {
           title: generatedContent.title,
@@ -399,14 +435,11 @@ export default function ContentGenerator() {
         campaign_type: campaignType,
         generated_content_id: generatedContent.id ?? null,
         content: {
-          // mantenemos campos separados por si tu backend los usa
           title: generatedContent.title,
           body: generatedContent.body,
           caption: finalCaption,
           hashtags: generatedContent.hashtags,
           cta: generatedContent.cta,
-
-          // asset / preview
           preview_url: generatedContent.preview_url ?? null,
           asset_url: generatedContent.asset_url ?? null,
           asset_type: generatedContent.asset_type ?? null,
@@ -439,6 +472,7 @@ export default function ContentGenerator() {
       clearStatusSoon(3500);
       alert('❌ Error al publicar. Revisa logs de Supabase Edge Function publish-content.');
     } finally {
+      stopWatchdog();
       setPublishLoading(false);
     }
   };
@@ -456,7 +490,6 @@ export default function ContentGenerator() {
 
   const downloadText = () => {
     if (!generatedContent) return;
-
     const content = `${generatedContent.title}\n\n${generatedContent.body}\n\n${generatedContent.caption}\n\n${generatedContent.hashtags}\n\n${generatedContent.cta}`;
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -500,44 +533,48 @@ export default function ContentGenerator() {
   };
 
   const scheduleContent = async (scheduleData) => {
-  try {
-    if (!generatedContent) return;
+    try {
+      if (!generatedContent) return;
 
-    const { error } = await supabase
-      .from('content_calendar')
-      .insert([{
-  platform,
-  content_type: contentType,
-  title: generatedContent.title,
-  description: generatedContent.body,
-  caption: generatedContent.caption,
-  hashtags: generatedContent.hashtags,
-  cta: generatedContent.cta,
+      const row = {
+        platform,
+        content_type: contentType,
+        title: generatedContent.title,
+        description: generatedContent.body,
+        caption: generatedContent.caption,
+        hashtags: generatedContent.hashtags,
+        cta: generatedContent.cta,
 
-  // ✅ nuevo (para preview en calendario)
-  preview_url: generatedContent.preview_url ?? null,
-  asset_url: generatedContent.asset_url ?? null,
-  asset_type: generatedContent.asset_type ?? null,
+        preview_url: generatedContent.preview_url ?? null,
+        asset_url: generatedContent.asset_url ?? null,
+        asset_type: generatedContent.asset_type ?? null,
 
-  scheduled_date: scheduleData.date,
-  scheduled_time: scheduleData.time,
-  product_id: selectedProduct || null,
-  status: 'scheduled',
-  campaign_type: campaignType,
-  ab_variant: campaignType === 'paid' ? abVariant : null,
-  target_age_range: campaignType === 'paid' ? ageRange : null,
-  target_interests: campaignType === 'paid' ? interests : null
-}])
+        scheduled_date: scheduleData.date,
+        scheduled_time: scheduleData.time,
+        product_id: selectedProduct || null,
 
-    if (error) throw error;
+        status: 'scheduled',
+        campaign_type: campaignType,
+        ab_variant: campaignType === 'paid' ? abVariant : null,
+        target_age_range: campaignType === 'paid' ? ageRange : null,
+        target_interests: campaignType === 'paid' ? interests : null,
+      };
 
-    setShowScheduleModal(false);
-    alert('✅ Contenido programado exitosamente en el calendario');
-  } catch (error) {
-    console.error('Error scheduling content:', error);
-    alert('❌ Error al programar contenido');
-  }
-};
+      const { error } = await supabase
+        .from('content_calendar')
+        .insert([row]);
+
+      if (error) throw error;
+
+      setShowScheduleModal(false);
+      alert('✅ Contenido programado exitosamente en el calendario');
+
+      // NOTA: esto NO publica solo. Necesitas el scheduler backend.
+    } catch (error) {
+      console.error('Error scheduling content:', error);
+      alert('❌ Error al programar contenido');
+    }
+  };
 
   // Fallback local por estrategia (si Edge falla)
   const generateContentByStrategy = (data, product) => {
