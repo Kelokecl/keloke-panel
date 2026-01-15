@@ -11,12 +11,13 @@ export default function CalendarModule() {
   const [selectedContent, setSelectedContent] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  // Horarios óptimos para Chile (basados en engagement)
   const optimalTimes = {
     instagram: [
       { time: '09:00', engagement: 'Alto', reason: 'Inicio del día laboral' },
       { time: '13:00', engagement: 'Muy Alto', reason: 'Hora de almuerzo' },
       { time: '19:00', engagement: 'Muy Alto', reason: 'Después del trabajo' },
-ளம்: '21:00', engagement: 'Alto', reason: 'Horario nocturno' }
+      { time: '21:00', engagement: 'Alto', reason: 'Horario nocturno' }
     ],
     tiktok: [
       { time: '12:00', engagement: 'Alto', reason: 'Hora de almuerzo' },
@@ -330,6 +331,7 @@ export default function CalendarModule() {
               <div className="p-3 bg-gray-50 border-r border-gray-200 flex items-center justify-center">
                 <span className="text-sm font-medium text-gray-600">{time}</span>
               </div>
+
               {getWeekDays().map((day, idx) => {
                 const content = getContentForDateTime(day, time);
                 return (
