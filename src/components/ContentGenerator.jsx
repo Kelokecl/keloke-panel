@@ -101,7 +101,7 @@ export default function ContentGenerator() {
       // Nota: intento leer image_urls si existe, sino no pasa nada
       const { data, error } = await supabase
         .from('products')
-        .select('id, name, price, currency, image_url, image_urls, images, shopify_product_id, created_at')
+        .select('id, name, price, currency, image_url, image_urls, shopify_product_id, created_at')
         .order('created_at', { ascending: false })
         .limit(200);
 
