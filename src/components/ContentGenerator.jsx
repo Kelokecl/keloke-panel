@@ -1,28 +1,20 @@
+// ContentGenerator.jsx
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import {
-  FileText, Image, Video, Sparkles,
+  FileText, Image as ImageIcon, Video, Sparkles,
   Download, Copy, Share2, Eye, Wand2, RefreshCw,
   TrendingUp, Target, Users, Zap
 } from 'lucide-react';
 
 /**
- * ContentGenerator.jsx (FULL - FIXED)
+ * ContentGenerator.jsx (FULL - GOD MODE)
  *
- * FIXES IMPORTANTES:
- * 1) Anti-freeze UI:
- *    - Evita requests concurrentes (lock).
- *    - AbortController en ref (cancela request previo).
- *    - Timeout real + manejo de AbortError.
- *    - Watchdog que SIEMPRE suelta loading si algo se queda colgado.
- *
- * 2) Edge Function:
- *    - Generación: supabase.functions.invoke('generate-content') desde aquí (frontend).
- *    - Publicación: supabase.functions.invoke('publish-content').
- *
- * 3) Scheduling:
- *    - Solo inserta en content_calendar (eso NO publica solo).
- *      Para autopublicar necesitas un scheduler/cron en backend.
+ * Fixes:
+ * - Anti-freeze: lock + abort + timeout + watchdog
+ * - Caption FINAL consistente (lo que se publica = lo que se programa)
+ * - Programación guarda generated_content_id (si existe) y caption final
+ * - No asume columnas nuevas obligatorias en DB
  */
 
 export default function ContentGenerator() {
@@ -33,7 +25,7 @@ export default function ContentGenerator() {
   const [generatedContent, setGeneratedContent] = useState(null);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
 
-  // Estados del formulario
+  // Form
   const [campaignType, setCampaignType] = useState('organic');
   const [platform, setPlatform] = useState('instagram');
   const [contentType, setContentType] = useState('post');
@@ -44,13 +36,13 @@ export default function ContentGenerator() {
   const [interests, setInterests] = useState('');
   const [tone, setTone] = useState('profesional');
 
-  // Para reintentos/regeneración
+  // retry / regen
   const [lastRequest, setLastRequest] = useState(null);
 
-  // Mensajes UI
+  // UI messages
   const [statusMsg, setStatusMsg] = useState(null); // {type:'ok'|'err'|'info', text:''}
 
-  // --- FIX anti “se queda cargando”
+  // anti-freeze infra
   const requestLockRef = useRef(false);
   const genAbortRef = useRef(null);
   const watchdogRef = useRef(null);
@@ -58,7 +50,6 @@ export default function ContentGenerator() {
   useEffect(() => {
     loadProducts();
     return () => {
-      // cleanup
       try {
         if (genAbortRef.current) genAbortRef.current.abort();
       } catch {}
@@ -104,12 +95,13 @@ export default function ContentGenerator() {
 
   const loadProducts = async () => {
     try {
-      // OJO: si esto pega mucho, lo puedes comentar para que NO sync en cada carga
+      // opcional: sincroniza
       await supabase.functions.invoke('sync-shopify-products', { body: { limit: 100 } });
 
+      // Nota: intento leer image_urls si existe, sino no pasa nada
       const { data, error } = await supabase
         .from('products')
-        .select('id, name, price, currency, image_url, shopify_product_id, created_at')
+        .select('id, name, price, currency, image_url, image_urls, images, shopify_product_id, created_at')
         .order('created_at', { ascending: false })
         .limit(200);
 
@@ -125,26 +117,77 @@ export default function ContentGenerator() {
     }
   };
 
-  const buildPayload = (product) => ({
-    campaign_type: campaignType,
-    platform,
-    content_type: contentType,
-    product_id: product?.id ?? null,
-    product_name: product?.name || 'Producto Keloke',
-    product_price: product?.price ?? null,
-    product_currency: product?.currency || 'CLP',
-    product_image_url: product?.image_url || null,
-    strategy,
-    tone,
-    ab_variant: campaignType === 'paid' ? abVariant : null,
-    age_range: campaignType === 'paid' ? ageRange : null,
-    interests: campaignType === 'paid' ? interests : null,
-    generated_at: new Date().toISOString(),
-  });
+  // --- Helpers for images (si tienes arrays en products)
+  const normalizeImageList = (product) => {
+    const list =
+      Array.isArray(product?.image_urls) ? product.image_urls :
+      Array.isArray(product?.images) ? product.images :
+      null;
 
-  // --- Edge Function call (FIX: abort + timeout + cancela anterior)
+    const urls = (list || [])
+      .map((x) => (typeof x === 'string' ? x : x?.url))
+      .filter(Boolean);
+
+    if (product?.image_url) urls.unshift(product.image_url);
+    // unique
+    return Array.from(new Set(urls));
+  };
+
+  const pickRandom = (arr) => {
+    if (!arr || !arr.length) return null;
+    return arr[Math.floor(Math.random() * arr.length)];
+  };
+
+  const pickCarousel = (arr, n = 3) => {
+    if (!arr || !arr.length) return [];
+    if (arr.length <= n) return arr.slice(0, n);
+    // shuffle copy
+    const copy = [...arr];
+    for (let i = copy.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [copy[i], copy[j]] = [copy[j], copy[i]];
+    }
+    return copy.slice(0, n);
+  };
+
+  const buildPayload = (product) => {
+    const images = normalizeImageList(product);
+    const primary =
+      contentType === 'post' || contentType === 'story' || contentType === 'reel'
+        ? (pickRandom(images) || product?.image_url || null)
+        : (images[0] || product?.image_url || null);
+
+    const carousel_urls = contentType === 'carousel'
+      ? pickCarousel(images, 3)
+      : [];
+
+    return {
+      campaign_type: campaignType,
+      platform,
+      content_type: contentType,
+      product_id: product?.id ?? null,
+      product_name: product?.name || 'Producto Keloke',
+      product_price: product?.price ?? null,
+      product_currency: product?.currency || 'CLP',
+      product_image_url: product?.image_url || null,
+
+      // 🔥 NUEVO: si existen, las pasamos para carrusel real
+      product_images: images,
+      carousel_urls,
+
+      strategy,
+      tone,
+      ab_variant: campaignType === 'paid' ? abVariant : null,
+      age_range: campaignType === 'paid' ? ageRange : null,
+      interests: campaignType === 'paid' ? interests : null,
+      generated_at: new Date().toISOString(),
+
+      // preview recomendado
+      preview_url: primary || null,
+    };
+  };
+
   const generateViaEdgeFunction = async (payload) => {
-    // Cancela cualquier request anterior
     try {
       if (genAbortRef.current) genAbortRef.current.abort();
     } catch {}
@@ -152,7 +195,7 @@ export default function ContentGenerator() {
     const controller = new AbortController();
     genAbortRef.current = controller;
 
-    const timeoutMs = 25000; // 25s
+    const timeoutMs = 25000;
     const t = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
@@ -177,9 +220,13 @@ export default function ContentGenerator() {
       caption: raw.caption ?? fallback.caption,
       hashtags: raw.hashtags ?? fallback.hashtags,
       cta: raw.cta ?? fallback.cta,
-      preview_url: raw.preview_url ?? product?.image_url ?? fallback.preview_url,
+      preview_url: raw.preview_url ?? payload?.preview_url ?? product?.image_url ?? fallback.preview_url,
       asset_url: raw.asset_url ?? null,
       asset_type: raw.asset_type ?? null,
+
+      // 🔥 NUEVO: carrusel_urls opcional
+      carousel_urls: Array.isArray(raw.carousel_urls) ? raw.carousel_urls : (payload.carousel_urls || []),
+
       provider: raw.provider ?? 'supabase',
       model: raw.model ?? null,
     };
@@ -211,6 +258,8 @@ export default function ContentGenerator() {
       asset_type: content.asset_type ?? null,
     };
 
+    // Intento guardar carousel_urls si existe columna jsonb (si no existe, no rompe: lo omitimos)
+    // Para no romper DB, hacemos insert sin ese campo. (Si quieres lo agregamos cuando confirmes columna)
     const { data: saved, error } = await supabase
       .from('generated_content')
       .insert([insertRow])
@@ -223,14 +272,13 @@ export default function ContentGenerator() {
 
   const startWatchdog = () => {
     if (watchdogRef.current) clearTimeout(watchdogRef.current);
-    // Si por cualquier motivo queda colgado, suelta el UI
     watchdogRef.current = setTimeout(() => {
       requestLockRef.current = false;
       setLoading(false);
       setPublishLoading(false);
       setStatusMsg({
         type: 'info',
-        text: 'Se liberó el estado de carga por seguridad (watchdog). Si esto pasa seguido, el timeout viene del backend.'
+        text: 'Se liberó el estado de carga por seguridad (watchdog). Si pasa seguido, el timeout viene del backend.'
       });
       clearStatusSoon(4500);
     }, 35000);
@@ -242,7 +290,8 @@ export default function ContentGenerator() {
   };
 
   const generateContent = async () => {
-    if (requestLockRef.current) return; // evita doble disparo
+    if (requestLockRef.current) return;
+
     if (!selectedProduct && products.length > 0) {
       setStatusMsg({ type: 'err', text: 'Selecciona un producto.' });
       clearStatusSoon();
@@ -264,16 +313,14 @@ export default function ContentGenerator() {
         raw = await generateViaEdgeFunction(payload);
       } catch (edgeErr) {
         const msg = String(edgeErr?.message || edgeErr);
-        console.error('Edge function generate-content failed:', edgeErr);
+        console.error('generate-content failed:', edgeErr);
 
-        // Abort / timeout
-        if (msg.toLowerCase().includes('aborted') || msg.toLowerCase().includes('abort') || msg.toLowerCase().includes('timeout')) {
+        if (msg.toLowerCase().includes('abort') || msg.toLowerCase().includes('timeout')) {
           setStatusMsg({ type: 'info', text: 'Timeout en generate-content. Usé generador local como respaldo.' });
-          clearStatusSoon(3500);
         } else {
           setStatusMsg({ type: 'info', text: 'generate-content falló. Usé generador local como respaldo.' });
-          clearStatusSoon(3500);
         }
+        clearStatusSoon(3500);
         raw = null;
       }
 
@@ -302,6 +349,7 @@ export default function ContentGenerator() {
 
   const regenerateContent = async () => {
     if (requestLockRef.current) return;
+
     if (!lastRequest) {
       await generateContent();
       return;
@@ -319,7 +367,7 @@ export default function ContentGenerator() {
       try {
         raw = await generateViaEdgeFunction({ ...payload, regenerate: true });
       } catch (edgeErr) {
-        console.error('Edge function regenerate failed:', edgeErr);
+        console.error('regenerate generate-content failed:', edgeErr);
         setStatusMsg({ type: 'info', text: 'Timeout/fallo en regenerate. Usé respaldo local.' });
         clearStatusSoon(3500);
         raw = null;
@@ -372,7 +420,7 @@ export default function ContentGenerator() {
     }
   };
 
-  // --- Instagram solo publica caption: armamos caption final SIN etiquetas
+  // ---- Caption FINAL (lo que realmente publicamos)
   const stripFrameworkLabels = (text) => {
     if (!text) return '';
     return String(text)
@@ -392,23 +440,20 @@ export default function ContentGenerator() {
     const hash = (hashtags || '').trim();
     const ctaLine = cta ? `\n\n${cta}` : '';
 
-    if (p === 'instagram' || p === 'facebook') {
-      return `${cleanTitle}\n\n${cleanBody}${ctaLine}\n\n${hash}`.trim();
-    }
+    // IG/FB usan caption/message
+    const base = `${cleanTitle}\n\n${cleanBody}${ctaLine}\n\n${hash}`.replace(/\n{3,}/g, '\n\n').trim();
+
     if (p === 'whatsapp') {
-      const short = `${cleanTitle}\n${cleanBody}${ctaLine}\n${hash}`.replace(/\n{3,}/g, '\n\n');
-      return short.slice(0, 900).trim();
+      return base.slice(0, 900).trim();
     }
-    if (p === 'youtube') {
-      return `${cleanTitle}\n\n${cleanBody}${ctaLine}\n\n${hash}`.trim();
-    }
-    return `${cleanTitle}\n\n${cleanBody}${ctaLine}\n\n${hash}`.trim();
+    return base;
   };
 
   const publishContent = async () => {
     if (!generatedContent) return;
+
     if (platform === 'tiktok') {
-      setStatusMsg({ type: 'info', text: 'TikTok queda en placeholder por ahora (no publica).' });
+      setStatusMsg({ type: 'info', text: 'TikTok queda en modo manual: copiar/pegar (placeholder).' });
       clearStatusSoon(3500);
       return;
     }
@@ -443,6 +488,9 @@ export default function ContentGenerator() {
           preview_url: generatedContent.preview_url ?? null,
           asset_url: generatedContent.asset_url ?? null,
           asset_type: generatedContent.asset_type ?? null,
+
+          // 🔥 carrusel_urls opcional (publish-content los soporta ahora)
+          carousel_urls: Array.isArray(generatedContent.carousel_urls) ? generatedContent.carousel_urls : [],
         },
         targeting: campaignType === 'paid'
           ? { ab_variant: abVariant, age_range: ageRange, interests }
@@ -468,7 +516,7 @@ export default function ContentGenerator() {
       alert('✅ Publicación enviada. (El backend procesa la publicación a la red seleccionada)');
     } catch (e) {
       console.error('publishContent error:', e);
-      setStatusMsg({ type: 'err', text: '❌ Error al publicar (backend publish-content).' });
+      setStatusMsg({ type: 'err', text: '❌ Error al publicar (publish-content).' });
       clearStatusSoon(3500);
       alert('❌ Error al publicar. Revisa logs de Supabase Edge Function publish-content.');
     } finally {
@@ -477,9 +525,9 @@ export default function ContentGenerator() {
     }
   };
 
-  const copyToClipboard = (text) => {
+  const copyToClipboard = async (text) => {
     try {
-      navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(text);
       setStatusMsg({ type: 'ok', text: '✅ Copiado al portapapeles.' });
       clearStatusSoon();
     } catch (e) {
@@ -536,12 +584,23 @@ export default function ContentGenerator() {
     try {
       if (!generatedContent) return;
 
+      // ✅ Guardamos caption FINAL (lo que se publica)
+      const caption_final = buildPublishCaption(
+        {
+          title: generatedContent.title,
+          body: generatedContent.body,
+          cta: generatedContent.cta,
+          hashtags: generatedContent.hashtags,
+        },
+        platform
+      );
+
       const row = {
         platform,
         content_type: contentType,
         title: generatedContent.title,
         description: generatedContent.body,
-        caption: generatedContent.caption,
+        caption: caption_final,
         hashtags: generatedContent.hashtags,
         cta: generatedContent.cta,
 
@@ -549,9 +608,14 @@ export default function ContentGenerator() {
         asset_url: generatedContent.asset_url ?? null,
         asset_type: generatedContent.asset_type ?? null,
 
+        // 🔥 carrusel_urls opcional: si tu tabla tiene jsonb, genial; si no, lo omitimos
+        // carousel_urls: Array.isArray(generatedContent.carousel_urls) ? generatedContent.carousel_urls : [],
+
         scheduled_date: scheduleData.date,
         scheduled_time: scheduleData.time,
         product_id: selectedProduct || null,
+
+        generated_content_id: generatedContent.id ?? null,
 
         status: 'scheduled',
         campaign_type: campaignType,
@@ -567,16 +631,15 @@ export default function ContentGenerator() {
       if (error) throw error;
 
       setShowScheduleModal(false);
+      window.dispatchEvent(new CustomEvent('calendar:refresh'));
       alert('✅ Contenido programado exitosamente en el calendario');
-
-      // NOTA: esto NO publica solo. Necesitas el scheduler backend.
     } catch (error) {
       console.error('Error scheduling content:', error);
       alert('❌ Error al programar contenido');
     }
   };
 
-  // Fallback local por estrategia (si Edge falla)
+  // Fallback local
   const generateContentByStrategy = (data, product) => {
     const productName = product?.name || 'Producto Keloke';
     const price = product?.price ?? '29.990';
@@ -594,35 +657,35 @@ export default function ContentGenerator() {
       case 'aida':
         title = `🔥 ¡Descubre ${productName}!`;
         body =
-          `ATENCIÓN: ¿Cansado de lo mismo y quieres una solución real?\n\n` +
-          `INTERÉS: ${productName} está pensado para ayudarte con un beneficio clave sin complicarte.\n\n` +
-          `DESEO: Imagina lograr resultados en minutos y con mejor calidad.\n\n` +
+          `ATENCIÓN: ¿Buscas una solución práctica para tu día a día?\n\n` +
+          `INTERÉS: ${productName} te ayuda con un beneficio clave sin complicarte.\n\n` +
+          `DESEO: Imagina mejorar resultados en minutos, con menos esfuerzo.\n\n` +
           `ACCIÓN: Llévalo hoy por $${priceLabel}.\n🚚 Envío a todo Chile.`;
         caption = `¡${productName} puede ser tu mejor compra! 🚀`;
         cta = '¡Compra ahora con envío a todo Chile!';
-        hashtags = ['#Keloke', '#Chile', '#Innovacion', '#Ofertas'];
+        hashtags = ['#Keloke', '#Chile', '#Ofertas', '#ComprasOnline'];
         break;
 
       case 'pas':
         title = `😰 ¿Te pasa esto? ${productName} lo soluciona`;
         body =
-          `PROBLEMA: ¿Cansado de ese problema típico?\n\n` +
-          `AGITACIÓN: Te hace perder tiempo y plata todos los días.\n\n` +
+          `PROBLEMA: Ese problema típico te quita tiempo.\n\n` +
+          `AGITACIÓN: Terminas gastando más de lo necesario.\n\n` +
           `SOLUCIÓN: ${productName} te lo deja resuelto en minutos.\n\n` +
           `💰 $${priceLabel}\n🚚 Envío a todo Chile`;
         caption = `La solución real: ${productName} ✅`;
         cta = '¡Pídelo ahora!';
-        hashtags = ['#Keloke', '#Chile', '#Solucion', '#Ofertas'];
+        hashtags = ['#Keloke', '#Chile', '#Solución', '#Ofertas'];
         break;
 
       case 'storytelling':
         title = `📖 La historia de alguien que probó ${productName}`;
         body =
-          `“Antes me costaba resolver [problema]. Probé ${productName} y cambió todo.”\n\n` +
+          `“Antes me costaba resolver esto. Probé ${productName} y cambió todo.”\n\n` +
           `✨ ${productName}\n💰 $${priceLabel}\n🚚 Envío a todo Chile`;
         caption = `Tu historia puede ser la próxima 🌟`;
         cta = '¡Compra hoy!';
-        hashtags = ['#Keloke', '#Testimonio', '#Chile', '#Transformacion'];
+        hashtags = ['#Keloke', '#Testimonio', '#Chile', '#Transformación'];
         break;
 
       case 'gatillo':
@@ -660,9 +723,10 @@ export default function ContentGenerator() {
       caption,
       cta,
       hashtags: hashtags.join(' '),
-      preview_url: product?.image_url || safePlaceholder(data.content_type),
+      preview_url: data.preview_url || product?.image_url || safePlaceholder(data.content_type),
       asset_url: null,
-      asset_type: null
+      asset_type: null,
+      carousel_urls: Array.isArray(data.carousel_urls) ? data.carousel_urls : [],
     };
   };
 
@@ -707,9 +771,9 @@ export default function ContentGenerator() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Panel de Configuración */}
+        {/* Left */}
         <div className="lg:col-span-1 space-y-4">
-          {/* Tipo de Campaña */}
+          {/* Campaign */}
           <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
             <h3 className="font-bold mb-3 flex items-center gap-2" style={{ color: '#2D5016' }}>
               <Target className="w-4 h-4" />
@@ -744,7 +808,7 @@ export default function ContentGenerator() {
             </div>
           </div>
 
-          {/* Plataforma */}
+          {/* Platform */}
           <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
             <h3 className="font-bold mb-3" style={{ color: '#2D5016' }}>Plataforma</h3>
             <div className="grid grid-cols-2 gap-2">
@@ -765,15 +829,15 @@ export default function ContentGenerator() {
             </div>
           </div>
 
-          {/* Tipo de Contenido */}
+          {/* Content type */}
           <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
             <h3 className="font-bold mb-3" style={{ color: '#2D5016' }}>Formato</h3>
             <div className="space-y-2">
               {[
                 { id: 'post', name: 'Post', icon: FileText },
                 { id: 'reel', name: 'Reel/Video', icon: Video },
-                { id: 'story', name: 'Historia', icon: Image },
-                { id: 'carousel', name: 'Carrusel', icon: Image }
+                { id: 'story', name: 'Historia', icon: ImageIcon },
+                { id: 'carousel', name: 'Carrusel', icon: ImageIcon }
               ].map((type) => {
                 const Icon = type.icon;
                 return (
@@ -796,9 +860,9 @@ export default function ContentGenerator() {
           </div>
         </div>
 
-        {/* Panel de Generación */}
+        {/* Right */}
         <div className="lg:col-span-2 space-y-4">
-          {/* Formulario */}
+          {/* Form */}
           <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-bold flex items-center gap-2" style={{ color: '#2D5016' }}>
@@ -809,7 +873,7 @@ export default function ContentGenerator() {
             </div>
 
             <div className="space-y-4">
-              {/* Producto */}
+              {/* Product */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Producto o Tema
@@ -828,7 +892,7 @@ export default function ContentGenerator() {
                 </select>
               </div>
 
-              {/* Estrategia */}
+              {/* Strategy */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Estrategia de Contenido
@@ -845,7 +909,7 @@ export default function ContentGenerator() {
                 </select>
               </div>
 
-              {/* Tono */}
+              {/* Tone */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Tono de Comunicación
@@ -862,7 +926,6 @@ export default function ContentGenerator() {
                 </select>
               </div>
 
-              {/* Opciones pagadas */}
               {campaignType === 'paid' && (
                 <div className="border-t pt-4">
                   <h4 className="font-medium text-sm mb-3" style={{ color: '#2D5016' }}>
@@ -922,7 +985,6 @@ export default function ContentGenerator() {
                 </div>
               )}
 
-              {/* Generar */}
               <button
                 onClick={generateContent}
                 disabled={loading || (!selectedProduct && products.length > 0)}
@@ -975,7 +1037,7 @@ export default function ContentGenerator() {
                     className="p-2 rounded-lg hover:bg-gray-100 transition-all"
                     title="Descargar imagen/video (si existe)"
                   >
-                    <Image className="w-4 h-4" style={{ color: '#2D5016' }} />
+                    <ImageIcon className="w-4 h-4" style={{ color: '#2D5016' }} />
                   </button>
 
                   <button
@@ -998,11 +1060,15 @@ export default function ContentGenerator() {
                       src={generatedContent.preview_url || safePlaceholder(contentType)}
                       alt="Preview"
                       className="w-full h-full object-cover"
-                      onError={(e) => {
-                        e.currentTarget.src = safePlaceholder(contentType);
-                      }}
+                      onError={(e) => { e.currentTarget.src = safePlaceholder(contentType); }}
                     />
                   </div>
+
+                  {Array.isArray(generatedContent.carousel_urls) && generatedContent.carousel_urls.length > 0 && (
+                    <div className="mt-2 text-xs text-gray-600">
+                      Carrusel: {generatedContent.carousel_urls.length} imágenes
+                    </div>
+                  )}
 
                   <div className="mt-3 flex items-center justify-center gap-2 text-sm text-gray-600">
                     <span className="capitalize">{platform}</span>
@@ -1036,7 +1102,7 @@ export default function ContentGenerator() {
 
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">CAPTION (PUBLICACIÓN)</label>
-                    <p className="text-sm font-medium" style={{ color: '#2D5016' }}>
+                    <p className="text-sm font-medium whitespace-pre-line" style={{ color: '#2D5016' }}>
                       {buildPublishCaption(
                         {
                           title: generatedContent.title,
@@ -1087,7 +1153,7 @@ export default function ContentGenerator() {
                 </div>
               </div>
 
-              {/* Acciones */}
+              {/* Actions */}
               <div className="mt-6 flex flex-wrap items-center gap-3">
                 <button
                   onClick={() => setShowScheduleModal(true)}
@@ -1125,7 +1191,7 @@ export default function ContentGenerator() {
 
               {platform === 'tiktok' && (
                 <div className="mt-4 rounded-lg border border-yellow-200 bg-yellow-50 px-4 py-3 text-sm text-yellow-800">
-                  TikTok está en placeholder por ahora (se activa al final cuando esté aprobado).
+                  TikTok está en modo manual por ahora (copiar/pegar). Se activa cuando Meta/Apps esté aprobado.
                 </div>
               )}
             </div>
@@ -1207,10 +1273,7 @@ function ScheduleModalContent({ onClose, onSchedule, platform }) {
             <h2 className="text-2xl font-bold" style={{ color: '#2D5016' }}>
               📅 Programar Publicación
             </h2>
-            <button
-              onClick={onClose}
-              className="p-2 hover:bg-gray-100 rounded-lg transition-all"
-            >
+            <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg transition-all">
               ✕
             </button>
           </div>
