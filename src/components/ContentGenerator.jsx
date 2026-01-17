@@ -473,7 +473,20 @@ export default function ContentGenerator() {
         },
         platform
       );
+      
+const shouldRetryPublish = (data) => {
+  if (!data || typeof data !== 'object') return false;
 
+  const msg = JSON.stringify(data).toLowerCase();
+
+  return (
+    msg.includes('not_ready') ||
+    msg.includes('processing') ||
+    msg.includes('media not ready') ||
+    msg.includes('temporarily unavailable')
+  );
+};
+      
       const payload = {
         platform,
         content_type: contentType,
@@ -497,8 +510,40 @@ export default function ContentGenerator() {
           : null,
       };
 
-      const { data, error } = await supabase.functions.invoke('publish-content', { body: payload });
-      if (error) throw error;
+      let attempt = 0;
+let maxRetries = 3;
+let delayMs = 15000; // 15 segundos
+let data = null;
+
+while (attempt < maxRetries) {
+  const res = await supabase.functions.invoke('publish-content', { body: payload });
+
+  if (res.error) throw res.error;
+
+  data = res.data;
+
+  // ✅ Si Instagram aún está procesando el video → reintento automático
+  if (shouldRetryPublish(data)) {
+    attempt++;
+    if (attempt >= maxRetries) break;
+
+    setStatusMsg({
+      type: 'info',
+      text: `⏳ Instagram está procesando el video… reintentando (${attempt}/${maxRetries})`
+    });
+
+    await new Promise(r => setTimeout(r, delayMs));
+    continue;
+  }
+
+  // ✅ Publicado correctamente
+  break;
+}
+
+if (!data) {
+  throw new Error('No se pudo publicar tras varios intentos.');
+}
+
 
       if (generatedContent.id) {
         await supabase
