@@ -21,6 +21,7 @@ export default function ContentGenerator() {
   const [loading, setLoading] = useState(false);
   const [publishLoading, setPublishLoading] = useState(false);
 
+  const [videoUrl, setVideoUrl] = useState('');
   const [products, setProducts] = useState([]);
   const [generatedContent, setGeneratedContent] = useState(null);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
@@ -35,6 +36,25 @@ export default function ContentGenerator() {
   const [ageRange, setAgeRange] = useState('25-45');
   const [interests, setInterests] = useState('');
   const [tone, setTone] = useState('profesional');
+  {/* Video URL (solo si es Reel/Video y plataforma soporta video) */}
+{contentType === 'reel' && ['youtube','instagram','facebook'].includes(platform) && (
+  <div>
+    <label className="block text-sm font-medium text-gray-700 mb-2">
+      Video URL (MP4 público)
+    </label>
+    <input
+      type="url"
+      value={videoUrl}
+      onChange={(e) => setVideoUrl(e.target.value)}
+      placeholder="https://.../video.mp4"
+      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-opacity-50 outline-none"
+    />
+    <p className="text-xs text-gray-500 mt-1">
+      Debe ser un link directo a .mp4 (público). Si no hay MP4, YouTube fallará.
+    </p>
+  </div>
+)}
+  
 
   // retry / regen
   const [lastRequest, setLastRequest] = useState(null);
@@ -151,41 +171,53 @@ export default function ContentGenerator() {
   };
 
   const buildPayload = (product) => {
-    const images = normalizeImageList(product);
-    const primary =
-      contentType === 'post' || contentType === 'story' || contentType === 'reel'
-        ? (pickRandom(images) || product?.image_url || null)
-        : (images[0] || product?.image_url || null);
+  const images = normalizeImageList(product);
 
-    const carousel_urls = contentType === 'carousel'
-      ? pickCarousel(images, 3)
-      : [];
+  const carousel_urls = contentType === 'carousel'
+    ? pickCarousel(images, 3)
+    : [];
 
-    return {
-      campaign_type: campaignType,
-      platform,
-      content_type: contentType,
-      product_id: product?.id ?? null,
-      product_name: product?.name || 'Producto Keloke',
-      product_price: product?.price ?? null,
-      product_currency: product?.currency || 'CLP',
-      product_image_url: product?.image_url || null,
+  // ✅ Si es reel/video, priorizamos MP4
+  const mp4 =
+    (videoUrl && videoUrl.trim()) ||
+    product?.video_url ||
+    null;
 
-      // 🔥 NUEVO: si existen, las pasamos para carrusel real
-      product_images: images,
-      carousel_urls,
+  const primary =
+    contentType === 'reel'
+      ? (mp4 || pickRandom(images) || product?.image_url || null)
+      : (
+          contentType === 'post' || contentType === 'story'
+            ? (pickRandom(images) || product?.image_url || null)
+            : (images[0] || product?.image_url || null)
+        );
 
-      strategy,
-      tone,
-      ab_variant: campaignType === 'paid' ? abVariant : null,
-      age_range: campaignType === 'paid' ? ageRange : null,
-      interests: campaignType === 'paid' ? interests : null,
-      generated_at: new Date().toISOString(),
+  return {
+    campaign_type: campaignType,
+    platform,
+    content_type: contentType,
+    product_id: product?.id ?? null,
+    product_name: product?.name || 'Producto Keloke',
+    product_price: product?.price ?? null,
+    product_currency: product?.currency || 'CLP',
+    product_image_url: product?.image_url || null,
 
-      // preview recomendado
-      preview_url: primary || null,
-    };
+    product_images: images,
+    carousel_urls,
+
+    strategy,
+    tone,
+    ab_variant: campaignType === 'paid' ? abVariant : null,
+    age_range: campaignType === 'paid' ? ageRange : null,
+    interests: campaignType === 'paid' ? interests : null,
+    generated_at: new Date().toISOString(),
+
+    preview_url: primary || null,
+
+    // ✅ NUEVO: si es reel, mandamos MP4 como "video_asset_url"
+    video_asset_url: contentType === 'reel' ? mp4 : null,
   };
+};
 
   const generateViaEdgeFunction = async (payload) => {
     try {
@@ -211,26 +243,30 @@ export default function ContentGenerator() {
   };
 
   const normalizeGenerated = (raw, payload, product) => {
-    const fallback = generateContentByStrategy(payload, product);
-    if (!raw || typeof raw !== 'object') return fallback;
+  const fallback = generateContentByStrategy(payload, product);
+  if (!raw || typeof raw !== 'object') return fallback;
 
-    return {
-      title: raw.title ?? fallback.title,
-      body: raw.body ?? fallback.body,
-      caption: raw.caption ?? fallback.caption,
-      hashtags: raw.hashtags ?? fallback.hashtags,
-      cta: raw.cta ?? fallback.cta,
-      preview_url: raw.preview_url ?? payload?.preview_url ?? product?.image_url ?? fallback.preview_url,
-      asset_url: raw.asset_url ?? null,
-      asset_type: raw.asset_type ?? null,
+  const mp4 = payload?.video_asset_url || null;
 
-      // 🔥 NUEVO: carrusel_urls opcional
-      carousel_urls: Array.isArray(raw.carousel_urls) ? raw.carousel_urls : (payload.carousel_urls || []),
+  return {
+    title: raw.title ?? fallback.title,
+    body: raw.body ?? fallback.body,
+    caption: raw.caption ?? fallback.caption,
+    hashtags: raw.hashtags ?? fallback.hashtags,
+    cta: raw.cta ?? fallback.cta,
 
-      provider: raw.provider ?? 'supabase',
-      model: raw.model ?? null,
-    };
+    preview_url: raw.preview_url ?? payload?.preview_url ?? product?.image_url ?? fallback.preview_url,
+
+    // ✅ si es reel, forzamos asset_url al MP4 (si existe)
+    asset_url: (payload?.content_type === 'reel' && mp4) ? mp4 : (raw.asset_url ?? null),
+    asset_type: (payload?.content_type === 'reel' && mp4) ? 'video' : (raw.asset_type ?? null),
+
+    carousel_urls: Array.isArray(raw.carousel_urls) ? raw.carousel_urls : (payload.carousel_urls || []),
+
+    provider: raw.provider ?? 'supabase',
+    model: raw.model ?? null,
   };
+};
 
   const saveGeneratedToSupabase = async (payload, product, content) => {
     const insertRow = {
@@ -451,7 +487,19 @@ export default function ContentGenerator() {
 
   const publishContent = async () => {
     if (!generatedContent) return;
-
+    
+// ✅ bloqueo inteligente: YouTube necesita MP4 sí o sí
+if (platform === 'youtube' && contentType === 'reel') {
+  const u = (generatedContent.asset_url || '').toLowerCase();
+  if (!u.includes('.mp4') && generatedContent.asset_type !== 'video') {
+    setStatusMsg({ type: 'err', text: 'YouTube requiere un MP4 público. Pega Video URL (MP4) y regenera.' });
+    clearStatusSoon(4500);
+    setPublishLoading(false);
+    stopWatchdog();
+    return;
+  }
+}
+    
     if (platform === 'tiktok') {
       setStatusMsg({ type: 'info', text: 'TikTok queda en modo manual: copiar/pegar (placeholder).' });
       clearStatusSoon(3500);
