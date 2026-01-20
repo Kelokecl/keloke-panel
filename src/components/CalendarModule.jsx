@@ -1,7 +1,71 @@
 // CalendarModule.jsx
-import React, { useState, useEffect } from 'react';
-import { Calendar as CalIcon, Clock, TrendingUp, Filter, Plus, Trash2, Copy, ChevronLeft, ChevronRight } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Calendar as CalIcon,
+  Clock,
+  TrendingUp,
+  Filter,
+  Plus,
+  Trash2,
+  Copy,
+  ChevronLeft,
+  ChevronRight
+} from 'lucide-react';
 import { supabase } from '../lib/supabase';
+
+/**
+ * CalendarModule.jsx (FULL - GOD MODE)
+ *
+ * Fixes / mejoras SIN romper:
+ * - ✅ Escucha calendar:refresh (ya estaba) pero ahora evita doble carga innecesaria
+ * - ✅ Filtra por semana visible (antes traía TODO el historial -> pesado y lento)
+ * - ✅ Normaliza scheduled_date / scheduled_time de forma robusta
+ * - ✅ Evita re-render loops: getWeekDays memoizado
+ * - ✅ UI mantiene todo igual, pero más estable
+ * - ✅ Manejo de loading + errores más claro
+ *
+ * Nota: Esto SIGUE siendo "agenda". Para autopublicar a la hora, necesitas un cron/worker aparte.
+ */
+
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+function toDateStr(val) {
+  if (!val) return '';
+  if (typeof val === 'string' && val.length >= 10) return val.slice(0, 10);
+  try {
+    return new Date(val).toISOString().slice(0, 10);
+  } catch {
+    return '';
+  }
+}
+
+function normalizeTime(val) {
+  if (!val) return '';
+  const s = String(val);
+  // soporta "09:00:00" o "09:00"
+  return s.slice(0, 5);
+}
+
+function weekRange(date) {
+  const d = new Date(date);
+  // semana inicia domingo (como tu grid)
+  const start = new Date(d);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - start.getDay());
+
+  const end = new Date(start);
+  end.setDate(end.getDate() + 7); // exclusivo
+  end.setHours(0, 0, 0, 0);
+
+  return {
+    start,
+    end,
+    startStr: `${start.getFullYear()}-${pad2(start.getMonth() + 1)}-${pad2(start.getDate())}`,
+    endStr: `${end.getFullYear()}-${pad2(end.getMonth() + 1)}-${pad2(end.getDate())}`,
+  };
+}
 
 export default function CalendarModule() {
   const [selectedDate, setSelectedDate] = useState(new Date());
@@ -10,6 +74,10 @@ export default function CalendarModule() {
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [selectedContent, setSelectedContent] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [errMsg, setErrMsg] = useState(null);
+
+  // Guard contra cargas duplicadas por efectos/refresh
+  const loadingRef = useRef(false);
 
   // Horarios óptimos para Chile (basados en engagement)
   const optimalTimes = {
@@ -43,139 +111,6 @@ export default function CalendarModule() {
     ]
   };
 
-  const toDateStr = (val) => {
-    if (!val) return '';
-    if (typeof val === 'string' && val.length >= 10) return val.slice(0, 10);
-    try { return new Date(val).toISOString().slice(0, 10); } catch { return ''; }
-  };
-
-  useEffect(() => {
-    loadScheduledContent();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDate, selectedPlatform]);
-
-  useEffect(() => {
-    const handler = () => loadScheduledContent();
-    window.addEventListener('calendar:refresh', handler);
-    return () => window.removeEventListener('calendar:refresh', handler);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDate, selectedPlatform]);
-
-  const loadScheduledContent = async () => {
-    setLoading(true);
-    try {
-      let query = supabase
-        .from('content_calendar')
-        .select('*')
-        .order('scheduled_date', { ascending: true })
-        .order('scheduled_time', { ascending: true });
-
-      if (selectedPlatform !== 'all') query = query.eq('platform', selectedPlatform);
-
-      const { data, error } = await query;
-      if (error) throw error;
-
-      setScheduledContent(data || []);
-    } catch (error) {
-      console.error('Error loading scheduled content:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const scheduleContent = async (contentData) => {
-    try {
-      const { error } = await supabase
-        .from('content_calendar')
-        .insert([{
-          ...contentData,
-          status: 'scheduled',
-          created_at: new Date().toISOString()
-        }]);
-
-      if (error) throw error;
-
-      await loadScheduledContent();
-      setShowScheduleModal(false);
-      window.dispatchEvent(new CustomEvent('calendar:refresh'));
-      alert('✅ Contenido programado exitosamente');
-    } catch (error) {
-      console.error('Error scheduling content:', error);
-      alert('❌ Error al programar contenido');
-    }
-  };
-
-  const deleteScheduledContent = async (id) => {
-    if (!confirm('¿Eliminar este contenido programado?')) return;
-    try {
-      const { error } = await supabase.from('content_calendar').delete().eq('id', id);
-      if (error) throw error;
-      await loadScheduledContent();
-      window.dispatchEvent(new CustomEvent('calendar:refresh'));
-      alert('✅ Contenido eliminado');
-    } catch (error) {
-      console.error('Error deleting content:', error);
-      alert('❌ Error al eliminar');
-    }
-  };
-
-  const duplicateContent = async (content) => {
-    try {
-      const baseDateStr = toDateStr(content.scheduled_date);
-      const [y, m, d] = baseDateStr.split('-').map(Number);
-      const baseLocal = new Date(y, m - 1, d, 12, 0, 0);
-      const nextLocal = new Date(baseLocal.getTime() + 86400000);
-      const nextDateStr = nextLocal.toISOString().slice(0, 10);
-
-      const newContent = {
-        ...content,
-        id: undefined,
-        scheduled_date: nextDateStr,
-        scheduled_time: (content.scheduled_time || '09:00').slice(0, 5),
-        status: 'scheduled',
-        created_at: new Date().toISOString()
-      };
-
-      const { error } = await supabase.from('content_calendar').insert([newContent]);
-      if (error) throw error;
-
-      await loadScheduledContent();
-      window.dispatchEvent(new CustomEvent('calendar:refresh'));
-      alert('✅ Contenido duplicado para el día siguiente');
-    } catch (error) {
-      console.error('Error duplicating content:', error);
-      alert('❌ Error al duplicar');
-    }
-  };
-
-  const getWeekDays = () => {
-    const start = new Date(selectedDate);
-    start.setDate(start.getDate() - start.getDay());
-    const days = [];
-    for (let i = 0; i < 7; i++) {
-      const day = new Date(start);
-      day.setDate(start.getDate() + i);
-      days.push(day);
-    }
-    return days;
-  };
-
-  const getContentForDateTime = (date, time) => {
-    const dateStr = date.toISOString().split('T')[0];
-    return scheduledContent.filter((content) => {
-      if (!content.scheduled_date) return false;
-      const contentDate = String(content.scheduled_date).split('T')[0];
-      const contentTime = String(content.scheduled_time || '').slice(0, 5);
-      return contentDate === dateStr && contentTime === time;
-    });
-  };
-
-  const navigateWeek = (direction) => {
-    const newDate = new Date(selectedDate);
-    newDate.setDate(newDate.getDate() + (direction * 7));
-    setSelectedDate(newDate);
-  };
-
   const platformColors = {
     instagram: '#E4405F',
     tiktok: '#000000',
@@ -199,6 +134,170 @@ export default function CalendarModule() {
     if (v === 'failed') return { text: '⚠️ Falló', cls: 'bg-red-100 text-red-700' };
     return { text: '⏰ Programado', cls: 'bg-blue-100 text-blue-700' };
   };
+
+  const weekDays = useMemo(() => {
+    const start = new Date(selectedDate);
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - start.getDay());
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+      const day = new Date(start);
+      day.setDate(start.getDate() + i);
+      days.push(day);
+    }
+    return days;
+  }, [selectedDate]);
+
+  const { startStr: weekStartStr, endStr: weekEndStr } = useMemo(() => weekRange(selectedDate), [selectedDate]);
+
+  const loadScheduledContent = async () => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+
+    setLoading(true);
+    setErrMsg(null);
+
+    try {
+      let query = supabase
+        .from('content_calendar')
+        .select('*')
+        // ✅ trae solo lo que se ve en la semana del calendario
+        .gte('scheduled_date', weekStartStr)
+        .lt('scheduled_date', weekEndStr)
+        .order('scheduled_date', { ascending: true })
+        .order('scheduled_time', { ascending: true });
+
+      if (selectedPlatform !== 'all') query = query.eq('platform', selectedPlatform);
+
+      const { data, error } = await query;
+      if (error) throw error;
+
+      setScheduledContent(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error('Error loading scheduled content:', error);
+      setErrMsg('No pude cargar el calendario. Revisa Supabase (content_calendar).');
+      setScheduledContent([]);
+    } finally {
+      setLoading(false);
+      loadingRef.current = false;
+    }
+  };
+
+  // Carga normal cuando cambia semana o filtro
+  useEffect(() => {
+    loadScheduledContent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weekStartStr, weekEndStr, selectedPlatform]);
+
+  // Refresh externo (desde ContentGenerator)
+  useEffect(() => {
+    const handler = () => loadScheduledContent();
+    window.addEventListener('calendar:refresh', handler);
+    return () => window.removeEventListener('calendar:refresh', handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weekStartStr, weekEndStr, selectedPlatform]);
+
+  const scheduleContent = async (contentData) => {
+    try {
+      const payload = {
+        ...contentData,
+        status: 'scheduled',
+        // no rompas si tu tabla tiene default now() -> igual mandamos para compatibilidad
+        created_at: new Date().toISOString(),
+        // normaliza strings por si vienen raros
+        scheduled_date: toDateStr(contentData.scheduled_date),
+        scheduled_time: normalizeTime(contentData.scheduled_time || '09:00'),
+      };
+
+      const { error } = await supabase
+        .from('content_calendar')
+        .insert([payload]);
+
+      if (error) throw error;
+
+      await loadScheduledContent();
+      setShowScheduleModal(false);
+      window.dispatchEvent(new CustomEvent('calendar:refresh'));
+      alert('✅ Contenido programado exitosamente');
+    } catch (error) {
+      console.error('Error scheduling content:', error);
+      alert('❌ Error al programar contenido');
+    }
+  };
+
+  const deleteScheduledContent = async (id) => {
+    // eslint-disable-next-line no-restricted-globals
+    if (!confirm('¿Eliminar este contenido programado?')) return;
+    try {
+      const { error } = await supabase.from('content_calendar').delete().eq('id', id);
+      if (error) throw error;
+
+      await loadScheduledContent();
+      window.dispatchEvent(new CustomEvent('calendar:refresh'));
+      alert('✅ Contenido eliminado');
+    } catch (error) {
+      console.error('Error deleting content:', error);
+      alert('❌ Error al eliminar');
+    }
+  };
+
+  const duplicateContent = async (content) => {
+    try {
+      const baseDateStr = toDateStr(content.scheduled_date);
+      if (!baseDateStr) throw new Error('scheduled_date inválido');
+
+      const [y, m, d] = baseDateStr.split('-').map(Number);
+      const baseLocal = new Date(y, m - 1, d, 12, 0, 0);
+      const nextLocal = new Date(baseLocal.getTime() + 86400000);
+      const nextDateStr = nextLocal.toISOString().slice(0, 10);
+
+      const newContent = {
+        ...content,
+        id: undefined, // no enviar
+        scheduled_date: nextDateStr,
+        scheduled_time: normalizeTime(content.scheduled_time || '09:00'),
+        status: 'scheduled',
+        created_at: new Date().toISOString()
+      };
+
+      // Limpia campos que a veces vienen como "null string"
+      if (newContent.publish_response) newContent.publish_response = null;
+
+      const { error } = await supabase.from('content_calendar').insert([newContent]);
+      if (error) throw error;
+
+      await loadScheduledContent();
+      window.dispatchEvent(new CustomEvent('calendar:refresh'));
+      alert('✅ Contenido duplicado para el día siguiente');
+    } catch (error) {
+      console.error('Error duplicating content:', error);
+      alert('❌ Error al duplicar');
+    }
+  };
+
+  const getContentForDateTime = (date, time) => {
+    const dateStr = date.toISOString().split('T')[0];
+
+    return scheduledContent.filter((content) => {
+      if (!content?.scheduled_date) return false;
+
+      const contentDate = String(content.scheduled_date).split('T')[0];
+      const contentTime = normalizeTime(content.scheduled_time || '');
+
+      return contentDate === dateStr && contentTime === time;
+    });
+  };
+
+  const navigateWeek = (direction) => {
+    const newDate = new Date(selectedDate);
+    newDate.setDate(newDate.getDate() + (direction * 7));
+    setSelectedDate(newDate);
+  };
+
+  const weekNumber = useMemo(() => {
+    // tu cálculo original, conservado, pero memo
+    return Math.ceil((selectedDate.getDate() + new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1).getDay()) / 7);
+  }, [selectedDate]);
 
   return (
     <div className="p-6 space-y-6">
@@ -226,7 +325,10 @@ export default function CalendarModule() {
       <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <button onClick={() => navigateWeek(-1)} className="p-2 rounded-lg border border-gray-300 hover:bg-gray-50 transition-all">
+            <button
+              onClick={() => navigateWeek(-1)}
+              className="p-2 rounded-lg border border-gray-300 hover:bg-gray-50 transition-all"
+            >
               <ChevronLeft className="w-5 h-5" />
             </button>
 
@@ -235,15 +337,24 @@ export default function CalendarModule() {
                 {selectedDate.toLocaleDateString('es-CL', { month: 'long', year: 'numeric' })}
               </p>
               <p className="text-sm text-gray-600">
-                Semana {Math.ceil((selectedDate.getDate() + new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1).getDay()) / 7)}
+                Semana {weekNumber}
+              </p>
+              <p className="text-xs text-gray-500">
+                {weekStartStr} → {new Date(new Date(weekEndStr).getTime() - 86400000).toISOString().slice(0, 10)}
               </p>
             </div>
 
-            <button onClick={() => navigateWeek(1)} className="p-2 rounded-lg border border-gray-300 hover:bg-gray-50 transition-all">
+            <button
+              onClick={() => navigateWeek(1)}
+              className="p-2 rounded-lg border border-gray-300 hover:bg-gray-50 transition-all"
+            >
               <ChevronRight className="w-5 h-5" />
             </button>
 
-            <button onClick={() => setSelectedDate(new Date())} className="px-4 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 transition-all text-sm font-medium">
+            <button
+              onClick={() => setSelectedDate(new Date())}
+              className="px-4 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 transition-all text-sm font-medium"
+            >
               Hoy
             </button>
           </div>
@@ -266,6 +377,13 @@ export default function CalendarModule() {
         </div>
       </div>
 
+      {/* Error */}
+      {errMsg && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+          {errMsg}
+        </div>
+      )}
+
       {/* Optimal Times */}
       <div className="bg-gradient-to-r from-green-50 to-yellow-50 p-6 rounded-xl border border-green-200">
         <div className="flex items-center gap-2 mb-4">
@@ -275,11 +393,11 @@ export default function CalendarModule() {
           </h3>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-          {Object.entries(optimalTimes).map(([platform, times]) => (
-            <div key={platform} className="bg-white p-4 rounded-lg border border-gray-200">
+          {Object.entries(optimalTimes).map(([plat, times]) => (
+            <div key={plat} className="bg-white p-4 rounded-lg border border-gray-200">
               <div className="flex items-center gap-2 mb-3">
-                <span className="text-2xl">{platformIcons[platform]}</span>
-                <p className="font-medium text-sm capitalize">{platform}</p>
+                <span className="text-2xl">{platformIcons[plat]}</span>
+                <p className="font-medium text-sm capitalize">{plat}</p>
               </div>
               <div className="space-y-2">
                 {times.map((slot, idx) => (
@@ -309,15 +427,21 @@ export default function CalendarModule() {
           <div className="p-4 bg-gray-50 border-r border-gray-200 flex items-center justify-center">
             <Clock className="w-5 h-5 text-gray-400" />
           </div>
-          {getWeekDays().map((day, idx) => {
+
+          {weekDays.map((day, idx) => {
             const isToday = day.toDateString() === new Date().toDateString();
             return (
-              <div key={idx} className={`p-4 text-center border-r border-gray-200 ${isToday ? 'bg-green-50' : 'bg-gray-50'}`}>
+              <div
+                key={idx}
+                className={`p-4 text-center border-r border-gray-200 ${isToday ? 'bg-green-50' : 'bg-gray-50'}`}
+              >
                 <p className="text-xs text-gray-600 uppercase">
                   {day.toLocaleDateString('es-CL', { weekday: 'short' })}
                 </p>
-                <p className={`text-lg font-bold mt-1 ${isToday ? 'text-white px-2 py-1 rounded-full' : ''}`}
-                   style={isToday ? { backgroundColor: '#2D5016' } : { color: '#2D5016' }}>
+                <p
+                  className={`text-lg font-bold mt-1 ${isToday ? 'text-white px-2 py-1 rounded-full' : ''}`}
+                  style={isToday ? { backgroundColor: '#2D5016' } : { color: '#2D5016' }}
+                >
                   {day.getDate()}
                 </p>
               </div>
@@ -332,24 +456,26 @@ export default function CalendarModule() {
                 <span className="text-sm font-medium text-gray-600">{time}</span>
               </div>
 
-              {getWeekDays().map((day, idx) => {
+              {weekDays.map((day, idx) => {
                 const content = getContentForDateTime(day, time);
                 return (
                   <div key={idx} className="p-2 border-r border-gray-100 min-h-[80px] relative">
                     {content.map((item) => {
                       const sb = statusBadge(item.status);
+                      const color = platformColors[item.platform] || '#2D5016';
+
                       return (
                         <div
-                          key={item.id}
+                          key={item.id || `${item.platform}-${item.scheduled_date}-${item.scheduled_time}-${item.title}`}
                           className="mb-2 p-2 rounded-lg text-xs cursor-pointer hover:shadow-md transition-all group"
                           style={{
-                            backgroundColor: `${platformColors[item.platform]}15`,
-                            borderLeft: `3px solid ${platformColors[item.platform]}`
+                            backgroundColor: `${color}15`,
+                            borderLeft: `3px solid ${color}`
                           }}
                           onClick={() => setSelectedContent(item)}
                         >
                           <div className="flex items-center justify-between mb-1">
-                            <span className="font-medium">{platformIcons[item.platform]}</span>
+                            <span className="font-medium">{platformIcons[item.platform] || '📌'}</span>
                             <div className="opacity-0 group-hover:opacity-100 flex gap-1">
                               <button
                                 onClick={(e) => { e.stopPropagation(); duplicateContent(item); }}
@@ -362,6 +488,7 @@ export default function CalendarModule() {
                                 onClick={(e) => { e.stopPropagation(); deleteScheduledContent(item.id); }}
                                 className="p-1 hover:bg-white rounded text-red-600"
                                 title="Eliminar"
+                                disabled={!item.id}
                               >
                                 <Trash2 className="w-3 h-3" />
                               </button>
@@ -393,10 +520,20 @@ export default function CalendarModule() {
             <CalIcon className="w-4 h-4" /> Cargando calendario...
           </div>
         )}
+
+        {!loading && scheduledContent.length === 0 && (
+          <div className="p-6 text-sm text-gray-600">
+            No hay contenido programado para esta semana{selectedPlatform !== 'all' ? ` en ${selectedPlatform}` : ''}.
+          </div>
+        )}
       </div>
 
       {showScheduleModal && (
-        <ScheduleModal onClose={() => setShowScheduleModal(false)} onSchedule={scheduleContent} optimalTimes={optimalTimes} />
+        <ScheduleModal
+          onClose={() => setShowScheduleModal(false)}
+          onSchedule={scheduleContent}
+          optimalTimes={optimalTimes}
+        />
       )}
 
       {selectedContent && (
@@ -562,10 +699,18 @@ function ScheduleModal({ onClose, onSchedule, optimalTimes }) {
           </div>
 
           <div className="flex gap-3 pt-4">
-            <button type="button" onClick={onClose} className="flex-1 px-6 py-3 border border-gray-300 rounded-lg font-medium hover:bg-gray-50 transition-all">
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 px-6 py-3 border border-gray-300 rounded-lg font-medium hover:bg-gray-50 transition-all"
+            >
               Cancelar
             </button>
-            <button type="submit" className="flex-1 px-6 py-3 rounded-lg text-white font-medium transition-all hover:opacity-90" style={{ backgroundColor: '#2D5016' }}>
+            <button
+              type="submit"
+              className="flex-1 px-6 py-3 rounded-lg text-white font-medium transition-all hover:opacity-90"
+              style={{ backgroundColor: '#2D5016' }}
+            >
               Programar
             </button>
           </div>
@@ -644,11 +789,11 @@ function ContentDetailModal({ content, onClose, onDelete, onDuplicate }) {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <p className="text-sm font-medium text-gray-700 mb-1">Fecha Programada</p>
-              <p className="text-gray-800">{String(content.scheduled_date).slice(0,10)}</p>
+              <p className="text-gray-800">{toDateStr(content.scheduled_date)}</p>
             </div>
             <div>
               <p className="text-sm font-medium text-gray-700 mb-1">Hora</p>
-              <p className="text-gray-800">{String(content.scheduled_time || '').slice(0,5)}</p>
+              <p className="text-gray-800">{String(content.scheduled_time || '').slice(0, 5)}</p>
             </div>
           </div>
 
@@ -663,6 +808,7 @@ function ContentDetailModal({ content, onClose, onDelete, onDuplicate }) {
             <button
               onClick={() => { onDelete(content.id); onClose(); }}
               className="flex-1 px-6 py-3 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition-all flex items-center justify-center gap-2"
+              disabled={!content.id}
             >
               <Trash2 className="w-4 h-4" />
               Eliminar
