@@ -1,548 +1,313 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import {
-  FileText,
-  Calendar,
-  TrendingUp,
-  BarChart3,
-  Zap,
-  Settings,
-  Bell,
-  ShoppingBag,
-  AlertCircle,
+  Bot,
+  Send,
   Sparkles,
-  Wrench
+  TrendingUp,
+  AlertCircle,
+  Zap,
+  Calendar
 } from 'lucide-react';
 
-function safeNumber(n, fallback = 0) {
-  return typeof n === 'number' && !Number.isNaN(n) ? n : fallback;
+function nowISO() {
+  return new Date().toISOString();
 }
 
-function getErrorTextFromPublishResponse(publish_response) {
+async function safeInsert(table, row) {
   try {
-    if (!publish_response) return null;
-    if (typeof publish_response === 'string') return publish_response.slice(0, 240);
-    if (typeof publish_response === 'object') {
-      const err =
-        publish_response.error ||
-        publish_response.message ||
-        publish_response.detail ||
-        (publish_response.response && JSON.stringify(publish_response.response)) ||
-        JSON.stringify(publish_response);
-      return String(err).slice(0, 240);
-    }
-    return String(publish_response).slice(0, 240);
+    const { error } = await supabase.from(table).insert(row);
+    if (error) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function safeSelect(table, queryBuilder) {
+  try {
+    const { data, error } = await queryBuilder(supabase.from(table));
+    if (error) return null;
+    return data;
   } catch {
     return null;
   }
 }
 
-async function countTable(table, filters = []) {
-  let q = supabase.from(table).select('id', { count: 'exact', head: true });
-  for (const f of filters) {
-    if (f.type === 'eq') q = q.eq(f.col, f.val);
-    if (f.type === 'neq') q = q.neq(f.col, f.val);
-    if (f.type === 'gte') q = q.gte(f.col, f.val);
-    if (f.type === 'lte') q = q.lte(f.col, f.val);
-    if (f.type === 'in') q = q.in(f.col, f.val);
-  }
-  const res = await q;
-  if (res.error) throw res.error;
-  return safeNumber(res.count, 0);
-}
+export default function AIManagerModule() {
+  const [messages, setMessages] = useState([]);
+  const [inputMessage, setInputMessage] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [aiInsights, setAiInsights] = useState(null);
 
-async function tryCountAutomationsActive() {
-  try {
-    return await countTable('automations', [{ type: 'eq', col: 'enabled', val: true }]);
-  } catch {
-    try {
-      return await countTable('automations', [{ type: 'eq', col: 'is_active', val: true }]);
-    } catch {
-      return 0;
-    }
-  }
-}
-
-async function tryFetchWinningProducts(limit = 5) {
-  // Si no existe la tabla, devolvemos []
-  const baseSelect =
-    'id, product_name, product_title, title, category, suggested_price_clp, suggested_price, price_clp, tiktok_score, score, created_at, status, source';
-
-  const attempts = [
-    { order: { col: 'tiktok_score', ascending: false } },
-    { order: { col: 'score', ascending: false } },
-    { order: { col: 'created_at', ascending: false } },
-  ];
-
-  for (const a of attempts) {
-    try {
-      const { data, error } = await supabase
-        .from('winning_products')
-        .select(baseSelect)
-        .eq('status', 'active')
-        .order(a.order.col, { ascending: a.order.ascending })
-        .limit(limit);
-
-      if (!error) return data || [];
-    } catch {
-      // sigue intentando
-    }
-  }
-  return [];
-}
-
-async function tryFetchAISuggestions(limit = 3) {
-  // Opcional: si existe ai_suggestions, mostramos las últimas.
-  try {
-    const { data, error } = await supabase
-      .from('ai_suggestions')
-      .select('id, created_at, title, suggestion, priority')
-      .order('created_at', { ascending: false })
-      .limit(limit);
-
-    if (error) return [];
-    return data || [];
-  } catch {
-    return [];
-  }
-}
-
-export default function Dashboard() {
-  const [stats, setStats] = useState({
-    totalProducts: 0,
-    scheduledContent: 0,
-    activeAutomations: 0,
-    pendingAlerts: 0,
-  });
-
-  const [businessAlerts, setBusinessAlerts] = useState([]);
-  const [techErrors, setTechErrors] = useState([]);
-  const [winningProducts, setWinningProducts] = useState([]);
-  const [aiSuggestions, setAiSuggestions] = useState([]);
-
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const messagesEndRef = useRef(null);
 
   useEffect(() => {
-    loadDashboardData();
+    loadAIInsights();
+    loadConversationHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function loadDashboardData() {
-    const timeout = setTimeout(() => {
-      setError('La carga está tardando más de lo esperado. Verifica tu conexión.');
-      setLoading(false);
-    }, 12000);
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
+  async function loadAIInsights() {
+    // Si existe ai_insights, úsala. Si no, construimos insights desde tablas reales.
+    const data = await safeSelect('ai_insights', (t) =>
+      t.select('*').order('created_at', { ascending: false }).limit(1).single()
+    );
+
+    if (data) {
+      setAiInsights(data);
+      return;
+    }
+
+    // Fallback: reconstruimos con conteos de tablas reales
     try {
-      setError(null);
-
-      const now = new Date();
-      const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
-
-      // Contadores
-      const [totalProducts, scheduledContent, activeAutomations, pendingAlerts] = await Promise.all([
+      const [productsCount, scheduledCount, automationsCount, failedCount] = await Promise.all([
+        supabase.from('products').select('id', { count: 'exact', head: true }),
+        supabase.from('content_calendar').select('id', { count: 'exact', head: true }).eq('status', 'scheduled'),
+        // automations: enabled o is_active
         (async () => {
-          try { return await countTable('products'); } catch { return 0; }
+          const a1 = await supabase.from('automations').select('id', { count: 'exact', head: true }).eq('enabled', true);
+          if (!a1.error) return a1.count || 0;
+          const a2 = await supabase.from('automations').select('id', { count: 'exact', head: true }).eq('is_active', true);
+          if (!a2.error) return a2.count || 0;
+          return 0;
         })(),
-        (async () => {
-          try {
-            return await countTable('content_calendar', [{ type: 'eq', col: 'status', val: 'scheduled' }]);
-          } catch {
-            return 0;
-          }
-        })(),
-        tryCountAutomationsActive(),
-        // ALERTAS PENDIENTES = dashboard_alerts sin leer (negocio)
-        (async () => {
-          try {
-            return await countTable('dashboard_alerts', [{ type: 'eq', col: 'is_read', val: false }]);
-          } catch {
-            return 0;
-          }
-        })(),
+        supabase.from('content_calendar').select('id', { count: 'exact', head: true }).eq('status', 'failed'),
       ]);
 
-      setStats({ totalProducts, scheduledContent, activeAutomations, pendingAlerts });
-
-      // Alertas de negocio (dashboard_alerts)
-      let alerts = [];
-      try {
-        const { data } = await supabase
-          .from('dashboard_alerts')
-          .select('id, created_at, alert_type, category, title, message, is_read, source, entity_id')
-          .order('created_at', { ascending: false })
-          .limit(5);
-
-        alerts = data || [];
-      } catch {
-        alerts = [];
-      }
-      setBusinessAlerts(alerts);
-
-      // Errores técnicos (content_calendar failed)
-      let failedItems = [];
-      try {
-        const { data } = await supabase
-          .from('content_calendar')
-          .select('id, platform, content_type, title, updated_at, publish_response, status')
-          .eq('status', 'failed')
-          .order('updated_at', { ascending: false })
-          .limit(5);
-
-        failedItems = data || [];
-      } catch {
-        failedItems = [];
-      }
-
-      const normalizedTech = failedItems.map((it) => ({
-        id: it.id,
-        title: it.title || `Fallo (${it.platform || 'plataforma'})`,
-        message:
-          getErrorTextFromPublishResponse(it.publish_response) ||
-          `Falló publicación ${it.content_type || ''} en ${it.platform || ''}.`,
-        created_at: it.updated_at || new Date().toISOString(),
-        platform: it.platform || null,
-      }));
-
-      setTechErrors(normalizedTech);
-
-      // Productos ganadores (si existe)
-      const winners = await tryFetchWinningProducts(5);
-      setWinningProducts(winners);
-
-      // Sugerencias IA (si existe)
-      const suggestions = await tryFetchAISuggestions(3);
-      setAiSuggestions(suggestions);
-
-      clearTimeout(timeout);
-    } catch (e) {
-      console.error('Error loading dashboard:', e);
-      setError('Error al cargar el dashboard. Por favor, intenta recargar la página.');
-      clearTimeout(timeout);
-    } finally {
-      setLoading(false);
+      setAiInsights({
+        active_products: productsCount.count || 0,
+        scheduled_content: scheduledCount.count || 0,
+        active_automations: automationsCount || 0,
+        pending_alerts: failedCount.count || 0,
+      });
+    } catch {
+      setAiInsights({
+        active_products: 0,
+        scheduled_content: 0,
+        active_automations: 0,
+        pending_alerts: 0,
+      });
     }
   }
 
-  const alertTypeColors = {
-    critical: 'bg-red-100 text-red-700 border-red-200',
-    warning: 'bg-yellow-100 text-yellow-700 border-yellow-200',
-    info: 'bg-blue-100 text-blue-700 border-blue-200',
-    success: 'bg-green-100 text-green-700 border-green-200',
-  };
+  async function loadConversationHistory() {
+    // Si no existe ai_conversations, no rompemos: partimos vacío.
+    const data = await safeSelect('ai_conversations', (t) =>
+      t.select('*').order('created_at', { ascending: true }).limit(50)
+    );
 
-  function go(path) {
-    window.location.href = path;
+    if (data && Array.isArray(data) && data.length > 0) {
+      setMessages(data);
+    } else {
+      setMessages([]);
+    }
   }
 
-  const normalizedWinners = (winningProducts || []).map((p) => {
-    const name = p.product_name || p.product_title || p.title || 'Producto';
-    const category = p.category || 'Chile';
-    const price = p.suggested_price_clp ?? p.suggested_price ?? p.price_clp ?? null;
-    const score = p.tiktok_score ?? p.score ?? null;
-    const source = p.source || 'web';
-    return { ...p, _name: name, _category: category, _price: price, _score: score, _source: source };
-  });
+  async function handleSendMessage() {
+    if (!inputMessage.trim() || isLoading) return;
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-screen">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-4 border-gray-200 mx-auto" style={{ borderTopColor: '#2D5016' }}></div>
-          <p className="text-gray-600 mt-4">Cargando dashboard...</p>
-        </div>
-      </div>
-    );
-  }
+    const raw = inputMessage.trim();
 
-  if (error) {
-    return (
-      <div className="flex items-center justify-center h-screen">
-        <div className="text-center max-w-md mx-auto p-6">
-          <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
-          <h2 className="text-xl font-bold text-gray-900 mb-2">Error al cargar</h2>
-          <p className="text-gray-600 mb-4">{error}</p>
-          <button
-            onClick={() => {
-              setLoading(true);
-              setError(null);
-              loadDashboardData();
-            }}
-            className="px-6 py-2 text-white rounded-lg hover:opacity-90"
-            style={{ backgroundColor: '#2D5016' }}
-          >
-            Reintentar
-          </button>
-        </div>
-      </div>
-    );
+    const userMessage = {
+      role: 'user',
+      content: raw,
+      created_at: nowISO(),
+    };
+
+    setMessages((prev) => [...prev, userMessage]);
+    setInputMessage('');
+    setIsLoading(true);
+
+    // Guardar mensaje usuario si existe la tabla
+    await safeInsert('ai_conversations', { role: 'user', content: raw });
+
+    try {
+      // 1) Intentamos responder usando tu Edge Function "autogerente" (v1)
+      const { data, error } = await supabase.functions.invoke('autogerente', {
+        body: {
+          message: raw,
+          channel: 'panel',
+          user_id: null,
+        },
+      });
+
+      if (error) throw error;
+
+      // data.reply es lo principal; data.actions opcional
+      const reply = data?.reply || 'OK.';
+
+      const assistantMessage = {
+        role: 'assistant',
+        content: reply,
+        created_at: nowISO(),
+      };
+
+      setMessages((prev) => [...prev, assistantMessage]);
+
+      await safeInsert('ai_conversations', { role: 'assistant', content: reply });
+
+      // Refrescamos insights por si cambió algo
+      loadAIInsights();
+    } catch (e) {
+      console.error('AI error:', e);
+      const assistantMessage = {
+        role: 'assistant',
+        content:
+          'Tuve un problema conectando con el Auto-Gerente. Revisa que la Edge Function "autogerente" esté desplegada y disponible.',
+        created_at: nowISO(),
+      };
+      setMessages((prev) => [...prev, assistantMessage]);
+      await safeInsert('ai_conversations', { role: 'assistant', content: assistantMessage.content });
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-6 h-screen flex flex-col">
       {/* Header */}
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-bold" style={{ color: '#2D5016' }}>Dashboard General</h1>
-          <p className="text-gray-600 mt-1">Resumen del sistema (negocio + automatización + control técnico)</p>
-        </div>
-
-        <button
-          onClick={() => loadDashboardData()}
-          className="px-4 py-2 rounded-lg border border-gray-200 hover:border-gray-300 text-sm"
-        >
-          Actualizar
-        </button>
-      </div>
-
-      {/* Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-600">Productos Activos</p>
-              <p className="text-3xl font-bold mt-2" style={{ color: '#2D5016' }}>{stats.totalProducts}</p>
-            </div>
-            <div className="w-12 h-12 rounded-lg flex items-center justify-center" style={{ backgroundColor: '#F5E6D3' }}>
-              <ShoppingBag className="w-6 h-6" style={{ color: '#2D5016' }} />
-            </div>
+      <div className="mb-6">
+        <div className="flex items-center gap-3 mb-2">
+          <div className="w-12 h-12 rounded-xl flex items-center justify-center" style={{ backgroundColor: '#D4A017' }}>
+            <Bot className="w-7 h-7 text-white" />
           </div>
-        </div>
-
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-600">Contenido Programado</p>
-              <p className="text-3xl font-bold mt-2" style={{ color: '#2D5016' }}>{stats.scheduledContent}</p>
-            </div>
-            <div className="w-12 h-12 rounded-lg flex items-center justify-center" style={{ backgroundColor: '#F5E6D3' }}>
-              <Calendar className="w-6 h-6" style={{ color: '#2D5016' }} />
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-600">Automatizaciones Activas</p>
-              <p className="text-3xl font-bold mt-2" style={{ color: '#2D5016' }}>{stats.activeAutomations}</p>
-            </div>
-            <div className="w-12 h-12 rounded-lg flex items-center justify-center" style={{ backgroundColor: '#F5E6D3' }}>
-              <Zap className="w-6 h-6" style={{ color: '#2D5016' }} />
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-600">Alertas Pendientes (Negocio)</p>
-              <p className="text-3xl font-bold mt-2" style={{ color: '#2D5016' }}>{stats.pendingAlerts}</p>
-            </div>
-            <div className="w-12 h-12 rounded-lg flex items-center justify-center" style={{ backgroundColor: '#F5E6D3' }}>
-              <Bell className="w-6 h-6" style={{ color: '#2D5016' }} />
-            </div>
+          <div>
+            <h1 className="text-3xl font-bold" style={{ color: '#2D5016' }}>Auto-Gerente IA</h1>
+            <p className="text-gray-600">Motor: Edge Function “autogerente” (v1)</p>
           </div>
         </div>
       </div>
 
-      {/* Sugerencias IA */}
-      <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: '#2D5016' }}>
-            <Sparkles className="w-5 h-5" style={{ color: '#D4A017' }} />
-            Sugerencias IA (Copiloto)
-          </h2>
-          <button
-            onClick={() => go('/ai-manager')}
-            className="text-sm underline"
-            style={{ color: '#2D5016' }}
-          >
-            Abrir Auto-Gerente
-          </button>
-        </div>
+      {/* AI Insights Cards */}
+      {aiInsights && (
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+          <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
+            <div className="flex items-center gap-2 mb-2">
+              <TrendingUp className="w-4 h-4" style={{ color: '#2D5016' }} />
+              <span className="text-xs text-gray-600">Productos Activos</span>
+            </div>
+            <p className="text-2xl font-bold" style={{ color: '#2D5016' }}>
+              {aiInsights.active_products || 0}
+            </p>
+          </div>
 
-        {aiSuggestions.length === 0 ? (
-          <p className="text-gray-600 text-sm">
-            Aún no hay sugerencias guardadas. En el paso 3 conectamos esto al Auto-Gerente (GPT-5-mini) para que te deje recomendaciones accionables.
-          </p>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {aiSuggestions.map((s) => (
-              <div key={s.id} className="border border-gray-100 rounded-lg p-4">
-                <p className="text-xs text-gray-500">
-                  {new Date(s.created_at).toLocaleString('es-CL')} · prioridad: {s.priority || 'normal'}
-                </p>
-                <p className="font-semibold mt-1" style={{ color: '#2D5016' }}>{s.title}</p>
-                <p className="text-sm text-gray-700 mt-2 whitespace-pre-wrap">{s.suggestion}</p>
+          <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
+            <div className="flex items-center gap-2 mb-2">
+              <Calendar className="w-4 h-4" style={{ color: '#2D5016' }} />
+              <span className="text-xs text-gray-600">Contenido Programado</span>
+            </div>
+            <p className="text-2xl font-bold" style={{ color: '#2D5016' }}>
+              {aiInsights.scheduled_content || 0}
+            </p>
+          </div>
+
+          <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
+            <div className="flex items-center gap-2 mb-2">
+              <Zap className="w-4 h-4" style={{ color: '#2D5016' }} />
+              <span className="text-xs text-gray-600">Automatizaciones</span>
+            </div>
+            <p className="text-2xl font-bold" style={{ color: '#2D5016' }}>
+              {aiInsights.active_automations || 0}
+            </p>
+          </div>
+
+          <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
+            <div className="flex items-center gap-2 mb-2">
+              <AlertCircle className="w-4 h-4" style={{ color: '#D4A017' }} />
+              <span className="text-xs text-gray-600">Alertas</span>
+            </div>
+            <p className="text-2xl font-bold" style={{ color: '#D4A017' }}>
+              {aiInsights.pending_alerts || 0}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Chat Container */}
+      <div className="flex-1 bg-white rounded-xl shadow-sm border border-gray-100 flex flex-col overflow-hidden">
+        {/* Messages Area */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+          {messages.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full text-center">
+              <div className="w-20 h-20 rounded-full flex items-center justify-center mb-4" style={{ backgroundColor: '#F5E6D3' }}>
+                <Sparkles className="w-10 h-10" style={{ color: '#D4A017' }} />
               </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Content Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Alertas de negocio */}
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-bold" style={{ color: '#2D5016' }}>Alertas Recientes (Negocio)</h2>
-            <Bell className="w-5 h-5 text-gray-400" />
-          </div>
-
-          <div className="space-y-3">
-            {businessAlerts.length === 0 ? (
-              <p className="text-gray-500 text-sm text-center py-8">
-                Aún no hay alertas del negocio. (Ventas, mensajes, comentarios, stock, etc.)
+              <h3 className="text-xl font-bold mb-2" style={{ color: '#2D5016' }}>
+                ¡Hola! Soy tu Auto-Gerente IA
+              </h3>
+              <p className="text-gray-600 max-w-md">
+                Puedo ayudarte con contenido, calendario, diagnóstico de fallos y próximos pasos. Escríbeme lo que necesitas.
               </p>
-            ) : (
-              businessAlerts.map((a) => (
+            </div>
+          ) : (
+            messages.map((msg, index) => (
+              <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div
-                  key={a.id}
-                  className={`p-4 rounded-lg border ${alertTypeColors[a.alert_type] || alertTypeColors.info}`}
+                  className={`max-w-[70%] rounded-lg p-4 ${
+                    msg.role === 'user' ? 'text-white' : 'bg-gray-50 text-gray-800'
+                  }`}
+                  style={msg.role === 'user' ? { backgroundColor: '#2D5016' } : {}}
                 >
-                  <div className="flex items-start gap-3">
-                    <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                  <div className="flex items-start gap-2">
+                    {msg.role === 'assistant' && (
+                      <Bot className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: '#D4A017' }} />
+                    )}
                     <div className="flex-1">
-                      <p className="font-medium text-sm">{a.title}</p>
-                      <p className="text-xs mt-1 opacity-80 whitespace-pre-wrap">{a.message}</p>
-                      <p className="text-xs mt-2 opacity-60">
-                        {new Date(a.created_at).toLocaleString('es-CL')} · {a.category} · {a.source || 'system'}
+                      <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                      <p className={`text-xs mt-2 ${msg.role === 'user' ? 'text-white/70' : 'text-gray-500'}`}>
+                        {new Date(msg.created_at).toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' })}
                       </p>
                     </div>
                   </div>
                 </div>
-              ))
-            )}
-          </div>
+              </div>
+            ))
+          )}
+
+          {isLoading && (
+            <div className="flex justify-start">
+              <div className="bg-gray-50 rounded-lg p-4 max-w-[70%]">
+                <div className="flex items-center gap-2">
+                  <Bot className="w-5 h-5" style={{ color: '#D4A017' }} />
+                  <div className="flex gap-1">
+                    <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                    <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                    <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div ref={messagesEndRef} />
         </div>
 
-        {/* Productos ganadores */}
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-bold" style={{ color: '#2D5016' }}>Top Productos Ganadores (Chile)</h2>
-            <TrendingUp className="w-5 h-5 text-gray-400" />
-          </div>
-
-          <div className="space-y-3">
-            {normalizedWinners.length === 0 ? (
-              <p className="text-gray-500 text-sm text-center py-8">
-                Aún no hay productos ganadores (o la tabla winning_products no está alimentada).
-              </p>
-            ) : (
-              normalizedWinners.map((p, idx) => {
-                const score = p._score;
-                const scorePct =
-                  typeof score === 'number' ? Math.max(0, Math.min(100, (score / 10) * 100)) : 0;
-
-                return (
-                  <div key={p.id || idx} className="p-4 rounded-lg border border-gray-100 hover:border-gray-200 transition-colors">
-                    <div className="flex items-start gap-3">
-                      <div className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0" style={{ backgroundColor: '#D4A017' }}>
-                        <span className="text-white font-bold text-sm">{idx + 1}</span>
-                      </div>
-
-                      <div className="flex-1">
-                        <p className="font-medium text-sm">{p._name}</p>
-
-                        <div className="flex items-center gap-3 mt-2 text-xs text-gray-600">
-                          <span className="px-2 py-1 rounded-full text-xs" style={{ backgroundColor: '#F5E6D3', color: '#2D5016' }}>
-                            {p._category}
-                          </span>
-                          <span className="text-xs text-gray-500">
-                            fuente: {p._source}
-                          </span>
-                          {p._price != null && (
-                            <span className="font-mono" style={{ color: '#2D5016' }}>
-                              ${Number(p._price).toLocaleString('es-CL')}
-                            </span>
-                          )}
-                        </div>
-
-                        {typeof score === 'number' && (
-                          <div className="flex items-center gap-2 mt-2">
-                            <div className="flex-1 bg-gray-100 rounded-full h-2">
-                              <div className="h-2 rounded-full" style={{ width: `${scorePct}%`, backgroundColor: '#D4A017' }}></div>
-                            </div>
-                            <span className="text-xs font-medium" style={{ color: '#2D5016' }}>
-                              {score}/10
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-
+        {/* Input Area */}
+        <div className="border-t border-gray-100 p-4">
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={inputMessage}
+              onChange={(e) => setInputMessage(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+              placeholder="Escribe tu mensaje al Auto-Gerente IA..."
+              className="flex-1 px-4 py-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-700/30"
+              disabled={isLoading}
+            />
             <button
-              onClick={() => go('/trends')}
-              className="w-full mt-2 px-4 py-2 rounded-lg border border-gray-200 hover:border-gray-300 text-sm"
+              onClick={handleSendMessage}
+              disabled={!inputMessage.trim() || isLoading}
+              className="px-6 py-3 rounded-lg text-white font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-lg"
+              style={{ backgroundColor: '#2D5016' }}
             >
-              Ver módulo de Tendencias / Ganadores
+              <Send className="w-5 h-5" />
             </button>
           </div>
-        </div>
-      </div>
-
-      {/* Errores técnicos */}
-      <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: '#2D5016' }}>
-            <Wrench className="w-5 h-5 text-gray-400" />
-            Errores Técnicos Recientes (Publicación)
-          </h2>
-          <button onClick={() => go('/logs')} className="text-sm underline" style={{ color: '#2D5016' }}>
-            Ver logs
-          </button>
-        </div>
-
-        {techErrors.length === 0 ? (
-          <p className="text-gray-500 text-sm text-center py-6">Sin errores recientes ✅</p>
-        ) : (
-          <div className="space-y-3">
-            {techErrors.map((t) => (
-              <div key={t.id} className="p-4 rounded-lg border bg-red-50 text-red-700 border-red-200">
-                <p className="text-sm font-semibold">{t.title}</p>
-                <p className="text-xs mt-1 opacity-90 whitespace-pre-wrap">{t.message}</p>
-                <p className="text-xs mt-2 opacity-70">
-                  {new Date(t.created_at).toLocaleString('es-CL')} {t.platform ? `· ${t.platform}` : ''}
-                </p>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Quick Actions */}
-      <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-        <h2 className="text-xl font-bold mb-4" style={{ color: '#2D5016' }}>Acciones Rápidas</h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <button onClick={() => go('/content')} className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left">
-            <FileText className="w-6 h-6 mb-2" style={{ color: '#2D5016' }} />
-            <p className="font-medium text-sm">Generar Contenido</p>
-            <p className="text-xs text-gray-500 mt-1">Crear nuevo post</p>
-          </button>
-
-          <button onClick={() => go('/calendar')} className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left">
-            <Calendar className="w-6 h-6 mb-2" style={{ color: '#2D5016' }} />
-            <p className="font-medium text-sm">Ver Calendario</p>
-            <p className="text-xs text-gray-500 mt-1">Programar publicaciones</p>
-          </button>
-
-          <button onClick={() => go('/analytics')} className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left">
-            <BarChart3 className="w-6 h-6 mb-2" style={{ color: '#2D5016' }} />
-            <p className="font-medium text-sm">Analítica</p>
-            <p className="text-xs text-gray-500 mt-1">Ver métricas</p>
-          </button>
-
-          <button onClick={() => go('/settings')} className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left">
-            <Settings className="w-6 h-6 mb-2" style={{ color: '#2D5016' }} />
-            <p className="font-medium text-sm">Configuración</p>
-            <p className="text-xs text-gray-500 mt-1">Ajustar sistema</p>
-          </button>
         </div>
       </div>
     </div>
