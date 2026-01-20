@@ -1,6 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { useNavigate } from 'react-router-dom';
 import {
   FileText,
   Calendar,
@@ -10,12 +9,90 @@ import {
   Settings,
   Bell,
   ShoppingBag,
-  AlertCircle,
+  AlertCircle
 } from 'lucide-react';
 
-export default function Dashboard() {
-  const navigate = useNavigate();
+function safeNumber(n, fallback = 0) {
+  return typeof n === 'number' && !Number.isNaN(n) ? n : fallback;
+}
 
+function getErrorTextFromPublishResponse(publish_response) {
+  try {
+    if (!publish_response) return null;
+    if (typeof publish_response === 'string') return publish_response.slice(0, 240);
+    if (typeof publish_response === 'object') {
+      // Normalizamos los errores típicos
+      const err =
+        publish_response.error ||
+        publish_response.message ||
+        publish_response.detail ||
+        (publish_response.response && JSON.stringify(publish_response.response)) ||
+        JSON.stringify(publish_response);
+      return String(err).slice(0, 240);
+    }
+    return String(publish_response).slice(0, 240);
+  } catch {
+    return null;
+  }
+}
+
+async function countTable(table, filters = []) {
+  // filters: [{ type: 'eq'|'gte'|'lte'|'in'|'neq', col, val }]
+  let q = supabase.from(table).select('id', { count: 'exact', head: true });
+  for (const f of filters) {
+    if (f.type === 'eq') q = q.eq(f.col, f.val);
+    if (f.type === 'neq') q = q.neq(f.col, f.val);
+    if (f.type === 'gte') q = q.gte(f.col, f.val);
+    if (f.type === 'lte') q = q.lte(f.col, f.val);
+    if (f.type === 'in') q = q.in(f.col, f.val);
+  }
+  const res = await q;
+  if (res.error) throw res.error;
+  return safeNumber(res.count, 0);
+}
+
+async function tryCountAutomationsActive() {
+  // Intenta automations.enabled=true, si no existe la columna, prueba is_active=true
+  try {
+    return await countTable('automations', [{ type: 'eq', col: 'enabled', val: true }]);
+  } catch {
+    try {
+      return await countTable('automations', [{ type: 'eq', col: 'is_active', val: true }]);
+    } catch {
+      return 0;
+    }
+  }
+}
+
+async function tryFetchWinningProducts(limit = 3) {
+  // Soporta esquemas distintos de winning_products
+  // intentamos: order by tiktok_score desc; si falla, order by score desc; si falla, order by created_at desc
+  const baseSelect = 'id, product_name, product_title, title, category, suggested_price_clp, suggested_price, price_clp, tiktok_score, score, created_at, status';
+
+  const attempts = [
+    { order: { col: 'tiktok_score', ascending: false } },
+    { order: { col: 'score', ascending: false } },
+    { order: { col: 'created_at', ascending: false } }
+  ];
+
+  for (const a of attempts) {
+    try {
+      const { data, error } = await supabase
+        .from('winning_products')
+        .select(baseSelect)
+        .eq('status', 'active')
+        .order(a.order.col, { ascending: a.order.ascending })
+        .limit(limit);
+
+      if (!error) return data || [];
+    } catch {
+      // sigue intentando
+    }
+  }
+  return [];
+}
+
+export default function Dashboard() {
   const [stats, setStats] = useState({
     totalProducts: 0,
     scheduledContent: 0,
@@ -29,94 +106,62 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  const alertTypeColors = useMemo(() => ({
-    critical: 'bg-red-100 text-red-700 border-red-200',
-    important: 'bg-yellow-100 text-yellow-700 border-yellow-200',
-    informational: 'bg-blue-100 text-blue-700 border-blue-200',
-    report: 'bg-green-100 text-green-700 border-green-200',
-  }), []);
-
   useEffect(() => {
     loadDashboardData();
-    // refresh event (por si calendar / autogerente dispara refresh)
-    const handler = () => loadDashboardData();
-    window.addEventListener('dashboard:refresh', handler);
-    return () => window.removeEventListener('dashboard:refresh', handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function safeCount(queryPromise) {
-    try {
-      const res = await queryPromise;
-      if (res?.error) return 0;
-      return res?.count || 0;
-    } catch {
-      return 0;
-    }
-  }
-
-  async function safeSelect(queryPromise, fallback = []) {
-    try {
-      const res = await queryPromise;
-      if (res?.error) return fallback;
-      return res?.data || fallback;
-    } catch {
-      return fallback;
-    }
-  }
-
   async function loadDashboardData() {
-    setLoading(true);
-    setError(null);
-
     const timeout = setTimeout(() => {
       setError('La carga está tardando más de lo esperado. Verifica tu conexión.');
       setLoading(false);
     }, 12000);
 
     try {
-      /**
-       * 1) STATS
-       * - Productos: tabla products (si existe)
-       * - Contenido programado: content_calendar status='scheduled'
-       * - Automatizaciones: tabla automations enabled=true (fallback: is_active=true)
-       * - Alertas: tabla alerts is_read=false (si existe)
-       */
-      const totalProductsP = safeCount(
-        supabase.from('products').select('id', { count: 'exact', head: true })
-      );
+      setError(null);
 
-      // content_calendar es la tabla REAL que estás usando (confirmado por tus capturas)
-      const scheduledContentP = safeCount(
-        supabase
-          .from('content_calendar')
-          .select('id', { count: 'exact', head: true })
-          .eq('status', 'scheduled')
-      );
+      // 1) Contadores principales (en paralelo)
+      const now = new Date();
+      const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
-      // automations: primero intentamos enabled=true, si falla, is_active=true
-      const activeAutomationsP = (async () => {
-        const c1 = await safeCount(
-          supabase.from('automations').select('id', { count: 'exact', head: true }).eq('enabled', true)
-        );
-        if (c1 > 0) return c1;
+      const [
+        totalProducts,
+        scheduledContent,
+        activeAutomations,
+        pendingAlerts
+      ] = await Promise.all([
+        // products
+        (async () => {
+          try {
+            return await countTable('products');
+          } catch {
+            return 0;
+          }
+        })(),
 
-        // Si la tabla existe pero la columna era is_active
-        const c2 = await safeCount(
-          supabase.from('automations').select('id', { count: 'exact', head: true }).eq('is_active', true)
-        );
-        return c2;
-      })();
+        // content_calendar scheduled
+        (async () => {
+          try {
+            return await countTable('content_calendar', [{ type: 'eq', col: 'status', val: 'scheduled' }]);
+          } catch {
+            return 0;
+          }
+        })(),
 
-      const pendingAlertsP = safeCount(
-        supabase.from('alerts').select('id', { count: 'exact', head: true }).eq('is_read', false)
-      );
+        // automations active (enabled o is_active)
+        tryCountAutomationsActive(),
 
-      const [totalProducts, scheduledContent, activeAutomations, pendingAlerts] = await Promise.all([
-        totalProductsP,
-        scheduledContentP,
-        activeAutomationsP,
-        pendingAlertsP,
+        // alertas: fallos recientes en content_calendar
+        (async () => {
+          try {
+            return await countTable('content_calendar', [
+              { type: 'eq', col: 'status', val: 'failed' },
+              { type: 'gte', col: 'updated_at', val: sevenDaysAgo },
+            ]);
+          } catch {
+            return 0;
+          }
+        })(),
       ]);
 
       setStats({
@@ -126,39 +171,39 @@ export default function Dashboard() {
         pendingAlerts,
       });
 
-      /**
-       * 2) LISTAS
-       * - Alertas recientes (si existe)
-       * - Top ganadores (si existe winning_products)
-       *
-       * OJO: tu winning_products en este Dashboard espera:
-       *   product_name, suggested_price_clp, category, tiktok_score
-       * Si tu tabla se llama distinto o columnas distintas, igual no rompe (solo muestra vacío).
-       */
-      const alertsListP = safeSelect(
-        supabase
-          .from('alerts')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(5),
-        []
-      );
+      // 2) Alertas recientes: tomamos los últimos failed (sin depender de tabla alerts)
+      let failedItems = [];
+      try {
+        const { data } = await supabase
+          .from('content_calendar')
+          .select('id, platform, content_type, title, updated_at, publish_response, status')
+          .eq('status', 'failed')
+          .order('updated_at', { ascending: false })
+          .limit(5);
 
-      // Ganadores: intentamos status='active' y orden tiktok_score desc
-      const winnersP = safeSelect(
-        supabase
-          .from('winning_products')
-          .select('*')
-          .eq('status', 'active')
-          .order('tiktok_score', { ascending: false })
-          .limit(3),
-        []
-      );
+        failedItems = data || [];
+      } catch {
+        failedItems = [];
+      }
 
-      const [alertsList, winnersList] = await Promise.all([alertsListP, winnersP]);
+      const normalizedAlerts = failedItems.map((it) => {
+        const errText = getErrorTextFromPublishResponse(it.publish_response);
+        return {
+          id: it.id,
+          alert_type: 'critical',
+          title: it.title || `Fallo al publicar (${it.platform || 'plataforma'})`,
+          message:
+            errText ||
+            `Falló publicación ${it.content_type || ''} en ${it.platform || ''}. Revisa publish_response.`,
+          created_at: it.updated_at || new Date().toISOString(),
+        };
+      });
 
-      setRecentAlerts(alertsList);
-      setWinningProducts(winnersList);
+      setRecentAlerts(normalizedAlerts);
+
+      // 3) Productos ganadores (si existe la tabla)
+      const winners = await tryFetchWinningProducts(3);
+      setWinningProducts(winners);
 
       clearTimeout(timeout);
     } catch (e) {
@@ -170,6 +215,18 @@ export default function Dashboard() {
     }
   }
 
+  const alertTypeColors = {
+    critical: 'bg-red-100 text-red-700 border-red-200',
+    important: 'bg-yellow-100 text-yellow-700 border-yellow-200',
+    informational: 'bg-blue-100 text-blue-700 border-blue-200',
+    report: 'bg-green-100 text-green-700 border-green-200',
+  };
+
+  function go(path) {
+    // Evita depender de react-router (si lo tienes, lo cambias por useNavigate)
+    window.location.href = path;
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-screen">
@@ -177,7 +234,7 @@ export default function Dashboard() {
           <div
             className="animate-spin rounded-full h-12 w-12 border-4 border-gray-200 mx-auto"
             style={{ borderTopColor: '#2D5016' }}
-          />
+          ></div>
           <p className="text-gray-600 mt-4">Cargando dashboard...</p>
         </div>
       </div>
@@ -192,7 +249,11 @@ export default function Dashboard() {
           <h2 className="text-xl font-bold text-gray-900 mb-2">Error al cargar</h2>
           <p className="text-gray-600 mb-4">{error}</p>
           <button
-            onClick={() => loadDashboardData()}
+            onClick={() => {
+              setLoading(true);
+              setError(null);
+              loadDashboardData();
+            }}
             className="px-6 py-2 text-white rounded-lg hover:opacity-90"
             style={{ backgroundColor: '#2D5016' }}
           >
@@ -202,6 +263,18 @@ export default function Dashboard() {
       </div>
     );
   }
+
+  const normalizedWinners = (winningProducts || []).map((p) => {
+    const name = p.product_name || p.product_title || p.title || 'Producto';
+    const category = p.category || 'Sin categoría';
+    const price =
+      p.suggested_price_clp ??
+      p.suggested_price ??
+      p.price_clp ??
+      null;
+    const score = p.tiktok_score ?? p.score ?? null;
+    return { ...p, _name: name, _category: category, _price: price, _score: score };
+  });
 
   return (
     <div className="p-6 space-y-6">
@@ -213,26 +286,53 @@ export default function Dashboard() {
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <StatCard
-          label="Productos Activos"
-          value={stats.totalProducts}
-          icon={<ShoppingBag className="w-6 h-6" style={{ color: '#2D5016' }} />}
-        />
-        <StatCard
-          label="Contenido Programado"
-          value={stats.scheduledContent}
-          icon={<Calendar className="w-6 h-6" style={{ color: '#2D5016' }} />}
-        />
-        <StatCard
-          label="Automatizaciones Activas"
-          value={stats.activeAutomations}
-          icon={<Zap className="w-6 h-6" style={{ color: '#2D5016' }} />}
-        />
-        <StatCard
-          label="Alertas Pendientes"
-          value={stats.pendingAlerts}
-          icon={<Bell className="w-6 h-6" style={{ color: '#2D5016' }} />}
-        />
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-600">Productos Activos</p>
+              <p className="text-3xl font-bold mt-2" style={{ color: '#2D5016' }}>{stats.totalProducts}</p>
+            </div>
+            <div className="w-12 h-12 rounded-lg flex items-center justify-center" style={{ backgroundColor: '#F5E6D3' }}>
+              <ShoppingBag className="w-6 h-6" style={{ color: '#2D5016' }} />
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-600">Contenido Programado</p>
+              <p className="text-3xl font-bold mt-2" style={{ color: '#2D5016' }}>{stats.scheduledContent}</p>
+            </div>
+            <div className="w-12 h-12 rounded-lg flex items-center justify-center" style={{ backgroundColor: '#F5E6D3' }}>
+              <Calendar className="w-6 h-6" style={{ color: '#2D5016' }} />
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-600">Automatizaciones Activas</p>
+              <p className="text-3xl font-bold mt-2" style={{ color: '#2D5016' }}>{stats.activeAutomations}</p>
+            </div>
+            <div className="w-12 h-12 rounded-lg flex items-center justify-center" style={{ backgroundColor: '#F5E6D3' }}>
+              <Zap className="w-6 h-6" style={{ color: '#2D5016' }} />
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-600">Alertas Pendientes</p>
+              <p className="text-3xl font-bold mt-2" style={{ color: '#2D5016' }}>{stats.pendingAlerts}</p>
+            </div>
+            <div className="w-12 h-12 rounded-lg flex items-center justify-center" style={{ backgroundColor: '#F5E6D3' }}>
+              <Bell className="w-6 h-6" style={{ color: '#2D5016' }} />
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Content Grid */}
@@ -243,7 +343,6 @@ export default function Dashboard() {
             <h2 className="text-xl font-bold" style={{ color: '#2D5016' }}>Alertas Recientes</h2>
             <Bell className="w-5 h-5 text-gray-400" />
           </div>
-
           <div className="space-y-3">
             {recentAlerts.length === 0 ? (
               <p className="text-gray-500 text-sm text-center py-8">No hay alertas recientes</p>
@@ -251,33 +350,21 @@ export default function Dashboard() {
               recentAlerts.map((alert) => (
                 <div
                   key={alert.id}
-                  className={`p-4 rounded-lg border ${alertTypeColors[alert.alert_type] || 'bg-gray-50 text-gray-700 border-gray-200'}`}
+                  className={`p-4 rounded-lg border ${alertTypeColors[alert.alert_type] || alertTypeColors.critical}`}
                 >
                   <div className="flex items-start gap-3">
                     <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
                     <div className="flex-1">
-                      <p className="font-medium text-sm">{alert.title || 'Alerta'}</p>
-                      <p className="text-xs mt-1 opacity-80">{alert.message || ''}</p>
-                      {alert.created_at && (
-                        <p className="text-xs mt-2 opacity-60">
-                          {new Date(alert.created_at).toLocaleString('es-CL')}
-                        </p>
-                      )}
+                      <p className="font-medium text-sm">{alert.title}</p>
+                      <p className="text-xs mt-1 opacity-80">{alert.message}</p>
+                      <p className="text-xs mt-2 opacity-60">
+                        {new Date(alert.created_at).toLocaleString('es-CL')}
+                      </p>
                     </div>
                   </div>
                 </div>
               ))
             )}
-          </div>
-
-          <div className="mt-4">
-            <button
-              onClick={() => navigate('/analitica')}
-              className="text-sm font-medium hover:opacity-80"
-              style={{ color: '#2D5016' }}
-            >
-              Ver analítica →
-            </button>
           </div>
         </div>
 
@@ -287,15 +374,16 @@ export default function Dashboard() {
             <h2 className="text-xl font-bold" style={{ color: '#2D5016' }}>Top Productos Ganadores</h2>
             <TrendingUp className="w-5 h-5 text-gray-400" />
           </div>
-
           <div className="space-y-3">
-            {winningProducts.length === 0 ? (
-              <p className="text-gray-500 text-sm text-center py-8">No hay productos ganadores aún</p>
+            {normalizedWinners.length === 0 ? (
+              <p className="text-gray-500 text-sm text-center py-8">
+                No hay productos ganadores aún (o la tabla winning_products no está configurada).
+              </p>
             ) : (
-              winningProducts.map((product, index) => {
-                const score = Number(product.tiktok_score ?? 0);
-                const safeScore = Number.isFinite(score) ? score : 0;
-                const pct = Math.max(0, Math.min(100, (safeScore / 10) * 100));
+              normalizedWinners.map((product, index) => {
+                const score = product._score;
+                const scorePct =
+                  typeof score === 'number' ? Math.max(0, Math.min(100, (score / 10) * 100)) : 0;
 
                 return (
                   <div
@@ -306,35 +394,35 @@ export default function Dashboard() {
                       <div className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0" style={{ backgroundColor: '#D4A017' }}>
                         <span className="text-white font-bold text-sm">{index + 1}</span>
                       </div>
-
                       <div className="flex-1">
-                        <p className="font-medium text-sm">{product.product_name || product.product_title || 'Producto'}</p>
-
+                        <p className="font-medium text-sm">{product._name}</p>
                         <div className="flex items-center gap-4 mt-2 text-xs text-gray-600">
-                          {product.suggested_price_clp != null && (
+                          {product._price != null && (
                             <span className="font-mono" style={{ color: '#2D5016' }}>
-                              ${Number(product.suggested_price_clp).toLocaleString('es-CL')}
+                              ${Number(product._price).toLocaleString('es-CL')}
                             </span>
                           )}
-
-                          {product.category && (
-                            <span className="px-2 py-1 rounded-full text-xs" style={{ backgroundColor: '#F5E6D3', color: '#2D5016' }}>
-                              {product.category}
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="flex items-center gap-2 mt-2">
-                          <div className="flex-1 bg-gray-100 rounded-full h-2">
-                            <div
-                              className="h-2 rounded-full"
-                              style={{ width: `${pct}%`, backgroundColor: '#D4A017' }}
-                            />
-                          </div>
-                          <span className="text-xs font-medium" style={{ color: '#2D5016' }}>
-                            {safeScore}/10
+                          <span className="px-2 py-1 rounded-full text-xs" style={{ backgroundColor: '#F5E6D3', color: '#2D5016' }}>
+                            {product._category}
                           </span>
                         </div>
+
+                        {typeof score === 'number' && (
+                          <div className="flex items-center gap-2 mt-2">
+                            <div className="flex-1 bg-gray-100 rounded-full h-2">
+                              <div
+                                className="h-2 rounded-full"
+                                style={{
+                                  width: `${scorePct}%`,
+                                  backgroundColor: '#D4A017'
+                                }}
+                              ></div>
+                            </div>
+                            <span className="text-xs font-medium" style={{ color: '#2D5016' }}>
+                              {score}/10
+                            </span>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -342,82 +430,50 @@ export default function Dashboard() {
               })
             )}
           </div>
-
-          <div className="mt-4">
-            <button
-              onClick={() => navigate('/tendencias')}
-              className="text-sm font-medium hover:opacity-80"
-              style={{ color: '#2D5016' }}
-            >
-              Ver tendencias →
-            </button>
-          </div>
         </div>
       </div>
 
       {/* Quick Actions */}
       <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
         <h2 className="text-xl font-bold mb-4" style={{ color: '#2D5016' }}>Acciones Rápidas</h2>
-
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <QuickAction
-            icon={<FileText className="w-6 h-6 mb-2" style={{ color: '#2D5016' }} />}
-            title="Generar Contenido"
-            desc="Crear nuevo post"
-            onClick={() => navigate('/content')}
-          />
-          <QuickAction
-            icon={<Calendar className="w-6 h-6 mb-2" style={{ color: '#2D5016' }} />}
-            title="Ver Calendario"
-            desc="Programar publicaciones"
-            onClick={() => navigate('/calendar')}
-          />
-          <QuickAction
-            icon={<BarChart3 className="w-6 h-6 mb-2" style={{ color: '#2D5016' }} />}
-            title="Analítica"
-            desc="Ver métricas"
-            onClick={() => navigate('/analitica')}
-          />
-          <QuickAction
-            icon={<Settings className="w-6 h-6 mb-2" style={{ color: '#2D5016' }} />}
-            title="Configuración"
-            desc="Ajustar sistema"
-            onClick={() => navigate('/configuracion')}
-          />
+          <button
+            onClick={() => go('/content')}
+            className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left"
+          >
+            <FileText className="w-6 h-6 mb-2" style={{ color: '#2D5016' }} />
+            <p className="font-medium text-sm">Generar Contenido</p>
+            <p className="text-xs text-gray-500 mt-1">Crear nuevo post</p>
+          </button>
+
+          <button
+            onClick={() => go('/calendar')}
+            className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left"
+          >
+            <Calendar className="w-6 h-6 mb-2" style={{ color: '#2D5016' }} />
+            <p className="font-medium text-sm">Ver Calendario</p>
+            <p className="text-xs text-gray-500 mt-1">Programar publicaciones</p>
+          </button>
+
+          <button
+            onClick={() => go('/analytics')}
+            className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left"
+          >
+            <BarChart3 className="w-6 h-6 mb-2" style={{ color: '#2D5016' }} />
+            <p className="font-medium text-sm">Analítica</p>
+            <p className="text-xs text-gray-500 mt-1">Ver métricas</p>
+          </button>
+
+          <button
+            onClick={() => go('/settings')}
+            className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left"
+          >
+            <Settings className="w-6 h-6 mb-2" style={{ color: '#2D5016' }} />
+            <p className="font-medium text-sm">Configuración</p>
+            <p className="text-xs text-gray-500 mt-1">Ajustar sistema</p>
+          </button>
         </div>
       </div>
     </div>
-  );
-}
-
-function StatCard({ label, value, icon }) {
-  return (
-    <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-sm text-gray-600">{label}</p>
-          <p className="text-3xl font-bold mt-2" style={{ color: '#2D5016' }}>
-            {value}
-          </p>
-        </div>
-        <div className="w-12 h-12 rounded-lg flex items-center justify-center" style={{ backgroundColor: '#F5E6D3' }}>
-          {icon}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function QuickAction({ icon, title, desc, onClick }) {
-  return (
-    <button
-      onClick={onClick}
-      className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left"
-      type="button"
-    >
-      {icon}
-      <p className="font-medium text-sm">{title}</p>
-      <p className="text-xs text-gray-500 mt-1">{desc}</p>
-    </button>
   );
 }
