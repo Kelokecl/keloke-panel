@@ -4,47 +4,21 @@ import {
   Bot,
   Send,
   Sparkles,
-  TrendingUp,
   AlertCircle,
   Zap,
-  Calendar
+  Calendar,
+  TrendingUp
 } from 'lucide-react';
-
-function nowISO() {
-  return new Date().toISOString();
-}
-
-async function safeInsert(table, row) {
-  try {
-    const { error } = await supabase.from(table).insert(row);
-    if (error) return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function safeSelect(table, queryBuilder) {
-  try {
-    const { data, error } = await queryBuilder(supabase.from(table));
-    if (error) return null;
-    return data;
-  } catch {
-    return null;
-  }
-}
 
 export default function AIManagerModule() {
   const [messages, setMessages] = useState([]);
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [aiInsights, setAiInsights] = useState(null);
-
+  const [bootError, setBootError] = useState(null);
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
-    loadAIInsights();
-    loadConversationHistory();
+    boot();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -52,120 +26,82 @@ export default function AIManagerModule() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  async function loadAIInsights() {
-    // Si existe ai_insights, úsala. Si no, construimos insights desde tablas reales.
-    const data = await safeSelect('ai_insights', (t) =>
-      t.select('*').order('created_at', { ascending: false }).limit(1).single()
-    );
-
-    if (data) {
-      setAiInsights(data);
-      return;
-    }
-
-    // Fallback: reconstruimos con conteos de tablas reales
+  async function boot() {
     try {
-      const [productsCount, scheduledCount, automationsCount, failedCount] = await Promise.all([
-        supabase.from('products').select('id', { count: 'exact', head: true }),
-        supabase.from('content_calendar').select('id', { count: 'exact', head: true }).eq('status', 'scheduled'),
-        // automations: enabled o is_active
-        (async () => {
-          const a1 = await supabase.from('automations').select('id', { count: 'exact', head: true }).eq('enabled', true);
-          if (!a1.error) return a1.count || 0;
-          const a2 = await supabase.from('automations').select('id', { count: 'exact', head: true }).eq('is_active', true);
-          if (!a2.error) return a2.count || 0;
-          return 0;
-        })(),
-        supabase.from('content_calendar').select('id', { count: 'exact', head: true }).eq('status', 'failed'),
-      ]);
+      setBootError(null);
 
-      setAiInsights({
-        active_products: productsCount.count || 0,
-        scheduled_content: scheduledCount.count || 0,
-        active_automations: automationsCount || 0,
-        pending_alerts: failedCount.count || 0,
-      });
-    } catch {
-      setAiInsights({
-        active_products: 0,
-        scheduled_content: 0,
-        active_automations: 0,
-        pending_alerts: 0,
-      });
-    }
-  }
+      // cargar historial si existe tabla
+      const { data, error } = await supabase
+        .from('ai_conversations')
+        .select('*')
+        .order('created_at', { ascending: true })
+        .limit(50);
 
-  async function loadConversationHistory() {
-    // Si no existe ai_conversations, no rompemos: partimos vacío.
-    const data = await safeSelect('ai_conversations', (t) =>
-      t.select('*').order('created_at', { ascending: true }).limit(50)
-    );
-
-    if (data && Array.isArray(data) && data.length > 0) {
-      setMessages(data);
-    } else {
-      setMessages([]);
+      if (!error && data) setMessages(data);
+    } catch (e) {
+      console.error(e);
+      setBootError('No pude cargar historial. (Revisa que exista la tabla ai_conversations)');
     }
   }
 
   async function handleSendMessage() {
     if (!inputMessage.trim() || isLoading) return;
 
-    const raw = inputMessage.trim();
+    const content = inputMessage.trim();
+    const userMsg = { role: 'user', content, created_at: new Date().toISOString() };
 
-    const userMessage = {
-      role: 'user',
-      content: raw,
-      created_at: nowISO(),
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
+    setMessages(prev => [...prev, userMsg]);
     setInputMessage('');
     setIsLoading(true);
 
-    // Guardar mensaje usuario si existe la tabla
-    await safeInsert('ai_conversations', { role: 'user', content: raw });
-
     try {
-      // 1) Intentamos responder usando tu Edge Function "autogerente" (v1)
-      const { data, error } = await supabase.functions.invoke('autogerente', {
-        body: {
-          message: raw,
-          channel: 'panel',
-          user_id: null,
-        },
+      // Guardar user msg
+      await supabase.from('ai_conversations').insert({ role: 'user', content });
+
+      // Llamar a Edge Function copiloto (GPT-5-mini por backend)
+      const { data, error } = await supabase.functions.invoke('autogerente-copilot', {
+        body: { message: content, channel: 'panel' }
       });
 
       if (error) throw error;
 
-      // data.reply es lo principal; data.actions opcional
-      const reply = data?.reply || 'OK.';
+      const reply = data?.reply || 'Recibido. ¿Qué acción quieres ejecutar?';
+      const actions = Array.isArray(data?.actions) ? data.actions : [];
 
-      const assistantMessage = {
+      const assistantMsg = {
         role: 'assistant',
-        content: reply,
-        created_at: nowISO(),
+        content: formatAssistant(reply, actions),
+        created_at: new Date().toISOString()
       };
 
-      setMessages((prev) => [...prev, assistantMessage]);
+      setMessages(prev => [...prev, assistantMsg]);
 
-      await safeInsert('ai_conversations', { role: 'assistant', content: reply });
+      await supabase.from('ai_conversations').insert({
+        role: 'assistant',
+        content: assistantMsg.content
+      });
 
-      // Refrescamos insights por si cambió algo
-      loadAIInsights();
     } catch (e) {
-      console.error('AI error:', e);
-      const assistantMessage = {
+      console.error(e);
+      const assistantMsg = {
         role: 'assistant',
-        content:
-          'Tuve un problema conectando con el Auto-Gerente. Revisa que la Edge Function "autogerente" esté desplegada y disponible.',
-        created_at: nowISO(),
+        content: '⚠️ Error al procesar el mensaje. Revisa consola / Edge Function autogerente-copilot.',
+        created_at: new Date().toISOString()
       };
-      setMessages((prev) => [...prev, assistantMessage]);
-      await safeInsert('ai_conversations', { role: 'assistant', content: assistantMessage.content });
+      setMessages(prev => [...prev, assistantMsg]);
+      await supabase.from('ai_conversations').insert({ role: 'assistant', content: assistantMsg.content }).catch(() => {});
     } finally {
       setIsLoading(false);
     }
+  }
+
+  function formatAssistant(reply, actions) {
+    let out = reply;
+    if (actions.length > 0) {
+      out += '\n\nAcciones sugeridas:\n';
+      out += actions.map((a) => `• ${a.type}${a.note ? ` — ${a.note}` : ''}`).join('\n');
+    }
+    return out;
   }
 
   return (
@@ -178,59 +114,41 @@ export default function AIManagerModule() {
           </div>
           <div>
             <h1 className="text-3xl font-bold" style={{ color: '#2D5016' }}>Auto-Gerente IA</h1>
-            <p className="text-gray-600">Motor: Edge Function “autogerente” (v1)</p>
+            <p className="text-gray-600">Copiloto del negocio (sugerencias + alertas + ganadores)</p>
           </div>
         </div>
+
+        {bootError && (
+          <div className="mt-3 p-3 rounded-lg border border-yellow-200 bg-yellow-50 text-yellow-800 text-sm">
+            {bootError}
+          </div>
+        )}
       </div>
 
-      {/* AI Insights Cards */}
-      {aiInsights && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-          <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
-            <div className="flex items-center gap-2 mb-2">
-              <TrendingUp className="w-4 h-4" style={{ color: '#2D5016' }} />
-              <span className="text-xs text-gray-600">Productos Activos</span>
-            </div>
-            <p className="text-2xl font-bold" style={{ color: '#2D5016' }}>
-              {aiInsights.active_products || 0}
-            </p>
-          </div>
+      {/* Quick buttons */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
+        <QuickCmd
+          icon={<Sparkles className="w-4 h-4" />}
+          title="Generar sugerencias"
+          subtitle="Crea recomendaciones y las guarda en Dashboard"
+          onClick={() => setInputMessage('Genera 5 sugerencias accionables para hoy en Keloke Chile basadas en mis datos actuales.')}
+        />
+        <QuickCmd
+          icon={<TrendingUp className="w-4 h-4" />}
+          title="Actualizar ganadores"
+          subtitle="Pide ranking semanal (si está habilitado trends)"
+          onClick={() => setInputMessage('Actualiza el top 10 semanal de productos ganadores para Chile y justifica el score.')}
+        />
+        <QuickCmd
+          icon={<Calendar className="w-4 h-4" />}
+          title="Plan de contenido"
+          subtitle="Ideas + programación recomendada"
+          onClick={() => setInputMessage('Dame un plan de 7 días de contenido para Instagram y TikTok basado en productos ganadores.')}
+        />
+      </div>
 
-          <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
-            <div className="flex items-center gap-2 mb-2">
-              <Calendar className="w-4 h-4" style={{ color: '#2D5016' }} />
-              <span className="text-xs text-gray-600">Contenido Programado</span>
-            </div>
-            <p className="text-2xl font-bold" style={{ color: '#2D5016' }}>
-              {aiInsights.scheduled_content || 0}
-            </p>
-          </div>
-
-          <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
-            <div className="flex items-center gap-2 mb-2">
-              <Zap className="w-4 h-4" style={{ color: '#2D5016' }} />
-              <span className="text-xs text-gray-600">Automatizaciones</span>
-            </div>
-            <p className="text-2xl font-bold" style={{ color: '#2D5016' }}>
-              {aiInsights.active_automations || 0}
-            </p>
-          </div>
-
-          <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
-            <div className="flex items-center gap-2 mb-2">
-              <AlertCircle className="w-4 h-4" style={{ color: '#D4A017' }} />
-              <span className="text-xs text-gray-600">Alertas</span>
-            </div>
-            <p className="text-2xl font-bold" style={{ color: '#D4A017' }}>
-              {aiInsights.pending_alerts || 0}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Chat Container */}
+      {/* Chat */}
       <div className="flex-1 bg-white rounded-xl shadow-sm border border-gray-100 flex flex-col overflow-hidden">
-        {/* Messages Area */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center">
@@ -241,16 +159,14 @@ export default function AIManagerModule() {
                 ¡Hola! Soy tu Auto-Gerente IA
               </h3>
               <p className="text-gray-600 max-w-md">
-                Puedo ayudarte con contenido, calendario, diagnóstico de fallos y próximos pasos. Escríbeme lo que necesitas.
+                Puedo dejar sugerencias en el Dashboard, ayudarte a priorizar productos, plan de contenido, y monitoreo de negocio.
               </p>
             </div>
           ) : (
             messages.map((msg, index) => (
               <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div
-                  className={`max-w-[70%] rounded-lg p-4 ${
-                    msg.role === 'user' ? 'text-white' : 'bg-gray-50 text-gray-800'
-                  }`}
+                  className={`max-w-[70%] rounded-lg p-4 ${msg.role === 'user' ? 'text-white' : 'bg-gray-50 text-gray-800'}`}
                   style={msg.role === 'user' ? { backgroundColor: '#2D5016' } : {}}
                 >
                   <div className="flex items-start gap-2">
@@ -274,11 +190,7 @@ export default function AIManagerModule() {
               <div className="bg-gray-50 rounded-lg p-4 max-w-[70%]">
                 <div className="flex items-center gap-2">
                   <Bot className="w-5 h-5" style={{ color: '#D4A017' }} />
-                  <div className="flex gap-1">
-                    <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                    <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                    <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '300ms' }}></div>
-                  </div>
+                  <span className="text-sm text-gray-600">Pensando…</span>
                 </div>
               </div>
             </div>
@@ -287,7 +199,7 @@ export default function AIManagerModule() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input Area */}
+        {/* Input */}
         <div className="border-t border-gray-100 p-4">
           <div className="flex gap-2">
             <input
@@ -295,8 +207,8 @@ export default function AIManagerModule() {
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-              placeholder="Escribe tu mensaje al Auto-Gerente IA..."
-              className="flex-1 px-4 py-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-700/30"
+              placeholder="Escribe tu mensaje al Auto-Gerente IA…"
+              className="flex-1 px-4 py-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-opacity-50"
               disabled={isLoading}
             />
             <button
@@ -308,8 +220,25 @@ export default function AIManagerModule() {
               <Send className="w-5 h-5" />
             </button>
           </div>
+
+          <div className="mt-3 text-xs text-gray-500 flex items-center gap-2">
+            <Zap className="w-4 h-4" />
+            Tip: escribe “Genera sugerencias para hoy” y luego revisa el Dashboard.
+          </div>
         </div>
       </div>
     </div>
+  );
+}
+
+function QuickCmd({ icon, title, subtitle, onClick }) {
+  return (
+    <button onClick={onClick} className="p-4 rounded-xl border border-gray-200 bg-white hover:border-gray-300 text-left">
+      <div className="flex items-center gap-2 mb-1" style={{ color: '#2D5016' }}>
+        {icon}
+        <span className="font-semibold text-sm">{title}</span>
+      </div>
+      <p className="text-xs text-gray-600">{subtitle}</p>
+    </button>
   );
 }
