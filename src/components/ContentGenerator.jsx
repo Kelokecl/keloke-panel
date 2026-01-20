@@ -11,17 +11,31 @@ import {
  * ContentGenerator.jsx (FULL - GOD MODE)
  *
  * Fixes:
+ * - ✅ BUG CRÍTICO: se eliminó JSX fuera del return() (rompía el componente)
+ * - ✅ MP4 priority: product.video_url (MP4) > Video URL manual (MP4)
+ * - ✅ Preview no rompe: si preview es MP4 renderiza <video>, si no <img>
+ * - ✅ YouTube bloquea si no hay MP4 (ya estaba, se deja intacto)
+ * - ✅ Retry IG cuando el video aún se está procesando (ya estaba, se deja intacto)
  * - Anti-freeze: lock + abort + timeout + watchdog
  * - Caption FINAL consistente (lo que se publica = lo que se programa)
  * - Programación guarda generated_content_id (si existe) y caption final
  * - No asume columnas nuevas obligatorias en DB
  */
 
+function isMp4Url(url) {
+  if (!url) return false;
+  const u = String(url).trim().toLowerCase();
+  // simple + robust enough for direct mp4 links
+  return u.includes('.mp4') || u.includes('video/mp4') || u.includes('format=mp4');
+}
+
 export default function ContentGenerator() {
   const [loading, setLoading] = useState(false);
   const [publishLoading, setPublishLoading] = useState(false);
 
+  // ✅ Manual MP4 input (solo si el producto no tiene video_url MP4)
   const [videoUrl, setVideoUrl] = useState('');
+
   const [products, setProducts] = useState([]);
   const [generatedContent, setGeneratedContent] = useState(null);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
@@ -36,25 +50,6 @@ export default function ContentGenerator() {
   const [ageRange, setAgeRange] = useState('25-45');
   const [interests, setInterests] = useState('');
   const [tone, setTone] = useState('profesional');
-  {/* Video URL (solo si es Reel/Video y plataforma soporta video) */}
-{contentType === 'reel' && ['youtube','instagram','facebook'].includes(platform) && (
-  <div>
-    <label className="block text-sm font-medium text-gray-700 mb-2">
-      Video URL (MP4 público)
-    </label>
-    <input
-      type="url"
-      value={videoUrl}
-      onChange={(e) => setVideoUrl(e.target.value)}
-      placeholder="https://.../video.mp4"
-      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-opacity-50 outline-none"
-    />
-    <p className="text-xs text-gray-500 mt-1">
-      Debe ser un link directo a .mp4 (público). Si no hay MP4, YouTube fallará.
-    </p>
-  </div>
-)}
-  
 
   // retry / regen
   const [lastRequest, setLastRequest] = useState(null);
@@ -121,7 +116,7 @@ export default function ContentGenerator() {
       // Nota: intento leer image_urls si existe, sino no pasa nada
       const { data, error } = await supabase
         .from('products')
-        .select('id, name, price, currency, image_url, image_urls, video_url, video_url, shopify_product_id, created_at')
+        .select('id, name, price, currency, image_url, image_urls, video_url, shopify_product_id, created_at')
         .order('created_at', { ascending: false })
         .limit(200);
 
@@ -171,53 +166,53 @@ export default function ContentGenerator() {
   };
 
   const buildPayload = (product) => {
-  const images = normalizeImageList(product);
+    const images = normalizeImageList(product);
 
-  const carousel_urls = contentType === 'carousel'
-    ? pickCarousel(images, 3)
-    : [];
+    const carousel_urls = contentType === 'carousel'
+      ? pickCarousel(images, 3)
+      : [];
 
-  // ✅ Si es reel/video, priorizamos MP4
-  const mp4 =
-    (videoUrl && videoUrl.trim()) ||
-    product?.video_url ||
-    null;
+    // ✅ REGLA: product.video_url (MP4) > Video URL manual (MP4)
+    const mp4FromProduct = isMp4Url(product?.video_url) ? String(product.video_url).trim() : null;
+    const mp4FromManual = isMp4Url(videoUrl) ? String(videoUrl).trim() : null;
+    const mp4 = mp4FromProduct || mp4FromManual || null;
 
-  const primary =
-    contentType === 'reel'
-      ? (mp4 || pickRandom(images) || product?.image_url || null)
-      : (
-          contentType === 'post' || contentType === 'story'
-            ? (pickRandom(images) || product?.image_url || null)
-            : (images[0] || product?.image_url || null)
-        );
+    // ✅ preview_url puede ser MP4 si es reel (el UI ya no rompe: muestra <video>)
+    const primary =
+      contentType === 'reel'
+        ? (mp4 || pickRandom(images) || product?.image_url || null)
+        : (
+            contentType === 'post' || contentType === 'story'
+              ? (pickRandom(images) || product?.image_url || null)
+              : (images[0] || product?.image_url || null)
+          );
 
-  return {
-    campaign_type: campaignType,
-    platform,
-    content_type: contentType,
-    product_id: product?.id ?? null,
-    product_name: product?.name || 'Producto Keloke',
-    product_price: product?.price ?? null,
-    product_currency: product?.currency || 'CLP',
-    product_image_url: product?.image_url || null,
+    return {
+      campaign_type: campaignType,
+      platform,
+      content_type: contentType,
+      product_id: product?.id ?? null,
+      product_name: product?.name || 'Producto Keloke',
+      product_price: product?.price ?? null,
+      product_currency: product?.currency || 'CLP',
+      product_image_url: product?.image_url || null,
 
-    product_images: images,
-    carousel_urls,
+      product_images: images,
+      carousel_urls,
 
-    strategy,
-    tone,
-    ab_variant: campaignType === 'paid' ? abVariant : null,
-    age_range: campaignType === 'paid' ? ageRange : null,
-    interests: campaignType === 'paid' ? interests : null,
-    generated_at: new Date().toISOString(),
+      strategy,
+      tone,
+      ab_variant: campaignType === 'paid' ? abVariant : null,
+      age_range: campaignType === 'paid' ? ageRange : null,
+      interests: campaignType === 'paid' ? interests : null,
+      generated_at: new Date().toISOString(),
 
-    preview_url: primary || null,
+      preview_url: primary || null,
 
-    // ✅ NUEVO: si es reel, mandamos MP4 como "video_asset_url"
-    video_asset_url: contentType === 'reel' ? mp4 : null,
+      // ✅ si es reel y hay MP4, mandamos MP4 como video_asset_url
+      video_asset_url: contentType === 'reel' ? mp4 : null,
+    };
   };
-};
 
   const generateViaEdgeFunction = async (payload) => {
     try {
@@ -243,30 +238,30 @@ export default function ContentGenerator() {
   };
 
   const normalizeGenerated = (raw, payload, product) => {
-  const fallback = generateContentByStrategy(payload, product);
-  if (!raw || typeof raw !== 'object') return fallback;
+    const fallback = generateContentByStrategy(payload, product);
+    if (!raw || typeof raw !== 'object') return fallback;
 
-  const mp4 = payload?.video_asset_url || null;
+    const mp4 = payload?.video_asset_url || null;
 
-  return {
-    title: raw.title ?? fallback.title,
-    body: raw.body ?? fallback.body,
-    caption: raw.caption ?? fallback.caption,
-    hashtags: raw.hashtags ?? fallback.hashtags,
-    cta: raw.cta ?? fallback.cta,
+    return {
+      title: raw.title ?? fallback.title,
+      body: raw.body ?? fallback.body,
+      caption: raw.caption ?? fallback.caption,
+      hashtags: raw.hashtags ?? fallback.hashtags,
+      cta: raw.cta ?? fallback.cta,
 
-    preview_url: raw.preview_url ?? payload?.preview_url ?? product?.image_url ?? fallback.preview_url,
+      preview_url: raw.preview_url ?? payload?.preview_url ?? product?.image_url ?? fallback.preview_url,
 
-    // ✅ si es reel, forzamos asset_url al MP4 (si existe)
-    asset_url: (payload?.content_type === 'reel' && mp4) ? mp4 : (raw.asset_url ?? null),
-    asset_type: (payload?.content_type === 'reel' && mp4) ? 'video' : (raw.asset_type ?? null),
+      // ✅ si es reel, forzamos asset_url al MP4 (si existe)
+      asset_url: (payload?.content_type === 'reel' && mp4) ? mp4 : (raw.asset_url ?? null),
+      asset_type: (payload?.content_type === 'reel' && mp4) ? 'video' : (raw.asset_type ?? null),
 
-    carousel_urls: Array.isArray(raw.carousel_urls) ? raw.carousel_urls : (payload.carousel_urls || []),
+      carousel_urls: Array.isArray(raw.carousel_urls) ? raw.carousel_urls : (payload.carousel_urls || []),
 
-    provider: raw.provider ?? 'supabase',
-    model: raw.model ?? null,
+      provider: raw.provider ?? 'supabase',
+      model: raw.model ?? null,
+    };
   };
-};
 
   const saveGeneratedToSupabase = async (payload, product, content) => {
     const insertRow = {
@@ -294,8 +289,6 @@ export default function ContentGenerator() {
       asset_type: content.asset_type ?? null,
     };
 
-    // Intento guardar carousel_urls si existe columna jsonb (si no existe, no rompe: lo omitimos)
-    // Para no romper DB, hacemos insert sin ese campo. (Si quieres lo agregamos cuando confirmes columna)
     const { data: saved, error } = await supabase
       .from('generated_content')
       .insert([insertRow])
@@ -476,7 +469,6 @@ export default function ContentGenerator() {
     const hash = (hashtags || '').trim();
     const ctaLine = cta ? `\n\n${cta}` : '';
 
-    // IG/FB usan caption/message
     const base = `${cleanTitle}\n\n${cleanBody}${ctaLine}\n\n${hash}`.replace(/\n{3,}/g, '\n\n').trim();
 
     if (p === 'whatsapp') {
@@ -487,19 +479,19 @@ export default function ContentGenerator() {
 
   const publishContent = async () => {
     if (!generatedContent) return;
-    
-// ✅ bloqueo inteligente: YouTube necesita MP4 sí o sí
-if (platform === 'youtube' && contentType === 'reel') {
-  const u = (generatedContent.asset_url || '').toLowerCase();
-  if (!u.includes('.mp4') && generatedContent.asset_type !== 'video') {
-    setStatusMsg({ type: 'err', text: 'YouTube requiere un MP4 público. Pega Video URL (MP4) y regenera.' });
-    clearStatusSoon(4500);
-    setPublishLoading(false);
-    stopWatchdog();
-    return;
-  }
-}
-    
+
+    // ✅ bloqueo inteligente: YouTube necesita MP4 sí o sí
+    if (platform === 'youtube' && contentType === 'reel') {
+      const u = (generatedContent.asset_url || '').toLowerCase();
+      if (!u.includes('.mp4') && generatedContent.asset_type !== 'video') {
+        setStatusMsg({ type: 'err', text: 'YouTube requiere un MP4 público. Pega Video URL (MP4) y regenera.' });
+        clearStatusSoon(4500);
+        setPublishLoading(false);
+        stopWatchdog();
+        return;
+      }
+    }
+
     if (platform === 'tiktok') {
       setStatusMsg({ type: 'info', text: 'TikTok queda en modo manual: copiar/pegar (placeholder).' });
       clearStatusSoon(3500);
@@ -521,20 +513,18 @@ if (platform === 'youtube' && contentType === 'reel') {
         },
         platform
       );
-      
-const shouldRetryPublish = (data) => {
-  if (!data || typeof data !== 'object') return false;
 
-  const msg = JSON.stringify(data).toLowerCase();
+      const shouldRetryPublish = (data) => {
+        if (!data || typeof data !== 'object') return false;
+        const msg = JSON.stringify(data).toLowerCase();
+        return (
+          msg.includes('not_ready') ||
+          msg.includes('processing') ||
+          msg.includes('media not ready') ||
+          msg.includes('temporarily unavailable')
+        );
+      };
 
-  return (
-    msg.includes('not_ready') ||
-    msg.includes('processing') ||
-    msg.includes('media not ready') ||
-    msg.includes('temporarily unavailable')
-  );
-};
-      
       const payload = {
         platform,
         content_type: contentType,
@@ -549,8 +539,6 @@ const shouldRetryPublish = (data) => {
           preview_url: generatedContent.preview_url ?? null,
           asset_url: generatedContent.asset_url ?? null,
           asset_type: generatedContent.asset_type ?? null,
-
-          // 🔥 carrusel_urls opcional (publish-content los soporta ahora)
           carousel_urls: Array.isArray(generatedContent.carousel_urls) ? generatedContent.carousel_urls : [],
         },
         targeting: campaignType === 'paid'
@@ -559,39 +547,36 @@ const shouldRetryPublish = (data) => {
       };
 
       let attempt = 0;
-let maxRetries = 3;
-let delayMs = 15000; // 15 segundos
-let data = null;
+      const maxRetries = 3;
+      const delayMs = 15000;
+      let data = null;
 
-while (attempt < maxRetries) {
-  const res = await supabase.functions.invoke('publish-content', { body: payload });
+      while (attempt < maxRetries) {
+        const res = await supabase.functions.invoke('publish-content', { body: payload });
 
-  if (res.error) throw res.error;
+        if (res.error) throw res.error;
 
-  data = res.data;
+        data = res.data;
 
-  // ✅ Si Instagram aún está procesando el video → reintento automático
-  if (shouldRetryPublish(data)) {
-    attempt++;
-    if (attempt >= maxRetries) break;
+        if (shouldRetryPublish(data)) {
+          attempt++;
+          if (attempt >= maxRetries) break;
 
-    setStatusMsg({
-      type: 'info',
-      text: `⏳ Instagram está procesando el video… reintentando (${attempt}/${maxRetries})`
-    });
+          setStatusMsg({
+            type: 'info',
+            text: `⏳ Instagram está procesando el video… reintentando (${attempt}/${maxRetries})`
+          });
 
-    await new Promise(r => setTimeout(r, delayMs));
-    continue;
-  }
+          await new Promise(r => setTimeout(r, delayMs));
+          continue;
+        }
 
-  // ✅ Publicado correctamente
-  break;
-}
+        break;
+      }
 
-if (!data) {
-  throw new Error('No se pudo publicar tras varios intentos.');
-}
-
+      if (!data) {
+        throw new Error('No se pudo publicar tras varios intentos.');
+      }
 
       if (generatedContent.id) {
         await supabase
@@ -659,8 +644,9 @@ if (!data) {
       const a = document.createElement('a');
       a.href = url;
 
+      const lower = String(assetUrl).toLowerCase();
       const extGuess =
-        generatedContent.asset_type === 'video' ? 'mp4' :
+        generatedContent.asset_type === 'video' || lower.includes('.mp4') ? 'mp4' :
         generatedContent.asset_type === 'image' ? 'png' :
         'bin';
 
@@ -677,7 +663,6 @@ if (!data) {
     try {
       if (!generatedContent) return;
 
-      // ✅ Guardamos caption FINAL (lo que se publica)
       const caption_final = buildPublishCaption(
         {
           title: generatedContent.title,
@@ -700,9 +685,6 @@ if (!data) {
         preview_url: generatedContent.preview_url ?? null,
         asset_url: generatedContent.asset_url ?? null,
         asset_type: generatedContent.asset_type ?? null,
-
-        // 🔥 carrusel_urls opcional: si tu tabla tiene jsonb, genial; si no, lo omitimos
-        // carousel_urls: Array.isArray(generatedContent.carousel_urls) ? generatedContent.carousel_urls : [],
 
         scheduled_date: scheduleData.date,
         scheduled_time: scheduleData.time,
@@ -827,6 +809,22 @@ if (!data) {
     if (!generatedContent) return '';
     return `${generatedContent.title}\n\n${generatedContent.body}\n\n${generatedContent.caption}\n\n${generatedContent.hashtags}\n\n${generatedContent.cta}`;
   }, [generatedContent]);
+
+  // ✅ Preview helpers (no rompe si preview_url es MP4)
+  const isVideoPreview = useMemo(() => {
+    if (!generatedContent) return false;
+    const u1 = String(generatedContent.asset_url || '').toLowerCase();
+    const u2 = String(generatedContent.preview_url || '').toLowerCase();
+    return (
+      contentType === 'reel' &&
+      (generatedContent.asset_type === 'video' || u1.includes('.mp4') || u2.includes('.mp4'))
+    );
+  }, [generatedContent, contentType]);
+
+  const previewSrc = useMemo(() => {
+    if (!generatedContent) return '';
+    return generatedContent.asset_url || generatedContent.preview_url || safePlaceholder(contentType);
+  }, [generatedContent, contentType]);
 
   return (
     <div className="p-6 space-y-6">
@@ -984,6 +982,25 @@ if (!data) {
                   ))}
                 </select>
               </div>
+
+              {/* ✅ Video URL (MP4) - SOLO en Reel/Video y plataformas con video */}
+              {contentType === 'reel' && ['youtube', 'instagram', 'facebook'].includes(platform) && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Video URL (MP4 público)
+                  </label>
+                  <input
+                    type="url"
+                    value={videoUrl}
+                    onChange={(e) => setVideoUrl(e.target.value)}
+                    placeholder="https://.../video.mp4"
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-opacity-50 outline-none"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Prioridad: <b>product.video_url (MP4)</b> → <b>este input</b>. Si no hay MP4, YouTube fallará.
+                  </p>
+                </div>
+              )}
 
               {/* Strategy */}
               <div>
@@ -1149,12 +1166,25 @@ if (!data) {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <div className="aspect-square bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg flex items-center justify-center border-2 border-gray-200 overflow-hidden">
-                    <img
-                      src={generatedContent.preview_url || safePlaceholder(contentType)}
-                      alt="Preview"
-                      className="w-full h-full object-cover"
-                      onError={(e) => { e.currentTarget.src = safePlaceholder(contentType); }}
-                    />
+                    {isVideoPreview ? (
+                      <video
+                        src={previewSrc}
+                        controls
+                        className="w-full h-full object-cover"
+                        onError={() => {
+                          // fallback visual (no romper)
+                          setStatusMsg({ type: 'info', text: 'No pude cargar el video preview. Revisa que el MP4 sea público.' });
+                          clearStatusSoon(4500);
+                        }}
+                      />
+                    ) : (
+                      <img
+                        src={previewSrc || safePlaceholder(contentType)}
+                        alt="Preview"
+                        className="w-full h-full object-cover"
+                        onError={(e) => { e.currentTarget.src = safePlaceholder(contentType); }}
+                      />
+                    )}
                   </div>
 
                   {Array.isArray(generatedContent.carousel_urls) && generatedContent.carousel_urls.length > 0 && (
