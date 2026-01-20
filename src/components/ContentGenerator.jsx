@@ -660,59 +660,55 @@ export default function ContentGenerator() {
   };
 
   const scheduleContent = async (scheduleData) => {
-    try {
-      if (!generatedContent) return;
+  try {
+    if (!generatedContent) return;
 
-      const caption_final = buildPublishCaption(
-        {
-          title: generatedContent.title,
-          body: generatedContent.body,
-          cta: generatedContent.cta,
-          hashtags: generatedContent.hashtags,
-        },
-        platform
-      );
-
-      const row = {
-        platform,
-        content_type: contentType,
+    const caption_final = buildPublishCaption(
+      {
         title: generatedContent.title,
-        description: generatedContent.body,
-        caption: caption_final,
-        hashtags: generatedContent.hashtags,
+        body: generatedContent.body,
         cta: generatedContent.cta,
+        hashtags: generatedContent.hashtags,
+      },
+      platform
+    );
 
-        preview_url: generatedContent.preview_url ?? null,
-        asset_url: generatedContent.asset_url ?? null,
-        asset_type: generatedContent.asset_type ?? null,
+    // ✅ IMPORTANTE: content_calendar NO tiene generated_content_id
+    const row = {
+      platform,
+      content_type: contentType,
+      title: generatedContent.title ?? null,
+      description: generatedContent.body ?? null,
+      caption: caption_final ?? null,
+      hashtags: generatedContent.hashtags ?? null,
+      cta: generatedContent.cta ?? null,
 
-        scheduled_date: scheduleData.date,
-        scheduled_time: scheduleData.time,
-        product_id: selectedProduct || null,
+      preview_url: generatedContent.preview_url ?? null,
+      asset_url: generatedContent.asset_url ?? null,
+      asset_type: generatedContent.asset_type ?? null,
 
-        generated_content_id: generatedContent.id ?? null,
+      scheduled_date: scheduleData.date,
+      scheduled_time: scheduleData.time, // la columna es time WITHOUT timezone, acepta "HH:MM"
+      product_id: selectedProduct || null,
 
-        status: 'scheduled',
-        campaign_type: campaignType,
-        ab_variant: campaignType === 'paid' ? abVariant : null,
-        target_age_range: campaignType === 'paid' ? ageRange : null,
-        target_interests: campaignType === 'paid' ? interests : null,
-      };
+      status: 'scheduled',
+      campaign_type: campaignType,
+      ab_variant: campaignType === 'paid' ? abVariant : null,
+      target_age_range: campaignType === 'paid' ? ageRange : null,
+      target_interests: campaignType === 'paid' ? interests : null,
+    };
 
-      const { error } = await supabase
-        .from('content_calendar')
-        .insert([row]);
+    const { error } = await supabase.from('content_calendar').insert([row]);
+    if (error) throw error;
 
-      if (error) throw error;
-
-      setShowScheduleModal(false);
-      window.dispatchEvent(new CustomEvent('calendar:refresh'));
-      alert('✅ Contenido programado exitosamente en el calendario');
-    } catch (error) {
-  console.error('Error scheduling content:', error);
-  alert(`❌ Error al programar contenido: ${error?.message || JSON.stringify(error)}`);
-}
-  };
+    setShowScheduleModal(false);
+    window.dispatchEvent(new CustomEvent('calendar:refresh'));
+    alert('✅ Contenido programado exitosamente en el calendario');
+  } catch (error) {
+    console.error('Error scheduling content:', error);
+    alert(`❌ Error al programar contenido: ${error?.message || JSON.stringify(error)}`);
+  }
+};
 
   // Fallback local
   const generateContentByStrategy = (data, product) => {
