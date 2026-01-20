@@ -709,9 +709,9 @@ export default function ContentGenerator() {
       window.dispatchEvent(new CustomEvent('calendar:refresh'));
       alert('✅ Contenido programado exitosamente en el calendario');
     } catch (error) {
-      console.error('Error scheduling content:', error);
-      alert('❌ Error al programar contenido');
-    }
+  console.error('Error scheduling content:', error);
+  alert(`❌ Error al programar contenido: ${error?.message || JSON.stringify(error)}`);
+}
   };
 
   // Fallback local
