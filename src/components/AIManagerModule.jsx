@@ -1,183 +1,171 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
-import { 
-  Bot, 
-  Send, 
-  Sparkles, 
-  TrendingUp, 
+import {
+  Bot,
+  Send,
+  Sparkles,
+  TrendingUp,
   AlertCircle,
-  CheckCircle,
-  Clock,
   Zap,
-  MessageSquare,
-  BarChart3,
-  Calendar,
-  ShoppingBag
+  Calendar
 } from 'lucide-react';
+
+function nowISO() {
+  return new Date().toISOString();
+}
+
+async function safeInsert(table, row) {
+  try {
+    const { error } = await supabase.from(table).insert(row);
+    if (error) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function safeSelect(table, queryBuilder) {
+  try {
+    const { data, error } = await queryBuilder(supabase.from(table));
+    if (error) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
 
 export default function AIManagerModule() {
   const [messages, setMessages] = useState([]);
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [aiInsights, setAiInsights] = useState(null);
+
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
     loadAIInsights();
     loadConversationHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    scrollToBottom();
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
   async function loadAIInsights() {
-    try {
-      const { data: stats } = await supabase
-        .from('ai_insights')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .single();
+    // Si existe ai_insights, úsala. Si no, construimos insights desde tablas reales.
+    const data = await safeSelect('ai_insights', (t) =>
+      t.select('*').order('created_at', { ascending: false }).limit(1).single()
+    );
 
-      if (stats) {
-        setAiInsights(stats);
-      }
-    } catch (error) {
-      console.error('Error loading AI insights:', error);
+    if (data) {
+      setAiInsights(data);
+      return;
+    }
+
+    // Fallback: reconstruimos con conteos de tablas reales
+    try {
+      const [productsCount, scheduledCount, automationsCount, failedCount] = await Promise.all([
+        supabase.from('products').select('id', { count: 'exact', head: true }),
+        supabase.from('content_calendar').select('id', { count: 'exact', head: true }).eq('status', 'scheduled'),
+        // automations: enabled o is_active
+        (async () => {
+          const a1 = await supabase.from('automations').select('id', { count: 'exact', head: true }).eq('enabled', true);
+          if (!a1.error) return a1.count || 0;
+          const a2 = await supabase.from('automations').select('id', { count: 'exact', head: true }).eq('is_active', true);
+          if (!a2.error) return a2.count || 0;
+          return 0;
+        })(),
+        supabase.from('content_calendar').select('id', { count: 'exact', head: true }).eq('status', 'failed'),
+      ]);
+
+      setAiInsights({
+        active_products: productsCount.count || 0,
+        scheduled_content: scheduledCount.count || 0,
+        active_automations: automationsCount || 0,
+        pending_alerts: failedCount.count || 0,
+      });
+    } catch {
+      setAiInsights({
+        active_products: 0,
+        scheduled_content: 0,
+        active_automations: 0,
+        pending_alerts: 0,
+      });
     }
   }
 
   async function loadConversationHistory() {
-    try {
-      const { data } = await supabase
-        .from('ai_conversations')
-        .select('*')
-        .order('created_at', { ascending: true })
-        .limit(50);
+    // Si no existe ai_conversations, no rompemos: partimos vacío.
+    const data = await safeSelect('ai_conversations', (t) =>
+      t.select('*').order('created_at', { ascending: true }).limit(50)
+    );
 
-      if (data) {
-        setMessages(data);
-      }
-    } catch (error) {
-      console.error('Error loading conversation:', error);
+    if (data && Array.isArray(data) && data.length > 0) {
+      setMessages(data);
+    } else {
+      setMessages([]);
     }
   }
 
   async function handleSendMessage() {
     if (!inputMessage.trim() || isLoading) return;
 
+    const raw = inputMessage.trim();
+
     const userMessage = {
       role: 'user',
-      content: inputMessage,
-      created_at: new Date().toISOString()
+      content: raw,
+      created_at: nowISO(),
     };
 
-    setMessages(prev => [...prev, userMessage]);
+    setMessages((prev) => [...prev, userMessage]);
     setInputMessage('');
     setIsLoading(true);
 
+    // Guardar mensaje usuario si existe la tabla
+    await safeInsert('ai_conversations', { role: 'user', content: raw });
+
     try {
-      // Guardar mensaje del usuario
-      await supabase.from('ai_conversations').insert({
-        role: 'user',
-        content: inputMessage
+      // 1) Intentamos responder usando tu Edge Function "autogerente" (v1)
+      const { data, error } = await supabase.functions.invoke('autogerente', {
+        body: {
+          message: raw,
+          channel: 'panel',
+          user_id: null,
+        },
       });
 
-      // Simular respuesta de Claude IA
-      const aiResponse = await generateAIResponse(inputMessage);
+      if (error) throw error;
+
+      // data.reply es lo principal; data.actions opcional
+      const reply = data?.reply || 'OK.';
 
       const assistantMessage = {
         role: 'assistant',
-        content: aiResponse,
-        created_at: new Date().toISOString()
+        content: reply,
+        created_at: nowISO(),
       };
 
-      setMessages(prev => [...prev, assistantMessage]);
+      setMessages((prev) => [...prev, assistantMessage]);
 
-      // Guardar respuesta de IA
-      await supabase.from('ai_conversations').insert({
-        role: 'assistant',
-        content: aiResponse
-      });
+      await safeInsert('ai_conversations', { role: 'assistant', content: reply });
 
-    } catch (error) {
-      console.error('Error sending message:', error);
-      const errorMessage = {
+      // Refrescamos insights por si cambió algo
+      loadAIInsights();
+    } catch (e) {
+      console.error('AI error:', e);
+      const assistantMessage = {
         role: 'assistant',
-        content: 'Lo siento, hubo un error al procesar tu mensaje. Por favor intenta nuevamente.',
-        created_at: new Date().toISOString()
+        content:
+          'Tuve un problema conectando con el Auto-Gerente. Revisa que la Edge Function "autogerente" esté desplegada y disponible.',
+        created_at: nowISO(),
       };
-      setMessages(prev => [...prev, errorMessage]);
+      setMessages((prev) => [...prev, assistantMessage]);
+      await safeInsert('ai_conversations', { role: 'assistant', content: assistantMessage.content });
     } finally {
       setIsLoading(false);
     }
-  }
-
-  async function generateAIResponse(userInput) {
-    // Aquí se integrará Claude AI
-    // Por ahora, respuestas inteligentes basadas en contexto
-    
-    const input = userInput.toLowerCase();
-
-    if (input.includes('producto') || input.includes('ganador')) {
-      const { data: products } = await supabase
-        .from('winning_products')
-        .select('*')
-        .eq('status', 'active')
-        .order('tiktok_score', { ascending: false })
-        .limit(3);
-
-      if (products && products.length > 0) {
-        return `He analizado tus productos ganadores. Los top 3 son:\n\n${products.map((p, i) => 
-          `${i + 1}. ${p.product_name} - Score: ${p.tiktok_score}/10 - Precio sugerido: $${p.suggested_price_clp.toLocaleString('es-CL')}`
-        ).join('\n')}\n\nTe recomiendo enfocarte en estos productos para maximizar tus ventas.`;
-      }
-    }
-
-    if (input.includes('contenido') || input.includes('publicar')) {
-      const { data: content } = await supabase
-        .from('generated_content')
-        .select('*')
-        .eq('status', 'scheduled')
-        .order('scheduled_date', { ascending: true })
-        .limit(5);
-
-      if (content && content.length > 0) {
-        return `Tienes ${content.length} publicaciones programadas. La próxima es para ${new Date(content[0].scheduled_date).toLocaleDateString('es-CL')}. ¿Quieres que revise el contenido o genere nuevas ideas?`;
-      }
-      return 'No tienes contenido programado aún. ¿Quieres que te ayude a generar contenido para tus redes sociales?';
-    }
-
-    if (input.includes('alerta') || input.includes('notificación')) {
-      const { data: alerts } = await supabase
-        .from('alerts')
-        .select('*')
-        .eq('is_read', false)
-        .order('created_at', { ascending: false });
-
-      if (alerts && alerts.length > 0) {
-        return `Tienes ${alerts.length} alertas pendientes:\n\n${alerts.slice(0, 3).map(a => 
-          `• ${a.title}: ${a.message}`
-        ).join('\n')}\n\n¿Quieres que te ayude a resolverlas?`;
-      }
-      return 'No tienes alertas pendientes. Todo está funcionando correctamente.';
-    }
-
-    if (input.includes('analítica') || input.includes('métricas') || input.includes('rendimiento')) {
-      return 'Estoy analizando tus métricas en tiempo real. Basándome en los datos actuales, te recomiendo:\n\n1. Aumentar la frecuencia de publicaciones en Instagram (mejor engagement)\n2. Probar contenido de video corto en TikTok\n3. Revisar los productos con bajo rendimiento\n\n¿Quieres un análisis más detallado?';
-    }
-
-    if (input.includes('automatización') || input.includes('automatizar')) {
-      return 'Puedo ayudarte a configurar automatizaciones para:\n\n• Publicación automática de contenido\n• Respuestas automáticas en WhatsApp\n• Alertas de productos con bajo stock\n• Reportes semanales de rendimiento\n\n¿Cuál te gustaría configurar primero?';
-    }
-
-    // Respuesta general inteligente
-    return `Entiendo tu consulta sobre "${userInput}". Como tu Auto-Gerente IA, estoy aquí para ayudarte con:\n\n• Análisis de productos ganadores\n• Generación y programación de contenido\n• Monitoreo de métricas y alertas\n• Automatizaciones inteligentes\n• Optimización de estrategias\n\n¿En qué área específica necesitas ayuda?`;
   }
 
   return (
@@ -190,7 +178,7 @@ export default function AIManagerModule() {
           </div>
           <div>
             <h1 className="text-3xl font-bold" style={{ color: '#2D5016' }}>Auto-Gerente IA</h1>
-            <p className="text-gray-600">Asistente inteligente con Claude AI</p>
+            <p className="text-gray-600">Motor: Edge Function “autogerente” (v1)</p>
           </div>
         </div>
       </div>
@@ -207,6 +195,7 @@ export default function AIManagerModule() {
               {aiInsights.active_products || 0}
             </p>
           </div>
+
           <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
             <div className="flex items-center gap-2 mb-2">
               <Calendar className="w-4 h-4" style={{ color: '#2D5016' }} />
@@ -216,6 +205,7 @@ export default function AIManagerModule() {
               {aiInsights.scheduled_content || 0}
             </p>
           </div>
+
           <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
             <div className="flex items-center gap-2 mb-2">
               <Zap className="w-4 h-4" style={{ color: '#2D5016' }} />
@@ -225,10 +215,11 @@ export default function AIManagerModule() {
               {aiInsights.active_automations || 0}
             </p>
           </div>
+
           <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
             <div className="flex items-center gap-2 mb-2">
               <AlertCircle className="w-4 h-4" style={{ color: '#D4A017' }} />
-              <span className="text-xs text-gray-600">Alertas Pendientes</span>
+              <span className="text-xs text-gray-600">Alertas</span>
             </div>
             <p className="text-2xl font-bold" style={{ color: '#D4A017' }}>
               {aiInsights.pending_alerts || 0}
@@ -250,20 +241,15 @@ export default function AIManagerModule() {
                 ¡Hola! Soy tu Auto-Gerente IA
               </h3>
               <p className="text-gray-600 max-w-md">
-                Estoy aquí para ayudarte a optimizar tu negocio, analizar datos, generar contenido y automatizar procesos. ¿En qué puedo ayudarte hoy?
+                Puedo ayudarte con contenido, calendario, diagnóstico de fallos y próximos pasos. Escríbeme lo que necesitas.
               </p>
             </div>
           ) : (
             messages.map((msg, index) => (
-              <div
-                key={index}
-                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-              >
+              <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div
                   className={`max-w-[70%] rounded-lg p-4 ${
-                    msg.role === 'user'
-                      ? 'text-white'
-                      : 'bg-gray-50 text-gray-800'
+                    msg.role === 'user' ? 'text-white' : 'bg-gray-50 text-gray-800'
                   }`}
                   style={msg.role === 'user' ? { backgroundColor: '#2D5016' } : {}}
                 >
@@ -274,10 +260,7 @@ export default function AIManagerModule() {
                     <div className="flex-1">
                       <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                       <p className={`text-xs mt-2 ${msg.role === 'user' ? 'text-white/70' : 'text-gray-500'}`}>
-                        {new Date(msg.created_at).toLocaleTimeString('es-CL', { 
-                          hour: '2-digit', 
-                          minute: '2-digit' 
-                        })}
+                        {new Date(msg.created_at).toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' })}
                       </p>
                     </div>
                   </div>
@@ -285,6 +268,7 @@ export default function AIManagerModule() {
               </div>
             ))
           )}
+
           {isLoading && (
             <div className="flex justify-start">
               <div className="bg-gray-50 rounded-lg p-4 max-w-[70%]">
@@ -299,6 +283,7 @@ export default function AIManagerModule() {
               </div>
             </div>
           )}
+
           <div ref={messagesEndRef} />
         </div>
 
@@ -309,10 +294,9 @@ export default function AIManagerModule() {
               type="text"
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+              onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
               placeholder="Escribe tu mensaje al Auto-Gerente IA..."
-              className="flex-1 px-4 py-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-opacity-50"
-              style={{ focusRingColor: '#2D5016' }}
+              className="flex-1 px-4 py-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-700/30"
               disabled={isLoading}
             />
             <button
