@@ -3,10 +3,15 @@ import React, { useEffect } from "react";
 import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
 
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
+
 import Login from "./components/Login";
-import MainApp from "./components/MainApp";
 import OAuthCallback from "./components/OAuthCallback";
-import OAuthTikTokStart from "./components/OAuthTikTokStart"; // ✅ NUEVO
+import OAuthTikTokStart from "./components/OAuthTikTokStart";
+
+import Dashboard from "./pages/Dashboard";
+import AIManagerPage from "./pages/AIManager";
+import Trends from "./pages/Trends";
+
 import { initWhatsAppStorage } from "./lib/initStorage";
 
 function PrivateRoute({ children }) {
@@ -37,27 +42,54 @@ function AppRoutes() {
 
   return (
     <Routes>
-      {/* ✅ PUBLICAS */}
+      {/* ✅ RUTAS PÚBLICAS */}
       <Route path="/oauth/callback" element={<OAuthCallback />} />
-      <Route path="/oauth/tiktok-start" element={<OAuthTikTokStart />} /> {/* ✅ NUEVO */}
+      <Route path="/oauth/tiktok-start" element={<OAuthTikTokStart />} />
 
-      {/* Login */}
+      {/* ✅ LOGIN */}
       <Route
         path="/login"
         element={user ? <Navigate to="/dashboard" replace /> : <Login />}
       />
 
-      {/* Root */}
-      <Route path="/" element={<Navigate to={user ? "/dashboard" : "/login"} replace />} />
-
-      {/* Protegidas */}
+      {/* ✅ ROOT */}
       <Route
-        path="/*"
+        path="/"
+        element={<Navigate to={user ? "/dashboard" : "/login"} replace />}
+      />
+
+      {/* ✅ RUTAS PROTEGIDAS (AQUÍ ESTABA EL PROBLEMA) */}
+      <Route
+        path="/dashboard"
         element={
           <PrivateRoute>
-            <MainApp />
+            <Dashboard />
           </PrivateRoute>
         }
+      />
+
+      <Route
+        path="/ai-manager"
+        element={
+          <PrivateRoute>
+            <AIManagerPage />
+          </PrivateRoute>
+        }
+      />
+
+      <Route
+        path="/trends"
+        element={
+          <PrivateRoute>
+            <Trends />
+          </PrivateRoute>
+        }
+      />
+
+      {/* ✅ FALLBACK */}
+      <Route
+        path="*"
+        element={<Navigate to={user ? "/dashboard" : "/login"} replace />}
       />
     </Routes>
   );
@@ -66,19 +98,19 @@ function AppRoutes() {
 export default function App() {
   useEffect(() => {
     initWhatsAppStorage().then((result) => {
-      if (result.success) {
+      if (result?.success) {
         console.log("✅ Storage inicializado correctamente");
       } else {
-        console.warn("⚠️ No se pudo inicializar storage:", result.error);
+        console.warn("⚠️ No se pudo inicializar storage:", result?.error);
       }
     });
   }, []);
 
   return (
-    <Router>
-      <AuthProvider>
+    <AuthProvider>
+      <Router>
         <AppRoutes />
-      </AuthProvider>
-    </Router>
+      </Router>
+    </AuthProvider>
   );
 }
