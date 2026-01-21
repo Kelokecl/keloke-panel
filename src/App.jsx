@@ -9,15 +9,6 @@ import OAuthCallback from "./components/OAuthCallback";
 import OAuthTikTokStart from "./components/OAuthTikTokStart"; // ✅ NUEVO
 import { initWhatsAppStorage } from "./lib/initStorage";
 
-import Dashboard from "./pages/Dashboard";
-import AIManagerPage from "./pages/AIManager";
-import Trends from "./pages/Trends";
-
-<Route path="/dashboard" element={<Dashboard />} />
-<Route path="/ai-manager" element={<AIManagerPage />} />
-<Route path="/trends" element={<Trends />} />
-<Route path="/" element={<Dashboard />} />
-
 function PrivateRoute({ children }) {
   const { user, loading } = useAuth();
 
