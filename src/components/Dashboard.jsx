@@ -34,10 +34,47 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Para evitar doble click / spam
+  const [markingAll, setMarkingAll] = useState(false);
+  const [markingOneId, setMarkingOneId] = useState(null);
+
   useEffect(() => {
     loadDashboardData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // === RPC helpers (C1) ===
+  async function markAllAlertsRead() {
+    setMarkingAll(true);
+    try {
+      const { error: rpcError } = await supabase.rpc("mark_dashboard_alerts_read", {});
+      if (rpcError) throw rpcError;
+
+      await loadDashboardData();
+    } catch (e) {
+      console.error("markAllAlertsRead error:", e);
+      setError("No se pudieron marcar las alertas como leídas. Reintenta.");
+    } finally {
+      setMarkingAll(false);
+    }
+  }
+
+  async function markOneAlertRead(alertId) {
+    setMarkingOneId(alertId);
+    try {
+      const { error: rpcError } = await supabase.rpc("mark_dashboard_alerts_read", {
+        p_ids: [alertId],
+      });
+      if (rpcError) throw rpcError;
+
+      await loadDashboardData();
+    } catch (e) {
+      console.error("markOneAlertRead error:", e);
+      setError("No se pudo marcar la alerta como leída. Reintenta.");
+    } finally {
+      setMarkingOneId(null);
+    }
+  }
 
   async function loadDashboardData() {
     const timeout = setTimeout(() => {
@@ -50,22 +87,35 @@ export default function Dashboard() {
       setLoading(true);
 
       // ====== STATS ======
-      const [productsRes, contentRes, automationsRes, businessUnreadRes] = await Promise.all([
+      // OJO: ahora las “alertas pendientes” vienen desde dashboard_alerts (no business_events)
+      const [productsRes, contentRes, automationsRes, pendingAlertsRes] = await Promise.all([
         supabase.from("products").select("id", { count: "exact", head: true }),
-        supabase.from("generated_content").select("id", { count: "exact", head: true }).eq("status", "scheduled"),
-        supabase.from("automations").select("id", { count: "exact", head: true }).eq("is_active", true),
-        supabase.from("business_events").select("id", { count: "exact", head: true }).eq("is_read", false),
+        supabase
+          .from("generated_content")
+          .select("id", { count: "exact", head: true })
+          .eq("status", "scheduled"),
+        supabase
+          .from("automations")
+          .select("id", { count: "exact", head: true })
+          .eq("is_active", true),
+        supabase
+          .from("dashboard_alerts")
+          .select("id", { count: "exact", head: true })
+          .eq("is_read", false)
+          .eq("category", "business"),
       ]);
 
       setStats({
         totalProducts: productsRes.count || 0,
         scheduledContent: contentRes.count || 0,
         activeAutomations: automationsRes.count || 0,
-        pendingBusinessAlerts: businessUnreadRes.count || 0,
+        pendingBusinessAlerts: pendingAlertsRes.count || 0,
       });
 
       // ====== FEEDS ======
-      const [suggRes, businessRes, winnersRes, logsRes] = await Promise.all([
+      // - Alertas de negocio: ahora vienen desde dashboard_alerts
+      // - Mostramos las más recientes NO leídas (mejor UX), si no hay, muestra últimas 5 igual
+      const [suggRes, alertsUnreadRes, alertsFallbackRes, winnersRes, logsRes] = await Promise.all([
         supabase
           .from("ai_suggestions")
           .select("*")
@@ -74,8 +124,17 @@ export default function Dashboard() {
           .limit(5),
 
         supabase
-          .from("business_events")
+          .from("dashboard_alerts")
           .select("*")
+          .eq("category", "business")
+          .eq("is_read", false)
+          .order("created_at", { ascending: false })
+          .limit(5),
+
+        supabase
+          .from("dashboard_alerts")
+          .select("*")
+          .eq("category", "business")
           .order("created_at", { ascending: false })
           .limit(5),
 
@@ -95,7 +154,11 @@ export default function Dashboard() {
       ]);
 
       setSuggestions(suggRes.data || []);
-      setBusinessAlerts(businessRes.data || []);
+
+      const unread = alertsUnreadRes.data || [];
+      const fallback = alertsFallbackRes.data || [];
+      setBusinessAlerts(unread.length > 0 ? unread : fallback);
+
       setWinningProducts(winnersRes.data || []);
       setSystemLogs(logsRes.data || []);
 
@@ -109,11 +172,35 @@ export default function Dashboard() {
     }
   }
 
+  // Etiquetas bonitas por source/type
+  function formatAlertTitle(a) {
+    const type = a?.type || "event";
+    const source = a?.source || "system";
+
+    // Si ya viene un título, úsalo
+    if (a?.title) return a.title;
+
+    // Fallback por tipo
+    if (type === "sale") return "Venta nueva";
+    if (type === "message" && source === "whatsapp") return "Nuevo mensaje WhatsApp";
+    if (type === "message" && source === "instagram") return "Nuevo mensaje Instagram";
+    if (type === "comment" && source === "instagram") return "Nuevo comentario";
+    if (type === "product") return "Productos actualizados (día)";
+    return "Evento";
+  }
+
+  function formatAlertMessage(a) {
+    return a?.message || "";
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-screen">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-4 border-gray-200 mx-auto" style={{ borderTopColor: "#2D5016" }} />
+          <div
+            className="animate-spin rounded-full h-12 w-12 border-4 border-gray-200 mx-auto"
+            style={{ borderTopColor: "#2D5016" }}
+          />
           <p className="text-gray-600 mt-4">Cargando dashboard...</p>
         </div>
       </div>
@@ -147,7 +234,9 @@ export default function Dashboard() {
           <h1 className="text-3xl font-bold" style={{ color: "#2D5016" }}>
             Dashboard General
           </h1>
-          <p className="text-gray-600 mt-1">Resumen del sistema (negocio + automatización + control técnico)</p>
+          <p className="text-gray-600 mt-1">
+            Resumen del sistema (negocio + automatización + control técnico)
+          </p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -200,7 +289,9 @@ export default function Dashboard() {
             {suggestions.map((s) => (
               <div key={s.id} className="p-3 rounded-lg border border-gray-100 flex items-start justify-between gap-3">
                 <div>
-                  <p className="font-semibold text-sm" style={{ color: "#2D5016" }}>{s.title}</p>
+                  <p className="font-semibold text-sm" style={{ color: "#2D5016" }}>
+                    {s.title}
+                  </p>
                   {s.detail && <p className="text-xs text-gray-600 mt-1">{s.detail}</p>}
                 </div>
                 <span
@@ -227,7 +318,20 @@ export default function Dashboard() {
             <h2 className="text-xl font-bold" style={{ color: "#2D5016" }}>
               Alertas Recientes (Negocio)
             </h2>
-            <Bell className="w-5 h-5 text-gray-400" />
+
+            <div className="flex items-center gap-2">
+              {/* C1: Marcar todo leído */}
+              <button
+                onClick={() => markAllAlertsRead()}
+                disabled={markingAll || stats.pendingBusinessAlerts === 0}
+                className="px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
+                title="Marcar todas las alertas como leídas"
+              >
+                {markingAll ? "Marcando..." : "Marcar todo leído"}
+              </button>
+
+              <Bell className="w-5 h-5 text-gray-400" />
+            </div>
           </div>
 
           {businessAlerts.length === 0 ? (
@@ -237,12 +341,43 @@ export default function Dashboard() {
           ) : (
             <div className="space-y-3">
               {businessAlerts.map((a) => (
-                <div key={a.id} className="p-4 rounded-lg border border-gray-100">
-                  <p className="text-sm font-semibold" style={{ color: "#2D5016" }}>
-                    {a.title || `${a.event_type} (${a.channel})`}
-                  </p>
-                  {a.message && <p className="text-xs text-gray-600 mt-1">{a.message}</p>}
-                  <p className="text-xs text-gray-500 mt-2">{new Date(a.created_at).toLocaleString("es-CL")}</p>
+                <div key={a.id} className="p-4 rounded-lg border border-gray-100 flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold" style={{ color: "#2D5016" }}>
+                      {formatAlertTitle(a)}
+                    </p>
+
+                    {formatAlertMessage(a) ? (
+                      <p className="text-xs text-gray-600 mt-1 break-words">{formatAlertMessage(a)}</p>
+                    ) : null}
+
+                    <div className="flex items-center gap-2 mt-2">
+                      <span className="text-[11px] px-2 py-0.5 rounded-full border"
+                        style={{ backgroundColor: "#F5E6D3", color: "#2D5016", borderColor: "#E6D6C3" }}
+                        title="Fuente / tipo"
+                      >
+                        {a.source || "system"} • {a.type || "event"}
+                      </span>
+
+                      <p className="text-xs text-gray-500">
+                        {a.created_at ? new Date(a.created_at).toLocaleString("es-CL") : ""}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Marcar 1 leído */}
+                  {!a.is_read ? (
+                    <button
+                      onClick={() => markOneAlertRead(a.id)}
+                      disabled={markingOneId === a.id}
+                      className="shrink-0 px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
+                      title="Marcar como leído"
+                    >
+                      {markingOneId === a.id ? "..." : "✓"}
+                    </button>
+                  ) : (
+                    <span className="shrink-0 text-xs text-gray-400 px-2 py-2">Leído</span>
+                  )}
                 </div>
               ))}
             </div>
@@ -260,7 +395,9 @@ export default function Dashboard() {
 
           {winningProducts.length === 0 ? (
             <div className="text-center py-8">
-              <p className="text-gray-500 text-sm mb-3">Aún no hay productos ganadores (la tabla winning_products no está alimentada).</p>
+              <p className="text-gray-500 text-sm mb-3">
+                Aún no hay productos ganadores (la tabla winning_products no está alimentada).
+              </p>
               <button
                 onClick={() => navigate("/trends")}
                 className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
@@ -274,10 +411,15 @@ export default function Dashboard() {
                 <div key={p.id} className="p-4 rounded-lg border border-gray-100">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <p className="font-semibold text-sm">{idx + 1}. {p.product_name}</p>
+                      <p className="font-semibold text-sm">
+                        {idx + 1}. {p.product_name}
+                      </p>
                       <div className="flex items-center gap-2 mt-2 text-xs text-gray-600">
                         {p.category && (
-                          <span className="px-2 py-1 rounded-full" style={{ backgroundColor: "#F5E6D3", color: "#2D5016" }}>
+                          <span
+                            className="px-2 py-1 rounded-full"
+                            style={{ backgroundColor: "#F5E6D3", color: "#2D5016" }}
+                          >
                             {p.category}
                           </span>
                         )}
@@ -294,7 +436,9 @@ export default function Dashboard() {
                       <p className="text-lg font-bold" style={{ color: "#D4A017" }}>
                         {Number(p.score ?? 0).toFixed(0)}
                       </p>
-                      <p className="text-xs text-gray-500">TikTok: {Number(p.tiktok_score ?? 0).toFixed(1)}/10</p>
+                      <p className="text-xs text-gray-500">
+                        TikTok: {Number(p.tiktok_score ?? 0).toFixed(1)}/10
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -328,7 +472,9 @@ export default function Dashboard() {
               <div key={l.id} className="p-4 rounded-lg border border-red-100 bg-red-50">
                 <p className="text-sm font-semibold text-red-700">{l.title || "Error"}</p>
                 {l.message && <pre className="text-xs text-red-700 mt-2 whitespace-pre-wrap">{l.message}</pre>}
-                <p className="text-xs text-red-600 mt-2">{new Date(l.created_at).toLocaleString("es-CL")} • {l.module || "general"}</p>
+                <p className="text-xs text-red-600 mt-2">
+                  {new Date(l.created_at).toLocaleString("es-CL")} • {l.module || "general"}
+                </p>
               </div>
             ))}
           </div>
@@ -337,12 +483,34 @@ export default function Dashboard() {
 
       {/* Quick actions */}
       <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-        <h2 className="text-xl font-bold mb-4" style={{ color: "#2D5016" }}>Acciones Rápidas</h2>
+        <h2 className="text-xl font-bold mb-4" style={{ color: "#2D5016" }}>
+          Acciones Rápidas
+        </h2>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <QuickButton icon={Sparkles} title="Generar Contenido" subtitle="Crear nuevo post" onClick={() => navigate("/content")} />
-          <QuickButton icon={Calendar} title="Ver Calendario" subtitle="Programar publicaciones" onClick={() => navigate("/calendar")} />
-          <QuickButton icon={BarChart3} title="Analítica" subtitle="Ver métricas" onClick={() => navigate("/analytics")} />
-          <QuickButton icon={Settings} title="Configuración" subtitle="Ajustar sistema" onClick={() => navigate("/settings")} />
+          <QuickButton
+            icon={Sparkles}
+            title="Generar Contenido"
+            subtitle="Crear nuevo post"
+            onClick={() => navigate("/content")}
+          />
+          <QuickButton
+            icon={Calendar}
+            title="Ver Calendario"
+            subtitle="Programar publicaciones"
+            onClick={() => navigate("/calendar")}
+          />
+          <QuickButton
+            icon={BarChart3}
+            title="Analítica"
+            subtitle="Ver métricas"
+            onClick={() => navigate("/analytics")}
+          />
+          <QuickButton
+            icon={Settings}
+            title="Configuración"
+            subtitle="Ajustar sistema"
+            onClick={() => navigate("/settings")}
+          />
         </div>
       </div>
     </div>
@@ -355,9 +523,14 @@ function StatCard({ title, value, icon: Icon }) {
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm text-gray-600">{title}</p>
-          <p className="text-3xl font-bold mt-2" style={{ color: "#2D5016" }}>{value}</p>
+          <p className="text-3xl font-bold mt-2" style={{ color: "#2D5016" }}>
+            {value}
+          </p>
         </div>
-        <div className="w-12 h-12 rounded-lg flex items-center justify-center" style={{ backgroundColor: "#F5E6D3" }}>
+        <div
+          className="w-12 h-12 rounded-lg flex items-center justify-center"
+          style={{ backgroundColor: "#F5E6D3" }}
+        >
           <Icon className="w-6 h-6" style={{ color: "#2D5016" }} />
         </div>
       </div>
@@ -367,7 +540,10 @@ function StatCard({ title, value, icon: Icon }) {
 
 function QuickButton({ icon: Icon, title, subtitle, onClick }) {
   return (
-    <button onClick={onClick} className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left">
+    <button
+      onClick={onClick}
+      className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left"
+    >
       <Icon className="w-6 h-6 mb-2" style={{ color: "#2D5016" }} />
       <p className="font-medium text-sm">{title}</p>
       <p className="text-xs text-gray-500 mt-1">{subtitle}</p>
