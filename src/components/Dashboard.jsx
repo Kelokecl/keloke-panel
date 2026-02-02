@@ -87,7 +87,6 @@ export default function Dashboard() {
       setLoading(true);
 
       // ====== STATS ======
-      // OJO: ahora las “alertas pendientes” vienen desde dashboard_alerts (no business_events)
       const [productsRes, contentRes, automationsRes, pendingAlertsRes] = await Promise.all([
         supabase.from("products").select("id", { count: "exact", head: true }),
         supabase
@@ -113,9 +112,6 @@ export default function Dashboard() {
       });
 
       // ====== FEEDS ======
-      // - Alertas de negocio: ahora vienen desde dashboard_alerts
-      // - Mostramos las más recientes NO leídas (mejor UX), si no hay, muestra últimas 5 igual
-      // - Ganadores: ahora vienen del detector (v_winner_products_ui)
       const [suggRes, alertsUnreadRes, alertsFallbackRes, winnersRes, logsRes] = await Promise.all([
         supabase
           .from("ai_suggestions")
@@ -139,12 +135,30 @@ export default function Dashboard() {
           .order("created_at", { ascending: false })
           .limit(5),
 
-        // ✅ Detector real: 1 ganador por familia (vista UI-ready)
+        // =========================
+        // (B) NUEVO: Winners desde tu view final con semáforo + high ticket
+        // =========================
         supabase
-          .from("v_winner_products_ui")
-          .select("product_family, keloke_category, title, adjusted_winner_score, ml_ratio, url, day")
-          .order("adjusted_winner_score", { ascending: false })
-          .limit(5),
+          .from("v_winners_with_pricing_ht")
+          .select(
+            [
+              "keloke_category",
+              "product_family",
+              "title",
+              "url",
+              "ml_price_clp",
+              "suggested_price_25",
+              "profit_clp",
+              "margin_pct",
+              "traffic_light_final",
+              "high_ticket_tier",
+              "adjusted_winner_score",
+              "ml_ratio",
+              "price_fetched_at",
+            ].join(",")
+          )
+          .order("adjusted_winner_score", { ascending: false, nullsFirst: false })
+          .limit(10),
 
         supabase
           .from("system_logs")
@@ -177,10 +191,8 @@ export default function Dashboard() {
     const type = a?.type || "event";
     const source = a?.source || "system";
 
-    // Si ya viene un título, úsalo
     if (a?.title) return a.title;
 
-    // Fallback por tipo
     if (type === "sale") return "Venta nueva";
     if (type === "message" && source === "whatsapp") return "Nuevo mensaje WhatsApp";
     if (type === "message" && source === "instagram") return "Nuevo mensaje Instagram";
@@ -191,20 +203,6 @@ export default function Dashboard() {
 
   function formatAlertMessage(a) {
     return a?.message || "";
-  }
-
-  function formatDateCL(d) {
-    try {
-      return d ? new Date(d).toLocaleDateString("es-CL") : "";
-    } catch {
-      return "";
-    }
-  }
-
-  function formatPercent(n) {
-    const v = Number(n);
-    if (Number.isNaN(v)) return "0%";
-    return `${Math.round(v * 100)}%`;
   }
 
   if (loading) {
@@ -301,7 +299,10 @@ export default function Dashboard() {
         ) : (
           <div className="space-y-2">
             {suggestions.map((s) => (
-              <div key={s.id} className="p-3 rounded-lg border border-gray-100 flex items-start justify-between gap-3">
+              <div
+                key={s.id}
+                className="p-3 rounded-lg border border-gray-100 flex items-start justify-between gap-3"
+              >
                 <div>
                   <p className="font-semibold text-sm" style={{ color: "#2D5016" }}>
                     {s.title}
@@ -334,7 +335,6 @@ export default function Dashboard() {
             </h2>
 
             <div className="flex items-center gap-2">
-              {/* C1: Marcar todo leído */}
               <button
                 onClick={() => markAllAlertsRead()}
                 disabled={markingAll || stats.pendingBusinessAlerts === 0}
@@ -355,7 +355,10 @@ export default function Dashboard() {
           ) : (
             <div className="space-y-3">
               {businessAlerts.map((a) => (
-                <div key={a.id} className="p-4 rounded-lg border border-gray-100 flex items-start justify-between gap-3">
+                <div
+                  key={a.id}
+                  className="p-4 rounded-lg border border-gray-100 flex items-start justify-between gap-3"
+                >
                   <div className="min-w-0">
                     <p className="text-sm font-semibold" style={{ color: "#2D5016" }}>
                       {formatAlertTitle(a)}
@@ -380,7 +383,6 @@ export default function Dashboard() {
                     </div>
                   </div>
 
-                  {/* Marcar 1 leído */}
                   {!a.is_read ? (
                     <button
                       onClick={() => markOneAlertRead(a.id)}
@@ -402,17 +404,20 @@ export default function Dashboard() {
         {/* Winners */}
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-bold" style={{ color: "#2D5016" }}>
-              Top Productos Ganadores (Chile)
-            </h2>
+            <div>
+              <h2 className="text-xl font-bold" style={{ color: "#2D5016" }}>
+                Top Productos Ganadores (Chile)
+              </h2>
+              <p className="text-xs text-gray-500 mt-1">
+                Semáforo: verde/amarillo/rojo + high ticket azul (50k/80k/100k+)
+              </p>
+            </div>
             <TrendingUp className="w-5 h-5 text-gray-400" />
           </div>
 
           {winningProducts.length === 0 ? (
             <div className="text-center py-8">
-              <p className="text-gray-500 text-sm mb-3">
-                Aún no hay productos ganadores desde el detector (o faltan permisos para leer la vista).
-              </p>
+              <p className="text-gray-500 text-sm mb-3">Aún no hay productos ganadores.</p>
               <button
                 onClick={() => navigate("/trends")}
                 className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
@@ -423,84 +428,28 @@ export default function Dashboard() {
           ) : (
             <div className="space-y-3">
               {winningProducts.map((p, idx) => (
-                <div key={`${p.product_family}-${p.url || idx}`} className="p-4 rounded-lg border border-gray-100">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="font-semibold text-sm break-words">
-                        {idx + 1}. {p.title}
-                      </p>
-
-                      <div className="flex items-center flex-wrap gap-2 mt-2 text-xs text-gray-600">
-                        {p.keloke_category && (
-                          <span
-                            className="px-2 py-1 rounded-full"
-                            style={{ backgroundColor: "#F5E6D3", color: "#2D5016" }}
-                            title="Categoría Keloke"
-                          >
-                            {p.keloke_category}
-                          </span>
-                        )}
-
-                        {p.product_family && (
-                          <span
-                            className="px-2 py-1 rounded-full border"
-                            style={{ borderColor: "#E6D6C3", color: "#2D5016" }}
-                            title="Familia (anti-canibalización)"
-                          >
-                            {p.product_family}
-                          </span>
-                        )}
-
-                        {p.day && (
-                          <span className="text-xs text-gray-500" title="Día del cálculo">
-                            {formatDateCL(p.day)}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="text-right shrink-0">
-                      <p className="text-xs text-gray-500">Score</p>
-                      <p className="text-lg font-bold" style={{ color: "#D4A017" }}>
-                        {Number(p.adjusted_winner_score ?? 0).toFixed(2)}
-                      </p>
-                      <p className="text-xs text-gray-500">
-                        Presión ML: {formatPercent(p.ml_ratio ?? 0)}
-                      </p>
-
-                      {p.url ? (
-                        <a
-                          href={p.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-1 mt-2 text-sm underline"
-                          style={{ color: "#2D5016" }}
-                          title="Abrir producto fuente"
-                        >
-                          Ver <ExternalLink className="w-4 h-4" />
-                        </a>
-                      ) : null}
-                    </div>
-                  </div>
-                </div>
+                <WinnerCard
+                  key={`${p.url || ""}-${idx}`}
+                  idx={idx}
+                  item={p}
+                  onOpen={() => {
+                    if (p?.url) window.open(p.url, "_blank", "noopener,noreferrer");
+                  }}
+                />
               ))}
             </div>
           )}
         </div>
       </div>
 
-      {/* Technical logs (NO en negocio) */}
+      {/* Technical logs */}
       <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: "#2D5016" }}>
             <Wrench className="w-5 h-5" />
             Errores Técnicos Recientes (Publicación)
           </h2>
-          <button
-            onClick={() => navigate("/settings")}
-            className="text-sm underline"
-            style={{ color: "#2D5016" }}
-          >
+          <button onClick={() => navigate("/settings")} className="text-sm underline" style={{ color: "#2D5016" }}>
             Ver logs
           </button>
         </div>
@@ -528,33 +477,175 @@ export default function Dashboard() {
           Acciones Rápidas
         </h2>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <QuickButton
-            icon={Sparkles}
-            title="Generar Contenido"
-            subtitle="Crear nuevo post"
-            onClick={() => navigate("/content")}
-          />
-          <QuickButton
-            icon={Calendar}
-            title="Ver Calendario"
-            subtitle="Programar publicaciones"
-            onClick={() => navigate("/calendar")}
-          />
-          <QuickButton
-            icon={BarChart3}
-            title="Analítica"
-            subtitle="Ver métricas"
-            onClick={() => navigate("/analytics")}
-          />
-          <QuickButton
-            icon={Settings}
-            title="Configuración"
-            subtitle="Ajustar sistema"
-            onClick={() => navigate("/settings")}
-          />
+          <QuickButton icon={Sparkles} title="Generar Contenido" subtitle="Crear nuevo post" onClick={() => navigate("/content")} />
+          <QuickButton icon={Calendar} title="Ver Calendario" subtitle="Programar publicaciones" onClick={() => navigate("/calendar")} />
+          <QuickButton icon={BarChart3} title="Analítica" subtitle="Ver métricas" onClick={() => navigate("/analytics")} />
+          <QuickButton icon={Settings} title="Configuración" subtitle="Ajustar sistema" onClick={() => navigate("/settings")} />
         </div>
       </div>
     </div>
+  );
+}
+
+// ======================
+// (A) Card bonita + (C) Semáforo + High Ticket
+// ======================
+function WinnerCard({ idx, item, onOpen }) {
+  const title = item?.title || "Producto";
+  const cat = item?.keloke_category || "Sin categoría";
+  const fam = item?.product_family || "";
+  const score = item?.adjusted_winner_score ?? null;
+
+  const mlPrice = item?.ml_price_clp ?? null;
+  const sellPrice = item?.suggested_price_25 ?? null;
+  const profit = item?.profit_clp ?? null;
+  const margin = item?.margin_pct ?? null;
+
+  const traffic = item?.traffic_light_final || item?.traffic_light || "yellow";
+  const htTier = item?.high_ticket_tier || null;
+
+  const hasPricing = mlPrice !== null && sellPrice !== null;
+
+  return (
+    <div className="p-4 rounded-xl border border-gray-100 hover:border-gray-200 transition-colors bg-white">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="text-sm font-semibold truncate">
+              {idx + 1}. {title}
+            </p>
+
+            <TrafficPill traffic={traffic} />
+
+            {htTier ? <HighTicketPill tier={htTier} /> : null}
+          </div>
+
+          <div className="flex items-center gap-2 mt-2 flex-wrap">
+            <TagPill>{cat}</TagPill>
+            {fam ? <TagPill subtle>{fam}</TagPill> : null}
+            {score !== null ? (
+              <span className="text-[11px] text-gray-500">
+                Score: <span className="font-semibold">{Number(score).toFixed(2)}</span>
+              </span>
+            ) : null}
+          </div>
+
+          {/* Pricing row */}
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <div className="rounded-lg border border-gray-100 p-3">
+              <p className="text-[11px] text-gray-500">Precio ML (costo)</p>
+              <p className="text-sm font-semibold" style={{ color: "#2D5016" }}>
+                {mlPrice !== null ? `$${Number(mlPrice).toLocaleString("es-CL")}` : "—"}
+              </p>
+            </div>
+
+            <div className="rounded-lg border border-gray-100 p-3">
+              <p className="text-[11px] text-gray-500">Precio sugerido (x2.5)</p>
+              <p className="text-sm font-semibold" style={{ color: "#2D5016" }}>
+                {sellPrice !== null ? `$${Number(sellPrice).toLocaleString("es-CL")}` : "—"}
+              </p>
+            </div>
+
+            <div className="rounded-lg border border-gray-100 p-3">
+              <p className="text-[11px] text-gray-500">Ganancia</p>
+              <p className="text-sm font-semibold" style={{ color: "#D4A017" }}>
+                {profit !== null ? `$${Number(profit).toLocaleString("es-CL")}` : "—"}
+              </p>
+            </div>
+
+            <div className="rounded-lg border border-gray-100 p-3">
+              <p className="text-[11px] text-gray-500">Margen</p>
+              <p className="text-sm font-semibold text-gray-800">
+                {margin !== null ? `${Number(margin).toFixed(1)}%` : "—"}
+              </p>
+            </div>
+          </div>
+
+          {/* (D) Hook IA: aquí luego mostramos la mini justificación */}
+          <div className="mt-3">
+            {!hasPricing ? (
+              <p className="text-xs text-gray-500">
+                Falta pricing automático (ML). Cuando corras el backfill, se completan precio/ganancia/margen.
+              </p>
+            ) : (
+              <p className="text-xs text-gray-500">
+                (IA pronto) Aquí irá una mini justificación: “por qué es ganador” + recomendación.
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="shrink-0 flex flex-col items-end gap-2">
+          <button
+            onClick={onOpen}
+            className="px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
+            title="Abrir en MercadoLibre"
+          >
+            Ver <ExternalLink className="w-4 h-4 inline-block ml-1" />
+          </button>
+
+          {item?.price_fetched_at ? (
+            <span className="text-[11px] text-gray-400">
+              {new Date(item.price_fetched_at).toLocaleString("es-CL")}
+            </span>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TrafficPill({ traffic }) {
+  const t = (traffic || "yellow").toLowerCase();
+
+  // (C) Semáforo final: green/yellow/red + blue (high ticket)
+  const map = {
+    green: { label: "Ganador", bg: "#E9F7E7", fg: "#2D5016", bd: "#CFE8CB" },
+    yellow: { label: "Descubrimiento", bg: "#FFF6D9", fg: "#7A5A00", bd: "#F1E0A5" },
+    red: { label: "Explorar", bg: "#FDE8E8", fg: "#7A1E1E", bd: "#F6CACA" },
+    blue: { label: "High Ticket", bg: "#E8F1FF", fg: "#1E3A8A", bd: "#C7DBFF" },
+  };
+
+  const s = map[t] || map.yellow;
+
+  return (
+    <span
+      className="text-[11px] px-2 py-0.5 rounded-full border"
+      style={{ backgroundColor: s.bg, color: s.fg, borderColor: s.bd }}
+      title={`Semáforo: ${s.label}`}
+    >
+      {s.label}
+    </span>
+  );
+}
+
+function HighTicketPill({ tier }) {
+  // tier esperado: HT1_50K / HT2_80K / HT3_100K
+  const label =
+    tier === "HT3_100K" ? "HT 100K+" : tier === "HT2_80K" ? "HT 80K+" : tier === "HT1_50K" ? "HT 50K+" : "High Ticket";
+
+  return (
+    <span
+      className="text-[11px] px-2 py-0.5 rounded-full border"
+      style={{ backgroundColor: "#E8F1FF", color: "#1E3A8A", borderColor: "#C7DBFF" }}
+      title="Producto high ticket"
+    >
+      {label}
+    </span>
+  );
+}
+
+function TagPill({ children, subtle }) {
+  return (
+    <span
+      className="text-[11px] px-2 py-0.5 rounded-full"
+      style={{
+        backgroundColor: subtle ? "#F3F4F6" : "#F5E6D3",
+        color: subtle ? "#374151" : "#2D5016",
+      }}
+    >
+      {children}
+    </span>
   );
 }
 
@@ -568,10 +659,7 @@ function StatCard({ title, value, icon: Icon }) {
             {value}
           </p>
         </div>
-        <div
-          className="w-12 h-12 rounded-lg flex items-center justify-center"
-          style={{ backgroundColor: "#F5E6D3" }}
-        >
+        <div className="w-12 h-12 rounded-lg flex items-center justify-center" style={{ backgroundColor: "#F5E6D3" }}>
           <Icon className="w-6 h-6" style={{ color: "#2D5016" }} />
         </div>
       </div>
