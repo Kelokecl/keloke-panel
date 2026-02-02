@@ -115,6 +115,7 @@ export default function Dashboard() {
       // ====== FEEDS ======
       // - Alertas de negocio: ahora vienen desde dashboard_alerts
       // - Mostramos las más recientes NO leídas (mejor UX), si no hay, muestra últimas 5 igual
+      // - Ganadores: ahora vienen del detector (v_winner_products_ui)
       const [suggRes, alertsUnreadRes, alertsFallbackRes, winnersRes, logsRes] = await Promise.all([
         supabase
           .from("ai_suggestions")
@@ -138,12 +139,11 @@ export default function Dashboard() {
           .order("created_at", { ascending: false })
           .limit(5),
 
+        // ✅ Detector real: 1 ganador por familia (vista UI-ready)
         supabase
-          .from("winning_products")
-          .select("*")
-          .eq("status", "active")
-          .eq("country", "CL")
-          .order("score", { ascending: false })
+          .from("v_winner_products_ui")
+          .select("product_family, keloke_category, title, adjusted_winner_score, ml_ratio, url, day")
+          .order("adjusted_winner_score", { ascending: false })
           .limit(5),
 
         supabase
@@ -191,6 +191,20 @@ export default function Dashboard() {
 
   function formatAlertMessage(a) {
     return a?.message || "";
+  }
+
+  function formatDateCL(d) {
+    try {
+      return d ? new Date(d).toLocaleDateString("es-CL") : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function formatPercent(n) {
+    const v = Number(n);
+    if (Number.isNaN(v)) return "0%";
+    return `${Math.round(v * 100)}%`;
   }
 
   if (loading) {
@@ -352,7 +366,8 @@ export default function Dashboard() {
                     ) : null}
 
                     <div className="flex items-center gap-2 mt-2">
-                      <span className="text-[11px] px-2 py-0.5 rounded-full border"
+                      <span
+                        className="text-[11px] px-2 py-0.5 rounded-full border"
                         style={{ backgroundColor: "#F5E6D3", color: "#2D5016", borderColor: "#E6D6C3" }}
                         title="Fuente / tipo"
                       >
@@ -396,7 +411,7 @@ export default function Dashboard() {
           {winningProducts.length === 0 ? (
             <div className="text-center py-8">
               <p className="text-gray-500 text-sm mb-3">
-                Aún no hay productos ganadores (la tabla winning_products no está alimentada).
+                Aún no hay productos ganadores desde el detector (o faltan permisos para leer la vista).
               </p>
               <button
                 onClick={() => navigate("/trends")}
@@ -408,37 +423,63 @@ export default function Dashboard() {
           ) : (
             <div className="space-y-3">
               {winningProducts.map((p, idx) => (
-                <div key={p.id} className="p-4 rounded-lg border border-gray-100">
+                <div key={`${p.product_family}-${p.url || idx}`} className="p-4 rounded-lg border border-gray-100">
                   <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="font-semibold text-sm">
-                        {idx + 1}. {p.product_name}
+                    <div className="min-w-0">
+                      <p className="font-semibold text-sm break-words">
+                        {idx + 1}. {p.title}
                       </p>
-                      <div className="flex items-center gap-2 mt-2 text-xs text-gray-600">
-                        {p.category && (
+
+                      <div className="flex items-center flex-wrap gap-2 mt-2 text-xs text-gray-600">
+                        {p.keloke_category && (
                           <span
                             className="px-2 py-1 rounded-full"
                             style={{ backgroundColor: "#F5E6D3", color: "#2D5016" }}
+                            title="Categoría Keloke"
                           >
-                            {p.category}
+                            {p.keloke_category}
                           </span>
                         )}
-                        {p.suggested_price_clp && (
-                          <span className="font-mono" style={{ color: "#2D5016" }}>
-                            ${Number(p.suggested_price_clp).toLocaleString("es-CL")}
+
+                        {p.product_family && (
+                          <span
+                            className="px-2 py-1 rounded-full border"
+                            style={{ borderColor: "#E6D6C3", color: "#2D5016" }}
+                            title="Familia (anti-canibalización)"
+                          >
+                            {p.product_family}
+                          </span>
+                        )}
+
+                        {p.day && (
+                          <span className="text-xs text-gray-500" title="Día del cálculo">
+                            {formatDateCL(p.day)}
                           </span>
                         )}
                       </div>
                     </div>
 
-                    <div className="text-right">
+                    <div className="text-right shrink-0">
                       <p className="text-xs text-gray-500">Score</p>
                       <p className="text-lg font-bold" style={{ color: "#D4A017" }}>
-                        {Number(p.score ?? 0).toFixed(0)}
+                        {Number(p.adjusted_winner_score ?? 0).toFixed(2)}
                       </p>
                       <p className="text-xs text-gray-500">
-                        TikTok: {Number(p.tiktok_score ?? 0).toFixed(1)}/10
+                        Presión ML: {formatPercent(p.ml_ratio ?? 0)}
                       </p>
+
+                      {p.url ? (
+                        <a
+                          href={p.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 mt-2 text-sm underline"
+                          style={{ color: "#2D5016" }}
+                          title="Abrir producto fuente"
+                        >
+                          Ver <ExternalLink className="w-4 h-4" />
+                        </a>
+                      ) : null}
                     </div>
                   </div>
                 </div>
