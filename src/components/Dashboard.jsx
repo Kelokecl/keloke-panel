@@ -93,10 +93,7 @@ export default function Dashboard() {
           .from("generated_content")
           .select("id", { count: "exact", head: true })
           .eq("status", "scheduled"),
-        supabase
-          .from("automations")
-          .select("id", { count: "exact", head: true })
-          .eq("is_active", true),
+        supabase.from("automations").select("id", { count: "exact", head: true }).eq("is_active", true),
         supabase
           .from("dashboard_alerts")
           .select("id", { count: "exact", head: true })
@@ -135,9 +132,7 @@ export default function Dashboard() {
           .order("created_at", { ascending: false })
           .limit(5),
 
-        // =========================
-        // (B) NUEVO: Winners desde tu view final con semáforo + high ticket
-        // =========================
+        // ✅ Winners desde tu VIEW FINAL (ya existe en DB)
         supabase
           .from("v_winners_with_pricing_ht")
           .select(
@@ -160,12 +155,13 @@ export default function Dashboard() {
           .order("adjusted_winner_score", { ascending: false, nullsFirst: false })
           .limit(10),
 
-        supabase
-          .from("system_logs")
-          .select("*")
-          .order("created_at", { ascending: false })
-          .limit(3),
+        supabase.from("system_logs").select("*").order("created_at", { ascending: false }).limit(3),
       ]);
+
+      if (winnersRes?.error) {
+        // Esto es CLAVE para debug real (RLS etc.)
+        console.error("Winners view error:", winnersRes.error);
+      }
 
       setSuggestions(suggRes.data || []);
 
@@ -246,9 +242,7 @@ export default function Dashboard() {
           <h1 className="text-3xl font-bold" style={{ color: "#2D5016" }}>
             Dashboard General
           </h1>
-          <p className="text-gray-600 mt-1">
-            Resumen del sistema (negocio + automatización + control técnico)
-          </p>
+          <p className="text-gray-600 mt-1">Resumen del sistema (negocio + automatización + control técnico)</p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -311,11 +305,7 @@ export default function Dashboard() {
                 </div>
                 <span
                   className="text-xs px-2 py-1 rounded-full border"
-                  style={{
-                    backgroundColor: "#F5E6D3",
-                    color: "#2D5016",
-                    borderColor: "#E6D6C3",
-                  }}
+                  style={{ backgroundColor: "#F5E6D3", color: "#2D5016", borderColor: "#E6D6C3" }}
                 >
                   {s.priority || "medium"}
                 </span>
@@ -488,7 +478,7 @@ export default function Dashboard() {
 }
 
 // ======================
-// (A) Card bonita + (C) Semáforo + High Ticket
+// Winners Card (bonito)
 // ======================
 function WinnerCard({ idx, item, onOpen }) {
   const title = item?.title || "Producto";
@@ -501,7 +491,7 @@ function WinnerCard({ idx, item, onOpen }) {
   const profit = item?.profit_clp ?? null;
   const margin = item?.margin_pct ?? null;
 
-  const traffic = item?.traffic_light_final || item?.traffic_light || "yellow";
+  const traffic = (item?.traffic_light_final || "yellow").toLowerCase();
   const htTier = item?.high_ticket_tier || null;
 
   const hasPricing = mlPrice !== null && sellPrice !== null;
@@ -561,7 +551,6 @@ function WinnerCard({ idx, item, onOpen }) {
             </div>
           </div>
 
-          {/* (D) Hook IA: aquí luego mostramos la mini justificación */}
           <div className="mt-3">
             {!hasPricing ? (
               <p className="text-xs text-gray-500">
@@ -597,15 +586,12 @@ function WinnerCard({ idx, item, onOpen }) {
 
 function TrafficPill({ traffic }) {
   const t = (traffic || "yellow").toLowerCase();
-
-  // (C) Semáforo final: green/yellow/red + blue (high ticket)
   const map = {
     green: { label: "Ganador", bg: "#E9F7E7", fg: "#2D5016", bd: "#CFE8CB" },
     yellow: { label: "Descubrimiento", bg: "#FFF6D9", fg: "#7A5A00", bd: "#F1E0A5" },
     red: { label: "Explorar", bg: "#FDE8E8", fg: "#7A1E1E", bd: "#F6CACA" },
     blue: { label: "High Ticket", bg: "#E8F1FF", fg: "#1E3A8A", bd: "#C7DBFF" },
   };
-
   const s = map[t] || map.yellow;
 
   return (
@@ -620,9 +606,11 @@ function TrafficPill({ traffic }) {
 }
 
 function HighTicketPill({ tier }) {
-  // tier esperado: HT1_50K / HT2_80K / HT3_100K
   const label =
-    tier === "HT3_100K" ? "HT 100K+" : tier === "HT2_80K" ? "HT 80K+" : tier === "HT1_50K" ? "HT 50K+" : "High Ticket";
+    tier === "HT3_100K" ? "HT 100K+" :
+    tier === "HT2_80K" ? "HT 80K+" :
+    tier === "HT1_50K" ? "HT 50K+" :
+    "High Ticket";
 
   return (
     <span
@@ -669,10 +657,7 @@ function StatCard({ title, value, icon: Icon }) {
 
 function QuickButton({ icon: Icon, title, subtitle, onClick }) {
   return (
-    <button
-      onClick={onClick}
-      className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left"
-    >
+    <button onClick={onClick} className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left">
       <Icon className="w-6 h-6 mb-2" style={{ color: "#2D5016" }} />
       <p className="font-medium text-sm">{title}</p>
       <p className="text-xs text-gray-500 mt-1">{subtitle}</p>
