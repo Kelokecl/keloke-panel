@@ -44,6 +44,12 @@ export default function Dashboard() {
   const [winnersPage, setWinnersPage] = useState(1);
   const winnersPageSize = 15;
 
+  // ==========================
+  // ✅ IA mini-justificación (Edge Function: winner-why)
+  // ==========================
+  // cache por producto: { [key]: { text, status, updatedAt } }
+  const [winnerWhy, setWinnerWhy] = useState({});
+
   useEffect(() => {
     loadDashboardData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -139,6 +145,124 @@ export default function Dashboard() {
       product_url: x?.product_url || null,
     };
   }
+
+  // ==========================
+  // ✅ IA helpers (no rompe nada)
+  // ==========================
+  function getWhyKey(item) {
+    // URL primero (más estable). Fallback: product_url. Último: title+category.
+    return (
+      item?.url ||
+      item?.product_url ||
+      `${String(item?.title || "p")}|${String(item?.keloke_category || item?.categoria || "cat")}`
+    );
+  }
+
+  function buildFallbackWhy(item) {
+    const parts = [];
+    const score = item?.adjusted_winner_score != null ? Number(item.adjusted_winner_score) : null;
+    const margin = item?.margin_pct != null ? Number(item.margin_pct) : null;
+    const ht = item?.high_ticket_tier ? true : false;
+
+    if (score != null && Number.isFinite(score)) {
+      if (score >= 90) parts.push("Demanda muy alta (score top)");
+      else if (score >= 75) parts.push("Alta tracción en tendencia");
+      else if (score >= 60) parts.push("Buena oportunidad en tendencia");
+    }
+
+    if (margin != null && Number.isFinite(margin)) {
+      if (margin >= 60) parts.push("margen alto");
+      else if (margin >= 50) parts.push("margen saludable");
+    }
+
+    if (ht) parts.push("alto ticket (más utilidad por venta)");
+
+    if (!parts.length) return "Producto interesante para testeo controlado (validar demanda + márgenes).";
+    return parts.join(" · ") + ".";
+  }
+
+  async function generateWhyForItem(item) {
+    const key = getWhyKey(item);
+    const current = winnerWhy?.[key];
+
+    // evita spam/duplicado
+    if (current?.status === "loading") return;
+    if (current?.status === "ok" && current?.text) return;
+
+    setWinnerWhy((prev) => ({
+      ...(prev || {}),
+      [key]: { text: prev?.[key]?.text || "", status: "loading", updatedAt: new Date().toISOString() },
+    }));
+
+    try {
+      // Edge Function: winner-why (la vas a crear/ya la creamos)
+      // No toca nada del pipeline; solo añade un texto.
+      const payload = {
+        title: item?.title || "",
+        category: item?.keloke_category || item?.categoria || item?.category || "",
+        family: item?.product_family || "",
+        url: item?.url || item?.product_url || "",
+        ml_price_clp: item?.ml_price_clp ?? null,
+        suggested_price_25: item?.suggested_price_25 ?? null,
+        profit_clp: item?.profit_clp ?? null,
+        margin_pct: item?.margin_pct ?? null,
+        score: item?.adjusted_winner_score ?? null,
+        high_ticket_tier: item?.high_ticket_tier ?? null,
+      };
+
+      const { data, error: fnErr } = await supabase.functions.invoke("winner-why", { body: payload });
+
+      if (fnErr) throw fnErr;
+
+      const text = String(data?.text || "").trim();
+      const finalText = text ? text : buildFallbackWhy(item);
+
+      setWinnerWhy((prev) => ({
+        ...(prev || {}),
+        [key]: { text: finalText, status: "ok", updatedAt: new Date().toISOString() },
+      }));
+    } catch (e) {
+      console.error("winner-why invoke error:", e);
+      const fallback = buildFallbackWhy(item);
+      setWinnerWhy((prev) => ({
+        ...(prev || {}),
+        [key]: { text: fallback, status: "error", updatedAt: new Date().toISOString() },
+      }));
+    }
+  }
+
+  // Auto-genera IA SOLO para los 15 visibles (no rompe rendimiento)
+  useEffect(() => {
+    try {
+      // winnersCurrentItems depende de memos, pero este effect corre después igual.
+      // Genera con concurrencia baja (2) para evitar saturar.
+      const items = winnersCurrentItems || [];
+      if (!items.length) return;
+
+      let i = 0;
+      const max = 2;
+
+      const run = async () => {
+        while (i < items.length) {
+          const it = items[i++];
+          // Solo si tiene pricing (así el texto queda mejor)
+          const hasPricing = it?.ml_price_clp != null && it?.suggested_price_25 != null;
+          if (!hasPricing) continue;
+
+          const k = getWhyKey(it);
+          const st = winnerWhy?.[k]?.status;
+          if (st === "ok" || st === "loading") continue;
+
+          await generateWhyForItem(it);
+        }
+      };
+
+      Promise.all(Array.from({ length: max }, () => run()));
+    } catch {
+      // no-op
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [winnersPage, winningProducts]); // cambia página o lista => genera para visibles
 
   // === RPC helpers (C1) ===
   async function markAllAlertsRead() {
@@ -590,17 +714,24 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="space-y-3">
-              {winnersCurrentItems.map((p, idx) => (
-                <WinnerCard
-                  key={`${p.url || ""}-${winnersPage}-${idx}`}
-                  idx={(winnersPage - 1) * winnersPageSize + idx}
-                  item={p}
-                  onOpen={() => {
-                    const url = p?.url || p?.product_url;
-                    if (url) window.open(url, "_blank", "noopener,noreferrer");
-                  }}
-                />
-              ))}
+              {winnersCurrentItems.map((p, idx) => {
+                const key = getWhyKey(p);
+                const whyState = winnerWhy?.[key] || null;
+
+                return (
+                  <WinnerCard
+                    key={`${p.url || ""}-${winnersPage}-${idx}`}
+                    idx={(winnersPage - 1) * winnersPageSize + idx}
+                    item={p}
+                    whyState={whyState}
+                    onGenerateWhy={() => generateWhyForItem(p)}
+                    onOpen={() => {
+                      const url = p?.url || p?.product_url;
+                      if (url) window.open(url, "_blank", "noopener,noreferrer");
+                    }}
+                  />
+                );
+              })}
             </div>
           )}
         </div>
@@ -654,7 +785,7 @@ export default function Dashboard() {
 // ======================
 // Winners Card (bonito)
 // ======================
-function WinnerCard({ idx, item, onOpen }) {
+function WinnerCard({ idx, item, onOpen, whyState, onGenerateWhy }) {
   const title = item?.title || "Producto";
   const cat = item?.keloke_category || item?.categoria || item?.category || "Sin categoría";
   const fam = item?.product_family || "";
@@ -669,6 +800,9 @@ function WinnerCard({ idx, item, onOpen }) {
   const htTier = item?.high_ticket_tier || null;
 
   const hasPricing = mlPrice !== null && sellPrice !== null;
+
+  const whyText = whyState?.text || "";
+  const whyStatus = whyState?.status || "idle";
 
   return (
     <div className="p-4 rounded-xl border border-gray-100 hover:border-gray-200 transition-colors bg-white">
@@ -745,7 +879,22 @@ function WinnerCard({ idx, item, onOpen }) {
                 Falta pricing automático (ML). Cuando corras el backfill, se completan precio/ganancia/margen.
               </p>
             ) : (
-              <p className="text-xs text-gray-500">(IA pronto) Aquí irá una mini justificación: “por qué es ganador” + recomendación.</p>
+              <div className="flex items-start justify-between gap-3">
+                <p className="text-xs text-gray-600">
+                  {whyStatus === "loading"
+                    ? "Generando insight IA (GPT-5-mini)…"
+                    : whyText || "Insight IA: (presiona IA para generar)"}
+                </p>
+
+                <button
+                  onClick={onGenerateWhy}
+                  disabled={whyStatus === "loading"}
+                  className="shrink-0 px-2 py-1 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-xs"
+                  title="Generar / regenerar insight IA"
+                >
+                  {whyStatus === "loading" ? "..." : "IA"}
+                </button>
+              </div>
             )}
           </div>
         </div>
