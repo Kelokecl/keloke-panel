@@ -43,6 +43,82 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ==========================
+  // ✅ Winners via Edge Function
+  // ==========================
+  async function fetchWinnersPage(page = 1) {
+    const base = import.meta.env.VITE_SUPABASE_URL;
+    const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+    if (!base || !anon) {
+      throw new Error("Faltan VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY en el .env");
+    }
+
+    const res = await fetch(`${base}/functions/v1/meli-winners?page=${page}`, {
+      method: "GET",
+      headers: {
+        apikey: anon,
+        Authorization: `Bearer ${anon}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json?.ok) {
+      throw new Error(json?.error || `meli-winners failed (${res.status})`);
+    }
+    return json.items || [];
+  }
+
+  async function fetchWinnersAllPages() {
+    const pages = [1, 2, 3, 4];
+    const all = await Promise.all(pages.map((p) => fetchWinnersPage(p)));
+    return all.flat();
+  }
+
+  function mapEdgeWinnerToUI(x) {
+    const mlPrice = x?.price ?? null;
+    const suggested = mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null;
+
+    const htTier =
+      suggested !== null && suggested >= 100000
+        ? "HT3_100K"
+        : suggested !== null && suggested >= 80000
+        ? "HT2_80K"
+        : suggested !== null && suggested >= 50000
+        ? "HT1_50K"
+        : null;
+
+    // Semáforo simple: si es high ticket -> "blue" (la pill igual muestra HT por tier)
+    const traffic_light_final = htTier ? "blue" : "green";
+
+    return {
+      // campos que WinnerCard ya usa
+      keloke_category: x?.category || "otros",
+      product_family: "",
+      title: x?.title || "Producto",
+      url: x?.product_url || "",
+      ml_price_clp: mlPrice,
+      suggested_price_25: suggested,
+      profit_clp: null,
+      margin_pct: null,
+      traffic_light_final,
+      high_ticket_tier: htTier,
+      adjusted_winner_score: null,
+      ml_ratio: null,
+      price_fetched_at: x?.scraped_at || null,
+
+      // extra para mostrar imagen
+      image_url: x?.image_url || null,
+
+      // info adicional (no rompe nada)
+      page: x?.page ?? null,
+      categoria: x?.category || null,
+      scraped_at: x?.scraped_at || null,
+      product_url: x?.product_url || null,
+    };
+  }
+
   // === RPC helpers (C1) ===
   async function markAllAlertsRead() {
     setMarkingAll(true);
@@ -132,7 +208,7 @@ export default function Dashboard() {
           .order("created_at", { ascending: false })
           .limit(5),
 
-        // ✅ Winners desde tu VIEW FINAL (ya existe en DB)
+        // ✅ (fallback) Winners desde tu VIEW FINAL (si la Edge Function falla)
         supabase
           .from("v_winners_with_pricing_ht")
           .select(
@@ -150,6 +226,7 @@ export default function Dashboard() {
               "adjusted_winner_score",
               "ml_ratio",
               "price_fetched_at",
+              "image_url",
             ].join(",")
           )
           .order("adjusted_winner_score", { ascending: false, nullsFirst: false })
@@ -169,7 +246,22 @@ export default function Dashboard() {
       const fallback = alertsFallbackRes.data || [];
       setBusinessAlerts(unread.length > 0 ? unread : fallback);
 
-      setWinningProducts(winnersRes.data || []);
+      // ==========================================
+      // ✅ Winners: usa Edge Function meli-winners
+      //    si falla, cae a la view (winnersRes)
+      // ==========================================
+      let winnersData = winnersRes.data || [];
+      try {
+        const edgeItems = await fetchWinnersAllPages();
+        if (edgeItems?.length) {
+          winnersData = edgeItems.map(mapEdgeWinnerToUI);
+        }
+      } catch (e) {
+        console.error("meli-winners (edge) error:", e);
+        // deja winnersData con lo de la view
+      }
+
+      setWinningProducts(winnersData);
       setSystemLogs(logsRes.data || []);
 
       clearTimeout(timeout);
@@ -482,7 +574,7 @@ export default function Dashboard() {
 // ======================
 function WinnerCard({ idx, item, onOpen }) {
   const title = item?.title || "Producto";
-  const cat = item?.keloke_category || "Sin categoría";
+  const cat = item?.keloke_category || item?.categoria || item?.category || "Sin categoría";
   const fam = item?.product_family || "";
   const score = item?.adjusted_winner_score ?? null;
 
@@ -499,25 +591,40 @@ function WinnerCard({ idx, item, onOpen }) {
   return (
     <div className="p-4 rounded-xl border border-gray-100 hover:border-gray-200 transition-colors bg-white">
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <p className="text-sm font-semibold truncate">
-              {idx + 1}. {title}
-            </p>
-
-            <TrafficPill traffic={traffic} />
-
-            {htTier ? <HighTicketPill tier={htTier} /> : null}
-          </div>
-
-          <div className="flex items-center gap-2 mt-2 flex-wrap">
-            <TagPill>{cat}</TagPill>
-            {fam ? <TagPill subtle>{fam}</TagPill> : null}
-            {score !== null ? (
-              <span className="text-[11px] text-gray-500">
-                Score: <span className="font-semibold">{Number(score).toFixed(2)}</span>
-              </span>
+        <div className="min-w-0 w-full">
+          {/* ✅ Header row + Imagen */}
+          <div className="flex items-start gap-3">
+            {item?.image_url ? (
+              <img
+                src={item.image_url}
+                alt={title}
+                className="w-14 h-14 rounded-lg border border-gray-100 object-contain bg-white"
+                loading="lazy"
+                referrerPolicy="no-referrer"
+              />
             ) : null}
+
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="text-sm font-semibold truncate">
+                  {idx + 1}. {title}
+                </p>
+
+                <TrafficPill traffic={traffic} />
+
+                {htTier ? <HighTicketPill tier={htTier} /> : null}
+              </div>
+
+              <div className="flex items-center gap-2 mt-2 flex-wrap">
+                <TagPill>{cat}</TagPill>
+                {fam ? <TagPill subtle>{fam}</TagPill> : null}
+                {score !== null ? (
+                  <span className="text-[11px] text-gray-500">
+                    Score: <span className="font-semibold">{Number(score).toFixed(2)}</span>
+                  </span>
+                ) : null}
+              </div>
+            </div>
           </div>
 
           {/* Pricing row */}
