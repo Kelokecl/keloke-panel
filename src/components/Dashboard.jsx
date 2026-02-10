@@ -1,5 +1,5 @@
 // src/components/Dashboard.jsx
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import {
   Calendar,
@@ -13,6 +13,8 @@ import {
   ExternalLink,
   Wrench,
   Sparkles,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -38,42 +40,105 @@ export default function Dashboard() {
   const [markingAll, setMarkingAll] = useState(false);
   const [markingOneId, setMarkingOneId] = useState(null);
 
-  // ===== IA “por qué es ganador” (GPT-5-mini via Edge Function) =====
-  // cache: { [key]: { text: string, status: "idle"|"loading"|"ok"|"error", updatedAt: string } }
-  const [winnerWhy, setWinnerWhy] = useState({});
+  // ✅ Winners UI pagination (4 páginas, 15 c/u)
+  const [winnersPage, setWinnersPage] = useState(1);
+  const winnersPageSize = 15;
 
   useEffect(() => {
     loadDashboardData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Cuando llegan winners, generamos IA en background (sin romper la UI)
-  useEffect(() => {
-    if (!winningProducts || winningProducts.length === 0) return;
+  // ==========================
+  // ✅ Winners via Edge Function
+  // ==========================
+  async function fetchWinnersPage(page = 1) {
+    const base = import.meta.env.VITE_SUPABASE_URL;
+    const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-    // Solo genera para los que ya tienen pricing calculado (si quieres para todos, borra esta línea)
-    const candidates = winningProducts.filter((p) => (p?.ml_price_clp ?? null) !== null);
+    if (!base || !anon) {
+      throw new Error("Faltan VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY en el .env");
+    }
 
-    // Cola con concurrencia baja para no saturar
-    (async () => {
-      const max = 2;
-      const queue = candidates.slice(0, 10); // top 10 del dashboard
+    const res = await fetch(`${base}/functions/v1/meli-winners?page=${page}`, {
+      method: "GET",
+      headers: {
+        apikey: anon,
+        Authorization: `Bearer ${anon}`,
+        "Content-Type": "application/json",
+      },
+    });
 
-      let i = 0;
-      async function worker() {
-        while (i < queue.length) {
-          const item = queue[i++];
-          const key = getWinnerKey(item);
-          const cur = winnerWhy[key];
-          if (cur?.status === "ok" || cur?.status === "loading") continue;
-          await ensureWinnerWhy(item);
-        }
-      }
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json?.ok) {
+      throw new Error(json?.error || `meli-winners failed (${res.status})`);
+    }
+    return json.items || [];
+  }
 
-      await Promise.all(Array.from({ length: max }, () => worker()));
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [winningProducts]);
+  async function fetchWinnersAllPages() {
+    const pages = [1, 2, 3, 4];
+    const all = await Promise.all(pages.map((p) => fetchWinnersPage(p)));
+    return all.flat();
+  }
+
+  function calcProfitMargin(mlPrice, suggestedPrice) {
+    if (mlPrice == null || suggestedPrice == null) return { profit: null, margin: null };
+    const cost = Number(mlPrice);
+    const sell = Number(suggestedPrice);
+    if (!Number.isFinite(cost) || !Number.isFinite(sell) || sell <= 0) return { profit: null, margin: null };
+
+    const profit = Math.round(sell - cost);
+    const margin = (profit / sell) * 100;
+    return { profit, margin };
+  }
+
+  function mapEdgeWinnerToUI(x) {
+    const mlPrice = x?.price ?? null;
+
+    // ✅ precio sugerido = x2.5 (como venías mostrando)
+    const suggested = mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null;
+
+    const { profit, margin } = calcProfitMargin(mlPrice, suggested);
+
+    const htTier =
+      suggested !== null && suggested >= 100000
+        ? "HT3_100K"
+        : suggested !== null && suggested >= 80000
+        ? "HT2_80K"
+        : suggested !== null && suggested >= 50000
+        ? "HT1_50K"
+        : null;
+
+    // Semáforo simple: si es high ticket -> "blue", si no -> "green"
+    const traffic_light_final = htTier ? "blue" : "green";
+
+    return {
+      // WinnerCard
+      keloke_category: x?.category || "otros",
+      product_family: "",
+      title: x?.title || "Producto",
+      url: x?.product_url || "",
+      ml_price_clp: mlPrice,
+      suggested_price_25: suggested,
+      profit_clp: profit,
+      margin_pct: margin,
+      traffic_light_final,
+      high_ticket_tier: htTier,
+      adjusted_winner_score: null,
+      ml_ratio: null,
+      price_fetched_at: x?.scraped_at || null,
+
+      // imagen
+      image_url: x?.image_url || null,
+
+      // info adicional
+      page: x?.page ?? null,
+      categoria: x?.category || null,
+      scraped_at: x?.scraped_at || null,
+      product_url: x?.product_url || null,
+    };
+  }
 
   // === RPC helpers (C1) ===
   async function markAllAlertsRead() {
@@ -121,10 +186,7 @@ export default function Dashboard() {
       // ====== STATS ======
       const [productsRes, contentRes, automationsRes, pendingAlertsRes] = await Promise.all([
         supabase.from("products").select("id", { count: "exact", head: true }),
-        supabase
-          .from("generated_content")
-          .select("id", { count: "exact", head: true })
-          .eq("status", "scheduled"),
+        supabase.from("generated_content").select("id", { count: "exact", head: true }).eq("status", "scheduled"),
         supabase.from("automations").select("id", { count: "exact", head: true }).eq("is_active", true),
         supabase
           .from("dashboard_alerts")
@@ -142,12 +204,7 @@ export default function Dashboard() {
 
       // ====== FEEDS ======
       const [suggRes, alertsUnreadRes, alertsFallbackRes, winnersRes, logsRes] = await Promise.all([
-        supabase
-          .from("ai_suggestions")
-          .select("*")
-          .eq("is_done", false)
-          .order("created_at", { ascending: false })
-          .limit(5),
+        supabase.from("ai_suggestions").select("*").eq("is_done", false).order("created_at", { ascending: false }).limit(5),
 
         supabase
           .from("dashboard_alerts")
@@ -157,14 +214,9 @@ export default function Dashboard() {
           .order("created_at", { ascending: false })
           .limit(5),
 
-        supabase
-          .from("dashboard_alerts")
-          .select("*")
-          .eq("category", "business")
-          .order("created_at", { ascending: false })
-          .limit(5),
+        supabase.from("dashboard_alerts").select("*").eq("category", "business").order("created_at", { ascending: false }).limit(5),
 
-        // ✅ Winners desde tu VIEW FINAL (ya existe en DB)
+        // ✅ fallback (si edge falla). OJO: acá no tienes page por defecto, por eso solo sirve de “plan B”
         supabase
           .from("v_winners_with_pricing_ht")
           .select(
@@ -182,19 +234,16 @@ export default function Dashboard() {
               "adjusted_winner_score",
               "ml_ratio",
               "price_fetched_at",
-              // si tu view trae imagen, la mostramos:
               "image_url",
             ].join(",")
           )
           .order("adjusted_winner_score", { ascending: false, nullsFirst: false })
-          .limit(10),
+          .limit(60),
 
         supabase.from("system_logs").select("*").order("created_at", { ascending: false }).limit(3),
       ]);
 
-      if (winnersRes?.error) {
-        console.error("Winners view error:", winnersRes.error);
-      }
+      if (winnersRes?.error) console.error("Winners view error:", winnersRes.error);
 
       setSuggestions(suggRes.data || []);
 
@@ -202,7 +251,33 @@ export default function Dashboard() {
       const fallback = alertsFallbackRes.data || [];
       setBusinessAlerts(unread.length > 0 ? unread : fallback);
 
-      setWinningProducts(winnersRes.data || []);
+      // ✅ Winners: Edge 4 páginas (page=1..4). Si falla: usa view.
+      let winnersData = winnersRes.data || [];
+      try {
+        const edgeItems = await fetchWinnersAllPages();
+        if (edgeItems?.length) {
+          winnersData = edgeItems.map(mapEdgeWinnerToUI);
+        }
+      } catch (e) {
+        console.error("meli-winners (edge) error:", e);
+        // intenta completar profit/margin también en fallback si vienen null
+        winnersData =
+          (winnersData || []).map((it) => {
+            const ml = it?.ml_price_clp ?? null;
+            const sp = it?.suggested_price_25 ?? (ml != null ? Math.round(Number(ml) * 2.5) : null);
+            const { profit, margin } = calcProfitMargin(ml, sp);
+            return {
+              ...it,
+              suggested_price_25: sp,
+              profit_clp: it?.profit_clp ?? profit,
+              margin_pct: it?.margin_pct ?? margin,
+            };
+          }) || [];
+      }
+
+      // ✅ Si por cualquier razón la página actual quedó fuera de rango, resetea
+      setWinnersPage(1);
+      setWinningProducts(winnersData);
       setSystemLogs(logsRes.data || []);
 
       clearTimeout(timeout);
@@ -214,6 +289,45 @@ export default function Dashboard() {
       setLoading(false);
     }
   }
+
+  // ✅ segmentación por página (basado en campo item.page si viene desde Edge)
+  const winnersByPage = useMemo(() => {
+    const hasPage = (winningProducts || []).some((x) => x?.page != null);
+    if (hasPage) {
+      const map = new Map();
+      for (const w of winningProducts || []) {
+        const p = Number(w?.page || 1);
+        if (!map.has(p)) map.set(p, []);
+        map.get(p).push(w);
+      }
+      // ordena páginas y items
+      const obj = {};
+      [...map.keys()].sort((a, b) => a - b).forEach((k) => {
+        obj[k] = map.get(k);
+      });
+      return { mode: "page_field", pages: obj };
+    }
+
+    // fallback: corta en chunks de 15
+    const chunks = {};
+    const arr = winningProducts || [];
+    const totalPages = Math.max(1, Math.ceil(arr.length / winnersPageSize));
+    for (let p = 1; p <= totalPages; p++) {
+      const start = (p - 1) * winnersPageSize;
+      chunks[p] = arr.slice(start, start + winnersPageSize);
+    }
+    return { mode: "chunk", pages: chunks };
+  }, [winningProducts]);
+
+  const winnersTotalPages = useMemo(() => {
+    const keys = Object.keys(winnersByPage.pages || {});
+    if (!keys.length) return 1;
+    return Math.max(...keys.map((k) => Number(k)));
+  }, [winnersByPage]);
+
+  const winnersCurrentItems = useMemo(() => {
+    return winnersByPage.pages?.[winnersPage] || [];
+  }, [winnersByPage, winnersPage]);
 
   // Etiquetas bonitas por source/type
   function formatAlertTitle(a) {
@@ -232,80 +346,6 @@ export default function Dashboard() {
 
   function formatAlertMessage(a) {
     return a?.message || "";
-  }
-
-  // ====== IA: helpers ======
-  function getWinnerKey(item) {
-    // clave estable para cache (URL es lo más confiable)
-    return item?.url || `${item?.title || "p"}|${item?.keloke_category || "cat"}|${item?.product_family || ""}`;
-  }
-
-  function buildFallbackJustification(item) {
-    const parts = [];
-    const score = Number(item?.adjusted_winner_score ?? 0);
-    const margin = Number(item?.margin_pct ?? 0);
-    const ht = item?.high_ticket_tier ? true : false;
-
-    if (score >= 90) parts.push("Demanda muy alta (score top)");
-    else if (score >= 75) parts.push("Alta tracción en tendencia");
-    else if (score >= 60) parts.push("Buena oportunidad en tendencia");
-
-    if (margin >= 60) parts.push("margen alto");
-    else if (margin >= 50) parts.push("margen saludable");
-
-    if (ht) parts.push("alto ticket (mejor utilidad por venta)");
-
-    if (parts.length === 0) return "Producto interesante para testeo controlado (validar demanda + márgenes).";
-    return parts.join(" · ") + ".";
-  }
-
-  async function ensureWinnerWhy(item) {
-    const key = getWinnerKey(item);
-
-    // set loading
-    setWinnerWhy((prev) => ({
-      ...prev,
-      [key]: { text: prev?.[key]?.text || "", status: "loading", updatedAt: new Date().toISOString() },
-    }));
-
-    try {
-      // ⚠️ Edge Function que tú debes tener/crear (usa GPT-5-mini).
-      // Nombre sugerido: winner-why
-      // Debe retornar: { ok: true, text: "..." }
-      const payload = {
-        title: item?.title || "",
-        category: item?.keloke_category || "",
-        family: item?.product_family || "",
-        ml_price_clp: item?.ml_price_clp ?? null,
-        suggested_price_25: item?.suggested_price_25 ?? null,
-        profit_clp: item?.profit_clp ?? null,
-        margin_pct: item?.margin_pct ?? null,
-        score: item?.adjusted_winner_score ?? null,
-        high_ticket_tier: item?.high_ticket_tier ?? null,
-        url: item?.url || "",
-      };
-
-      const { data, error: fnErr } = await supabase.functions.invoke("winner-why", {
-        body: payload,
-      });
-
-      if (fnErr) throw fnErr;
-
-      const text = (data?.text || "").trim();
-      const finalText = text.length > 0 ? text : buildFallbackJustification(item);
-
-      setWinnerWhy((prev) => ({
-        ...prev,
-        [key]: { text: finalText, status: "ok", updatedAt: new Date().toISOString() },
-      }));
-    } catch (e) {
-      console.error("winner-why error:", e);
-      const fallback = buildFallbackJustification(item);
-      setWinnerWhy((prev) => ({
-        ...prev,
-        [key]: { text: fallback, status: "error", updatedAt: new Date().toISOString() },
-      }));
-    }
   }
 
   if (loading) {
@@ -500,21 +540,47 @@ export default function Dashboard() {
 
         {/* Winners */}
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-start justify-between gap-4 mb-4">
             <div>
               <h2 className="text-xl font-bold" style={{ color: "#2D5016" }}>
                 Top Productos Ganadores (Chile)
               </h2>
               <p className="text-xs text-gray-500 mt-1">
-                Semáforo: verde/amarillo/rojo + high ticket azul (50k/80k/100k+)
+                4 páginas • 15 productos por página • precio sugerido x2.5 + ganancia/margen calculados
               </p>
             </div>
-            <TrendingUp className="w-5 h-5 text-gray-400" />
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setWinnersPage((p) => Math.max(1, p - 1))}
+                disabled={winnersPage <= 1}
+                className="px-2 py-2 rounded-lg border border-gray-200 bg-white disabled:opacity-40"
+                title="Página anterior"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+
+              <span className="text-sm text-gray-600">
+                Página <span className="font-semibold">{winnersPage}</span> /{" "}
+                <span className="font-semibold">{winnersTotalPages}</span>
+              </span>
+
+              <button
+                onClick={() => setWinnersPage((p) => Math.min(winnersTotalPages, p + 1))}
+                disabled={winnersPage >= winnersTotalPages}
+                className="px-2 py-2 rounded-lg border border-gray-200 bg-white disabled:opacity-40"
+                title="Página siguiente"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+
+              <TrendingUp className="w-5 h-5 text-gray-400 ml-2" />
+            </div>
           </div>
 
-          {winningProducts.length === 0 ? (
+          {winnersCurrentItems.length === 0 ? (
             <div className="text-center py-8">
-              <p className="text-gray-500 text-sm mb-3">Aún no hay productos ganadores.</p>
+              <p className="text-gray-500 text-sm mb-3">Aún no hay productos ganadores en esta página.</p>
               <button
                 onClick={() => navigate("/trends")}
                 className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
@@ -524,15 +590,14 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="space-y-3">
-              {winningProducts.map((p, idx) => (
+              {winnersCurrentItems.map((p, idx) => (
                 <WinnerCard
-                  key={`${p.url || ""}-${idx}`}
-                  idx={idx}
+                  key={`${p.url || ""}-${winnersPage}-${idx}`}
+                  idx={(winnersPage - 1) * winnersPageSize + idx}
                   item={p}
-                  whyState={winnerWhy[getWinnerKey(p)]}
-                  onGenerateWhy={() => ensureWinnerWhy(p)}
                   onOpen={() => {
-                    if (p?.url) window.open(p.url, "_blank", "noopener,noreferrer");
+                    const url = p?.url || p?.product_url;
+                    if (url) window.open(url, "_blank", "noopener,noreferrer");
                   }}
                 />
               ))}
@@ -589,9 +654,9 @@ export default function Dashboard() {
 // ======================
 // Winners Card (bonito)
 // ======================
-function WinnerCard({ idx, item, onOpen, whyState, onGenerateWhy }) {
+function WinnerCard({ idx, item, onOpen }) {
   const title = item?.title || "Producto";
-  const cat = item?.keloke_category || "Sin categoría";
+  const cat = item?.keloke_category || item?.categoria || item?.category || "Sin categoría";
   const fam = item?.product_family || "";
   const score = item?.adjusted_winner_score ?? null;
 
@@ -605,31 +670,42 @@ function WinnerCard({ idx, item, onOpen, whyState, onGenerateWhy }) {
 
   const hasPricing = mlPrice !== null && sellPrice !== null;
 
-  const whyText = whyState?.text || "";
-  const whyStatus = whyState?.status || "idle";
-
   return (
     <div className="p-4 rounded-xl border border-gray-100 hover:border-gray-200 transition-colors bg-white">
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <p className="text-sm font-semibold truncate">
-              {idx + 1}. {title}
-            </p>
-
-            <TrafficPill traffic={traffic} />
-
-            {htTier ? <HighTicketPill tier={htTier} /> : null}
-          </div>
-
-          <div className="flex items-center gap-2 mt-2 flex-wrap">
-            <TagPill>{cat}</TagPill>
-            {fam ? <TagPill subtle>{fam}</TagPill> : null}
-            {score !== null ? (
-              <span className="text-[11px] text-gray-500">
-                Score: <span className="font-semibold">{Number(score).toFixed(2)}</span>
-              </span>
+        <div className="min-w-0 w-full">
+          {/* Header row + Imagen */}
+          <div className="flex items-start gap-3">
+            {item?.image_url ? (
+              <img
+                src={item.image_url}
+                alt={title}
+                className="w-14 h-14 rounded-lg border border-gray-100 object-contain bg-white"
+                loading="lazy"
+                referrerPolicy="no-referrer"
+              />
             ) : null}
+
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="text-sm font-semibold truncate">
+                  {idx + 1}. {title}
+                </p>
+
+                <TrafficPill traffic={traffic} />
+                {htTier ? <HighTicketPill tier={htTier} /> : null}
+              </div>
+
+              <div className="flex items-center gap-2 mt-2 flex-wrap">
+                <TagPill>{cat}</TagPill>
+                {fam ? <TagPill subtle>{fam}</TagPill> : null}
+                {score !== null ? (
+                  <span className="text-[11px] text-gray-500">
+                    Score: <span className="font-semibold">{Number(score).toFixed(2)}</span>
+                  </span>
+                ) : null}
+              </div>
+            </div>
           </div>
 
           {/* Pricing row */}
@@ -669,22 +745,7 @@ function WinnerCard({ idx, item, onOpen, whyState, onGenerateWhy }) {
                 Falta pricing automático (ML). Cuando corras el backfill, se completan precio/ganancia/margen.
               </p>
             ) : (
-              <div className="flex items-start justify-between gap-3">
-                <p className="text-xs text-gray-600">
-                  {whyStatus === "loading"
-                    ? "Generando insight IA (GPT-5-mini)…"
-                    : whyText || "Sin insight todavía."}
-                </p>
-
-                <button
-                  onClick={onGenerateWhy}
-                  disabled={whyStatus === "loading"}
-                  className="shrink-0 px-2 py-1 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-xs"
-                  title="Generar / regenerar insight IA"
-                >
-                  {whyStatus === "loading" ? "..." : "IA"}
-                </button>
-              </div>
+              <p className="text-xs text-gray-500">(IA pronto) Aquí irá una mini justificación: “por qué es ganador” + recomendación.</p>
             )}
           </div>
         </div>
@@ -782,7 +843,10 @@ function StatCard({ title, value, icon: Icon }) {
 
 function QuickButton({ icon: Icon, title, subtitle, onClick }) {
   return (
-    <button onClick={onClick} className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left">
+    <button
+      onClick={onClick}
+      className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left"
+    >
       <Icon className="w-6 h-6 mb-2" style={{ color: "#2D5016" }} />
       <p className="font-medium text-sm">{title}</p>
       <p className="text-xs text-gray-500 mt-1">{subtitle}</p>
