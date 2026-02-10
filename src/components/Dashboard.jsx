@@ -1,5 +1,5 @@
 // src/components/Dashboard.jsx
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import {
   Calendar,
@@ -13,6 +13,8 @@ import {
   ExternalLink,
   Wrench,
   Sparkles,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -37,6 +39,10 @@ export default function Dashboard() {
   // Para evitar doble click / spam
   const [markingAll, setMarkingAll] = useState(false);
   const [markingOneId, setMarkingOneId] = useState(null);
+
+  // ✅ Winners UI pagination (4 páginas, 15 c/u)
+  const [winnersPage, setWinnersPage] = useState(1);
+  const winnersPageSize = 15;
 
   useEffect(() => {
     loadDashboardData();
@@ -76,9 +82,24 @@ export default function Dashboard() {
     return all.flat();
   }
 
+  function calcProfitMargin(mlPrice, suggestedPrice) {
+    if (mlPrice == null || suggestedPrice == null) return { profit: null, margin: null };
+    const cost = Number(mlPrice);
+    const sell = Number(suggestedPrice);
+    if (!Number.isFinite(cost) || !Number.isFinite(sell) || sell <= 0) return { profit: null, margin: null };
+
+    const profit = Math.round(sell - cost);
+    const margin = (profit / sell) * 100;
+    return { profit, margin };
+  }
+
   function mapEdgeWinnerToUI(x) {
     const mlPrice = x?.price ?? null;
+
+    // ✅ precio sugerido = x2.5 (como venías mostrando)
     const suggested = mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null;
+
+    const { profit, margin } = calcProfitMargin(mlPrice, suggested);
 
     const htTier =
       suggested !== null && suggested >= 100000
@@ -89,29 +110,29 @@ export default function Dashboard() {
         ? "HT1_50K"
         : null;
 
-    // Semáforo simple: si es high ticket -> "blue" (la pill igual muestra HT por tier)
+    // Semáforo simple: si es high ticket -> "blue", si no -> "green"
     const traffic_light_final = htTier ? "blue" : "green";
 
     return {
-      // campos que WinnerCard ya usa
+      // WinnerCard
       keloke_category: x?.category || "otros",
       product_family: "",
       title: x?.title || "Producto",
       url: x?.product_url || "",
       ml_price_clp: mlPrice,
       suggested_price_25: suggested,
-      profit_clp: null,
-      margin_pct: null,
+      profit_clp: profit,
+      margin_pct: margin,
       traffic_light_final,
       high_ticket_tier: htTier,
       adjusted_winner_score: null,
       ml_ratio: null,
       price_fetched_at: x?.scraped_at || null,
 
-      // extra para mostrar imagen
+      // imagen
       image_url: x?.image_url || null,
 
-      // info adicional (no rompe nada)
+      // info adicional
       page: x?.page ?? null,
       categoria: x?.category || null,
       scraped_at: x?.scraped_at || null,
@@ -165,10 +186,7 @@ export default function Dashboard() {
       // ====== STATS ======
       const [productsRes, contentRes, automationsRes, pendingAlertsRes] = await Promise.all([
         supabase.from("products").select("id", { count: "exact", head: true }),
-        supabase
-          .from("generated_content")
-          .select("id", { count: "exact", head: true })
-          .eq("status", "scheduled"),
+        supabase.from("generated_content").select("id", { count: "exact", head: true }).eq("status", "scheduled"),
         supabase.from("automations").select("id", { count: "exact", head: true }).eq("is_active", true),
         supabase
           .from("dashboard_alerts")
@@ -186,12 +204,7 @@ export default function Dashboard() {
 
       // ====== FEEDS ======
       const [suggRes, alertsUnreadRes, alertsFallbackRes, winnersRes, logsRes] = await Promise.all([
-        supabase
-          .from("ai_suggestions")
-          .select("*")
-          .eq("is_done", false)
-          .order("created_at", { ascending: false })
-          .limit(5),
+        supabase.from("ai_suggestions").select("*").eq("is_done", false).order("created_at", { ascending: false }).limit(5),
 
         supabase
           .from("dashboard_alerts")
@@ -201,14 +214,9 @@ export default function Dashboard() {
           .order("created_at", { ascending: false })
           .limit(5),
 
-        supabase
-          .from("dashboard_alerts")
-          .select("*")
-          .eq("category", "business")
-          .order("created_at", { ascending: false })
-          .limit(5),
+        supabase.from("dashboard_alerts").select("*").eq("category", "business").order("created_at", { ascending: false }).limit(5),
 
-        // ✅ (fallback) Winners desde tu VIEW FINAL (si la Edge Function falla)
+        // ✅ fallback (si edge falla). OJO: acá no tienes page por defecto, por eso solo sirve de “plan B”
         supabase
           .from("v_winners_with_pricing_ht")
           .select(
@@ -230,15 +238,12 @@ export default function Dashboard() {
             ].join(",")
           )
           .order("adjusted_winner_score", { ascending: false, nullsFirst: false })
-          .limit(10),
+          .limit(60),
 
         supabase.from("system_logs").select("*").order("created_at", { ascending: false }).limit(3),
       ]);
 
-      if (winnersRes?.error) {
-        // Esto es CLAVE para debug real (RLS etc.)
-        console.error("Winners view error:", winnersRes.error);
-      }
+      if (winnersRes?.error) console.error("Winners view error:", winnersRes.error);
 
       setSuggestions(suggRes.data || []);
 
@@ -246,10 +251,7 @@ export default function Dashboard() {
       const fallback = alertsFallbackRes.data || [];
       setBusinessAlerts(unread.length > 0 ? unread : fallback);
 
-      // ==========================================
-      // ✅ Winners: usa Edge Function meli-winners
-      //    si falla, cae a la view (winnersRes)
-      // ==========================================
+      // ✅ Winners: Edge 4 páginas (page=1..4). Si falla: usa view.
       let winnersData = winnersRes.data || [];
       try {
         const edgeItems = await fetchWinnersAllPages();
@@ -258,9 +260,23 @@ export default function Dashboard() {
         }
       } catch (e) {
         console.error("meli-winners (edge) error:", e);
-        // deja winnersData con lo de la view
+        // intenta completar profit/margin también en fallback si vienen null
+        winnersData =
+          (winnersData || []).map((it) => {
+            const ml = it?.ml_price_clp ?? null;
+            const sp = it?.suggested_price_25 ?? (ml != null ? Math.round(Number(ml) * 2.5) : null);
+            const { profit, margin } = calcProfitMargin(ml, sp);
+            return {
+              ...it,
+              suggested_price_25: sp,
+              profit_clp: it?.profit_clp ?? profit,
+              margin_pct: it?.margin_pct ?? margin,
+            };
+          }) || [];
       }
 
+      // ✅ Si por cualquier razón la página actual quedó fuera de rango, resetea
+      setWinnersPage(1);
       setWinningProducts(winnersData);
       setSystemLogs(logsRes.data || []);
 
@@ -273,6 +289,45 @@ export default function Dashboard() {
       setLoading(false);
     }
   }
+
+  // ✅ segmentación por página (basado en campo item.page si viene desde Edge)
+  const winnersByPage = useMemo(() => {
+    const hasPage = (winningProducts || []).some((x) => x?.page != null);
+    if (hasPage) {
+      const map = new Map();
+      for (const w of winningProducts || []) {
+        const p = Number(w?.page || 1);
+        if (!map.has(p)) map.set(p, []);
+        map.get(p).push(w);
+      }
+      // ordena páginas y items
+      const obj = {};
+      [...map.keys()].sort((a, b) => a - b).forEach((k) => {
+        obj[k] = map.get(k);
+      });
+      return { mode: "page_field", pages: obj };
+    }
+
+    // fallback: corta en chunks de 15
+    const chunks = {};
+    const arr = winningProducts || [];
+    const totalPages = Math.max(1, Math.ceil(arr.length / winnersPageSize));
+    for (let p = 1; p <= totalPages; p++) {
+      const start = (p - 1) * winnersPageSize;
+      chunks[p] = arr.slice(start, start + winnersPageSize);
+    }
+    return { mode: "chunk", pages: chunks };
+  }, [winningProducts]);
+
+  const winnersTotalPages = useMemo(() => {
+    const keys = Object.keys(winnersByPage.pages || {});
+    if (!keys.length) return 1;
+    return Math.max(...keys.map((k) => Number(k)));
+  }, [winnersByPage]);
+
+  const winnersCurrentItems = useMemo(() => {
+    return winnersByPage.pages?.[winnersPage] || [];
+  }, [winnersByPage, winnersPage]);
 
   // Etiquetas bonitas por source/type
   function formatAlertTitle(a) {
@@ -485,21 +540,47 @@ export default function Dashboard() {
 
         {/* Winners */}
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-start justify-between gap-4 mb-4">
             <div>
               <h2 className="text-xl font-bold" style={{ color: "#2D5016" }}>
                 Top Productos Ganadores (Chile)
               </h2>
               <p className="text-xs text-gray-500 mt-1">
-                Semáforo: verde/amarillo/rojo + high ticket azul (50k/80k/100k+)
+                4 páginas • 15 productos por página • precio sugerido x2.5 + ganancia/margen calculados
               </p>
             </div>
-            <TrendingUp className="w-5 h-5 text-gray-400" />
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setWinnersPage((p) => Math.max(1, p - 1))}
+                disabled={winnersPage <= 1}
+                className="px-2 py-2 rounded-lg border border-gray-200 bg-white disabled:opacity-40"
+                title="Página anterior"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+
+              <span className="text-sm text-gray-600">
+                Página <span className="font-semibold">{winnersPage}</span> /{" "}
+                <span className="font-semibold">{winnersTotalPages}</span>
+              </span>
+
+              <button
+                onClick={() => setWinnersPage((p) => Math.min(winnersTotalPages, p + 1))}
+                disabled={winnersPage >= winnersTotalPages}
+                className="px-2 py-2 rounded-lg border border-gray-200 bg-white disabled:opacity-40"
+                title="Página siguiente"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+
+              <TrendingUp className="w-5 h-5 text-gray-400 ml-2" />
+            </div>
           </div>
 
-          {winningProducts.length === 0 ? (
+          {winnersCurrentItems.length === 0 ? (
             <div className="text-center py-8">
-              <p className="text-gray-500 text-sm mb-3">Aún no hay productos ganadores.</p>
+              <p className="text-gray-500 text-sm mb-3">Aún no hay productos ganadores en esta página.</p>
               <button
                 onClick={() => navigate("/trends")}
                 className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
@@ -509,13 +590,14 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="space-y-3">
-              {winningProducts.map((p, idx) => (
+              {winnersCurrentItems.map((p, idx) => (
                 <WinnerCard
-                  key={`${p.url || ""}-${idx}`}
-                  idx={idx}
+                  key={`${p.url || ""}-${winnersPage}-${idx}`}
+                  idx={(winnersPage - 1) * winnersPageSize + idx}
                   item={p}
                   onOpen={() => {
-                    if (p?.url) window.open(p.url, "_blank", "noopener,noreferrer");
+                    const url = p?.url || p?.product_url;
+                    if (url) window.open(url, "_blank", "noopener,noreferrer");
                   }}
                 />
               ))}
@@ -592,7 +674,7 @@ function WinnerCard({ idx, item, onOpen }) {
     <div className="p-4 rounded-xl border border-gray-100 hover:border-gray-200 transition-colors bg-white">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 w-full">
-          {/* ✅ Header row + Imagen */}
+          {/* Header row + Imagen */}
           <div className="flex items-start gap-3">
             {item?.image_url ? (
               <img
@@ -611,7 +693,6 @@ function WinnerCard({ idx, item, onOpen }) {
                 </p>
 
                 <TrafficPill traffic={traffic} />
-
                 {htTier ? <HighTicketPill tier={htTier} /> : null}
               </div>
 
@@ -664,9 +745,7 @@ function WinnerCard({ idx, item, onOpen }) {
                 Falta pricing automático (ML). Cuando corras el backfill, se completan precio/ganancia/margen.
               </p>
             ) : (
-              <p className="text-xs text-gray-500">
-                (IA pronto) Aquí irá una mini justificación: “por qué es ganador” + recomendación.
-              </p>
+              <p className="text-xs text-gray-500">(IA pronto) Aquí irá una mini justificación: “por qué es ganador” + recomendación.</p>
             )}
           </div>
         </div>
@@ -764,7 +843,10 @@ function StatCard({ title, value, icon: Icon }) {
 
 function QuickButton({ icon: Icon, title, subtitle, onClick }) {
   return (
-    <button onClick={onClick} className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left">
+    <button
+      onClick={onClick}
+      className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left"
+    >
       <Icon className="w-6 h-6 mb-2" style={{ color: "#2D5016" }} />
       <p className="font-medium text-sm">{title}</p>
       <p className="text-xs text-gray-500 mt-1">{subtitle}</p>
