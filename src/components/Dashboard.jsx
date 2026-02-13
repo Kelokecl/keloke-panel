@@ -44,11 +44,9 @@ export default function Dashboard() {
   const [winnersPage, setWinnersPage] = useState(1);
   const winnersPageSize = 15;
 
-  // ==========================
-  // ✅ IA mini-justificación (Edge Function: winner-why)
-  // ==========================
-  // cache por producto: { [key]: { text, status, updatedAt } }
-  const [winnerWhy, setWinnerWhy] = useState({});
+  // ✅ IA cache en UI (por URL)
+  const [whyByUrl, setWhyByUrl] = useState({});
+  const [whyLoadingByUrl, setWhyLoadingByUrl] = useState({});
 
   useEffect(() => {
     loadDashboardData();
@@ -147,122 +145,71 @@ export default function Dashboard() {
   }
 
   // ==========================
-  // ✅ IA helpers (no rompe nada)
+  // ✅ IA: winner-why (cache)
   // ==========================
-  function getWhyKey(item) {
-    // URL primero (más estable). Fallback: product_url. Último: title+category.
-    return (
-      item?.url ||
-      item?.product_url ||
-      `${String(item?.title || "p")}|${String(item?.keloke_category || item?.categoria || "cat")}`
-    );
-  }
+  async function fetchWinnerWhy(item, { force = false } = {}) {
+    const url = item?.url || item?.product_url;
+    if (!url) return null;
 
-  function buildFallbackWhy(item) {
-    const parts = [];
-    const score = item?.adjusted_winner_score != null ? Number(item.adjusted_winner_score) : null;
-    const margin = item?.margin_pct != null ? Number(item.margin_pct) : null;
-    const ht = item?.high_ticket_tier ? true : false;
+    // ya tengo cache en UI
+    if (!force && whyByUrl[url]) return whyByUrl[url];
 
-    if (score != null && Number.isFinite(score)) {
-      if (score >= 90) parts.push("Demanda muy alta (score top)");
-      else if (score >= 75) parts.push("Alta tracción en tendencia");
-      else if (score >= 60) parts.push("Buena oportunidad en tendencia");
-    }
+    // evita doble llamada simultánea
+    if (!force && whyLoadingByUrl[url]) return null;
 
-    if (margin != null && Number.isFinite(margin)) {
-      if (margin >= 60) parts.push("margen alto");
-      else if (margin >= 50) parts.push("margen saludable");
-    }
-
-    if (ht) parts.push("alto ticket (más utilidad por venta)");
-
-    if (!parts.length) return "Producto interesante para testeo controlado (validar demanda + márgenes).";
-    return parts.join(" · ") + ".";
-  }
-
-  async function generateWhyForItem(item) {
-    const key = getWhyKey(item);
-    const current = winnerWhy?.[key];
-
-    // evita spam/duplicado
-    if (current?.status === "loading") return;
-    if (current?.status === "ok" && current?.text) return;
-
-    setWinnerWhy((prev) => ({
-      ...(prev || {}),
-      [key]: { text: prev?.[key]?.text || "", status: "loading", updatedAt: new Date().toISOString() },
-    }));
+    setWhyLoadingByUrl((m) => ({ ...m, [url]: true }));
 
     try {
-      // Edge Function: winner-why (la vas a crear/ya la creamos)
-      // No toca nada del pipeline; solo añade un texto.
+      const base = import.meta.env.VITE_SUPABASE_URL;
+      const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+      if (!base || !anon) throw new Error("Faltan VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY en el .env");
+
       const payload = {
-        title: item?.title || "",
-        category: item?.keloke_category || item?.categoria || item?.category || "",
-        family: item?.product_family || "",
-        url: item?.url || item?.product_url || "",
+        product_url: url,
+        title: item?.title || null,
+        category: item?.keloke_category || item?.categoria || item?.category || null,
+
         ml_price_clp: item?.ml_price_clp ?? null,
         suggested_price_25: item?.suggested_price_25 ?? null,
         profit_clp: item?.profit_clp ?? null,
         margin_pct: item?.margin_pct ?? null,
-        score: item?.adjusted_winner_score ?? null,
         high_ticket_tier: item?.high_ticket_tier ?? null,
+        traffic_light_final: item?.traffic_light_final ?? null,
+        score: item?.adjusted_winner_score ?? null,
+
+        stale_days: 7,
+        force,
       };
 
-      const { data, error: fnErr } = await supabase.functions.invoke("winner-why", { body: payload });
+      const res = await fetch(`${base}/functions/v1/winner-why`, {
+        method: "POST",
+        headers: {
+          apikey: anon,
+          Authorization: `Bearer ${anon}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
 
-      if (fnErr) throw fnErr;
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.error || `winner-why failed (${res.status})`);
+      }
 
-      const text = String(data?.text || "").trim();
-      const finalText = text ? text : buildFallbackWhy(item);
-
-      setWinnerWhy((prev) => ({
-        ...(prev || {}),
-        [key]: { text: finalText, status: "ok", updatedAt: new Date().toISOString() },
-      }));
+      const why = (json?.why || "").trim();
+      if (why) {
+        setWhyByUrl((m) => ({ ...m, [url]: why }));
+        return why;
+      }
+      return null;
     } catch (e) {
-      console.error("winner-why invoke error:", e);
-      const fallback = buildFallbackWhy(item);
-      setWinnerWhy((prev) => ({
-        ...(prev || {}),
-        [key]: { text: fallback, status: "error", updatedAt: new Date().toISOString() },
-      }));
+      console.error("winner-why error:", e);
+      return null;
+    } finally {
+      setWhyLoadingByUrl((m) => ({ ...m, [item?.url || item?.product_url]: false }));
     }
   }
-
-  // Auto-genera IA SOLO para los 15 visibles (no rompe rendimiento)
-  useEffect(() => {
-    try {
-      // winnersCurrentItems depende de memos, pero este effect corre después igual.
-      // Genera con concurrencia baja (2) para evitar saturar.
-      const items = winnersCurrentItems || [];
-      if (!items.length) return;
-
-      let i = 0;
-      const max = 2;
-
-      const run = async () => {
-        while (i < items.length) {
-          const it = items[i++];
-          // Solo si tiene pricing (así el texto queda mejor)
-          const hasPricing = it?.ml_price_clp != null && it?.suggested_price_25 != null;
-          if (!hasPricing) continue;
-
-          const k = getWhyKey(it);
-          const st = winnerWhy?.[k]?.status;
-          if (st === "ok" || st === "loading") continue;
-
-          await generateWhyForItem(it);
-        }
-      };
-
-      Promise.all(Array.from({ length: max }, () => run()));
-    } catch {
-      // no-op
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [winnersPage, winningProducts]); // cambia página o lista => genera para visibles
 
   // === RPC helpers (C1) ===
   async function markAllAlertsRead() {
@@ -424,7 +371,6 @@ export default function Dashboard() {
         if (!map.has(p)) map.set(p, []);
         map.get(p).push(w);
       }
-      // ordena páginas y items
       const obj = {};
       [...map.keys()].sort((a, b) => a - b).forEach((k) => {
         obj[k] = map.get(k);
@@ -452,6 +398,43 @@ export default function Dashboard() {
   const winnersCurrentItems = useMemo(() => {
     return winnersByPage.pages?.[winnersPage] || [];
   }, [winnersByPage, winnersPage]);
+
+  // ✅ Prefetch IA de la página actual (sin spamear)
+  useEffect(() => {
+    let cancelled = false;
+
+    async function run() {
+      const items = winnersCurrentItems || [];
+      // Solo si tienen pricing (tú ya lo usas así)
+      const targets = items.filter((it) => {
+        const url = it?.url || it?.product_url;
+        if (!url) return false;
+        if (whyByUrl[url]) return false;
+        const hasPricing = it?.ml_price_clp != null && it?.suggested_price_25 != null;
+        return hasPricing;
+      });
+
+      // Concurrencia baja para no reventar
+      const maxConcurrent = 2;
+      let i = 0;
+
+      async function worker() {
+        while (i < targets.length && !cancelled) {
+          const it = targets[i++];
+          await fetchWinnerWhy(it);
+        }
+      }
+
+      await Promise.all(new Array(maxConcurrent).fill(0).map(worker));
+    }
+
+    run();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [winnersPage, winnersCurrentItems]);
 
   // Etiquetas bonitas por source/type
   function formatAlertTitle(a) {
@@ -564,10 +547,7 @@ export default function Dashboard() {
         ) : (
           <div className="space-y-2">
             {suggestions.map((s) => (
-              <div
-                key={s.id}
-                className="p-3 rounded-lg border border-gray-100 flex items-start justify-between gap-3"
-              >
+              <div key={s.id} className="p-3 rounded-lg border border-gray-100 flex items-start justify-between gap-3">
                 <div>
                   <p className="font-semibold text-sm" style={{ color: "#2D5016" }}>
                     {s.title}
@@ -616,10 +596,7 @@ export default function Dashboard() {
           ) : (
             <div className="space-y-3">
               {businessAlerts.map((a) => (
-                <div
-                  key={a.id}
-                  className="p-4 rounded-lg border border-gray-100 flex items-start justify-between gap-3"
-                >
+                <div key={a.id} className="p-4 rounded-lg border border-gray-100 flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="text-sm font-semibold" style={{ color: "#2D5016" }}>
                       {formatAlertTitle(a)}
@@ -714,24 +691,20 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="space-y-3">
-              {winnersCurrentItems.map((p, idx) => {
-                const key = getWhyKey(p);
-                const whyState = winnerWhy?.[key] || null;
-
-                return (
-                  <WinnerCard
-                    key={`${p.url || ""}-${winnersPage}-${idx}`}
-                    idx={(winnersPage - 1) * winnersPageSize + idx}
-                    item={p}
-                    whyState={whyState}
-                    onGenerateWhy={() => generateWhyForItem(p)}
-                    onOpen={() => {
-                      const url = p?.url || p?.product_url;
-                      if (url) window.open(url, "_blank", "noopener,noreferrer");
-                    }}
-                  />
-                );
-              })}
+              {winnersCurrentItems.map((p, idx) => (
+                <WinnerCard
+                  key={`${p.url || ""}-${winnersPage}-${idx}`}
+                  idx={(winnersPage - 1) * winnersPageSize + idx}
+                  item={p}
+                  why={whyByUrl[p?.url || p?.product_url] || null}
+                  whyLoading={!!whyLoadingByUrl[p?.url || p?.product_url]}
+                  onWhyRefresh={() => fetchWinnerWhy(p, { force: true })}
+                  onOpen={() => {
+                    const url = p?.url || p?.product_url;
+                    if (url) window.open(url, "_blank", "noopener,noreferrer");
+                  }}
+                />
+              ))}
             </div>
           )}
         </div>
@@ -785,7 +758,7 @@ export default function Dashboard() {
 // ======================
 // Winners Card (bonito)
 // ======================
-function WinnerCard({ idx, item, onOpen, whyState, onGenerateWhy }) {
+function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
   const title = item?.title || "Producto";
   const cat = item?.keloke_category || item?.categoria || item?.category || "Sin categoría";
   const fam = item?.product_family || "";
@@ -801,8 +774,7 @@ function WinnerCard({ idx, item, onOpen, whyState, onGenerateWhy }) {
 
   const hasPricing = mlPrice !== null && sellPrice !== null;
 
-  const whyText = whyState?.text || "";
-  const whyStatus = whyState?.status || "idle";
+  const url = item?.url || item?.product_url;
 
   return (
     <div className="p-4 rounded-xl border border-gray-100 hover:border-gray-200 transition-colors bg-white">
@@ -873,29 +845,32 @@ function WinnerCard({ idx, item, onOpen, whyState, onGenerateWhy }) {
             </div>
           </div>
 
-          <div className="mt-3">
+          <div className="mt-3 flex items-start justify-between gap-3">
             {!hasPricing ? (
               <p className="text-xs text-gray-500">
                 Falta pricing automático (ML). Cuando corras el backfill, se completan precio/ganancia/margen.
               </p>
             ) : (
-              <div className="flex items-start justify-between gap-3">
-                <p className="text-xs text-gray-600">
-                  {whyStatus === "loading"
-                    ? "Generando insight IA (GPT-5-mini)…"
-                    : whyText || "Insight IA: (presiona IA para generar)"}
+              <div className="min-w-0">
+                <p className="text-xs text-gray-500">
+                  {why
+                    ? why
+                    : whyLoading
+                    ? "Generando explicación IA…"
+                    : "Explicación IA lista para generarse (cache 7 días)."}
                 </p>
-
-                <button
-                  onClick={onGenerateWhy}
-                  disabled={whyStatus === "loading"}
-                  className="shrink-0 px-2 py-1 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-xs"
-                  title="Generar / regenerar insight IA"
-                >
-                  {whyStatus === "loading" ? "..." : "IA"}
-                </button>
               </div>
             )}
+
+            {hasPricing && url ? (
+              <button
+                onClick={onWhyRefresh}
+                className="shrink-0 px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
+                title="Regenerar explicación IA"
+              >
+                IA ↻
+              </button>
+            ) : null}
           </div>
         </div>
 
