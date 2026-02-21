@@ -32,30 +32,29 @@ export default function Trends() {
       const from = (p - 1) * pageSize;
       const to = from + pageSize - 1;
 
+      // ✅ CAMBIO: leer desde v_winners_top60_prod_365d (tu fuente real con señal retail)
       const { data, error: qErr, count } = await supabase
-        .from("v_winners_balanced_ui2")
+        .from("v_winners_top60_prod_365d")
         .select(
           [
-            "keloke_category",
-            "product_family",
+            "page",
+            "categoria",
             "title",
-            "url",
-            "meli_item_id",
+            "image_url",
+            "product_url",
             "ml_price_clp",
-            "suggested_price_25",
-            "profit_clp",
-            "margin_pct",
-            "traffic_light_base",
-            "traffic_light_final",
-            "high_ticket_level",
-            "adjusted_winner_score",
-            "ml_ratio",
-            "price_fetched_at",
+            "scraped_at",
+            "score",
+            "best_retail_price_clp",
+            "offers_7d",
+            "last_retail_fetch_at",
+            "signal_type",
+            "signal_score",
           ].join(","),
           { count: "exact" }
         )
-        .order("keloke_category", { ascending: true })
-        .order("adjusted_winner_score", { ascending: false, nullsFirst: false })
+        .order("page", { ascending: true })
+        .order("signal_score", { ascending: false, nullsFirst: false })
         .range(from, to);
 
       if (qErr) throw qErr;
@@ -65,7 +64,7 @@ export default function Trends() {
       setPage(p);
     } catch (e) {
       console.error("loadPage error:", e);
-      setError("No se pudo cargar el listado. Revisa que exista la vista v_winners_balanced_ui2.");
+      setError("No se pudo cargar el listado. Revisa que exista la vista v_winners_top60_prod_365d.");
       setItems([]);
       setTotalRows(0);
       setPage(1);
@@ -74,19 +73,15 @@ export default function Trends() {
     }
   }
 
-  // Botón “Escanear ahora” (por ahora recarga)
   async function runScan() {
     setRunning(true);
     setError("");
     try {
-      // Si luego tienes Edge Function real:
-      // const { error } = await supabase.functions.invoke("trends-scan", { body: { limit: 50 } });
-      // if (error) throw error;
-
+      // Por ahora solo recarga (tu backfill/cron corre aparte)
       await loadPage(1);
     } catch (e) {
       console.error("runScan error:", e);
-      setError("Falló el escaneo. Revisa Edge Function o permisos.");
+      setError("Falló el refresh. Revisa permisos.");
     } finally {
       setRunning(false);
     }
@@ -112,7 +107,7 @@ export default function Trends() {
             Productos Ganadores IA
           </h1>
           <p className="text-gray-600 mt-1">
-            Listado balanceado por categoría (top 2 por categoría; si falta data, usa candidatos del mapeo) + paginación.
+            Top 60 con retail match (señal + ofertas 7d + mejor precio retail) • paginación.
           </p>
         </div>
 
@@ -124,14 +119,14 @@ export default function Trends() {
             style={{ backgroundColor: "#2D5016" }}
           >
             <RefreshCw className={`w-4 h-4 ${running ? "animate-spin" : ""}`} />
-            {running ? "Escaneando..." : "Escanear ahora"}
+            {running ? "Actualizando..." : "Actualizar ahora"}
           </button>
 
           <button
             onClick={() => loadPage(1)}
             className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300"
           >
-            Actualizar
+            Recargar
           </button>
         </div>
       </div>
@@ -169,7 +164,8 @@ export default function Trends() {
       <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
         <div className="p-4 border-b border-gray-100">
           <p className="text-sm text-gray-600">
-            Semáforo: <b>verde/amarillo/rojo</b> + <b>high ticket azul</b> (50k/80k/100k+).
+            Señal retail: <b>ARBITRAJE_POSITIVO / UNDERVALUED_ML / NEUTRAL</b> • Ofertas: <b>offers_7d</b> • Mejor precio:{" "}
+            <b>best_retail_price_clp</b>
           </p>
         </div>
 
@@ -177,12 +173,12 @@ export default function Trends() {
           <div className="p-6 text-gray-600">Cargando...</div>
         ) : items.length === 0 ? (
           <div className="p-6 text-gray-600">
-            No hay items. Si hay categorías en rules, pero aquí no aparecen, revisa que la vista v_winners_balanced_ui2 exista.
+            No hay items. Si tu query de conteo da 60, revisa RLS/permisos del anon key o que esta vista sea accesible.
           </div>
         ) : (
           <div className="divide-y divide-gray-100">
             {items.map((p, idx) => (
-              <WinnerRow key={`${p.url || p.meli_item_id || idx}-${idx}`} idx={(page - 1) * pageSize + idx} item={p} />
+              <WinnerRow key={`${p.product_url || idx}-${idx}`} idx={(page - 1) * pageSize + idx} item={p} />
             ))}
           </div>
         )}
@@ -227,23 +223,17 @@ export default function Trends() {
 }
 
 function WinnerRow({ idx, item }) {
-  const title = item?.title || item?.meli_item_id || "Producto";
-  const cat = item?.keloke_category || "Sin categoría";
-  const fam = item?.product_family || "";
-
-  const score = item?.adjusted_winner_score ?? null;
+  const title = item?.title || "Producto";
+  const cat = item?.categoria || "Sin categoría";
 
   const mlPrice = item?.ml_price_clp ?? null;
-  const sellPrice = item?.suggested_price_25 ?? null;
-  const profit = item?.profit_clp ?? null;
-  const margin = item?.margin_pct ?? null;
+  const suggested = mlPrice != null ? Math.round(Number(mlPrice) * 2.5) : null;
 
-  const traffic = (item?.traffic_light_final || item?.traffic_light_base || "yellow").toLowerCase();
+  const bestRetail = item?.best_retail_price_clp ?? null;
+  const offers7d = item?.offers_7d ?? null;
+  const signalType = item?.signal_type ?? null;
 
-  // ✅ nombre real
-  const htTier = item?.high_ticket_level || null;
-
-  const hasPricing = mlPrice !== null && sellPrice !== null;
+  const url = item?.product_url || null;
 
   return (
     <div className="p-4">
@@ -253,49 +243,32 @@ function WinnerRow({ idx, item }) {
             <p className="text-sm font-semibold break-words">
               {idx + 1}. {title}
             </p>
-            <TrafficPill traffic={traffic} />
-            {htTier ? <HighTicketPill tier={htTier} /> : null}
+            {signalType ? <SignalPill type={signalType} /> : null}
           </div>
 
           <div className="flex items-center gap-2 mt-2 flex-wrap">
             <TagPill>{cat}</TagPill>
-            {fam ? <TagPill subtle>{fam}</TagPill> : null}
-            {score !== null ? (
-              <span className="text-[11px] text-gray-500">
-                Score: <span className="font-semibold">{Number(score).toFixed(2)}</span>
-              </span>
-            ) : null}
           </div>
 
           <div className="mt-3 grid grid-cols-2 gap-3">
-            <Box label="Precio ML (costo)" value={mlPrice !== null ? moneyCLP(mlPrice) : "—"} strong />
-            <Box label="Precio sugerido (x2.5)" value={sellPrice !== null ? moneyCLP(sellPrice) : "—"} strong />
-            <Box label="Ganancia" value={profit !== null ? moneyCLP(profit) : "—"} accent />
-            <Box label="Margen" value={margin !== null ? `${Number(margin).toFixed(1)}%` : "—"} />
-          </div>
-
-          <div className="mt-3">
-            {!hasPricing ? (
-              <p className="text-xs text-gray-500">
-                Este ítem es candidato (fallback). Cuando el pricing/backfill lo complete, verás precio/ganancia/margen.
-              </p>
-            ) : (
-              <p className="text-xs text-gray-500">(IA pronto) Aquí va mini justificación + recomendación.</p>
-            )}
+            <Box label="Precio ML" value={mlPrice !== null ? moneyCLP(mlPrice) : "—"} strong />
+            <Box label="Precio sugerido (x2.5)" value={suggested !== null ? moneyCLP(suggested) : "—"} strong />
+            <Box label="Mejor precio retail" value={bestRetail !== null ? moneyCLP(bestRetail) : "—"} strong />
+            <Box label="Ofertas 7 días" value={offers7d !== null ? String(offers7d) : "—"} />
           </div>
         </div>
 
         <div className="shrink-0 flex flex-col items-end gap-2">
           <button
-            onClick={() => item?.url && window.open(item.url, "_blank", "noopener,noreferrer")}
-            disabled={!item?.url}
+            onClick={() => url && window.open(url, "_blank", "noopener,noreferrer")}
+            disabled={!url}
             className="px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm disabled:opacity-50"
           >
             Ver <ExternalLink className="w-4 h-4 inline-block ml-1" />
           </button>
 
-          {item?.price_fetched_at ? (
-            <span className="text-[11px] text-gray-400">{new Date(item.price_fetched_at).toLocaleString("es-CL")}</span>
+          {item?.scraped_at ? (
+            <span className="text-[11px] text-gray-400">{new Date(item.scraped_at).toLocaleString("es-CL")}</span>
           ) : null}
         </div>
       </div>
@@ -309,28 +282,25 @@ function moneyCLP(n) {
   return `$${v.toLocaleString("es-CL")}`;
 }
 
-function Box({ label, value, strong, accent }) {
+function Box({ label, value, strong }) {
   return (
     <div className="rounded-lg border border-gray-100 p-3">
       <p className="text-[11px] text-gray-500">{label}</p>
-      <p
-        className={`text-sm ${strong ? "font-semibold" : "font-medium"}`}
-        style={accent ? { color: "#D4A017", fontWeight: 700 } : { color: "#2D5016", fontWeight: strong ? 700 : 600 }}
-      >
+      <p className={`text-sm ${strong ? "font-semibold" : "font-medium"}`} style={{ color: "#2D5016" }}>
         {value}
       </p>
     </div>
   );
 }
 
-function TrafficPill({ traffic }) {
+function SignalPill({ type }) {
+  const t = String(type || "").toUpperCase();
   const map = {
-    green: { label: "Ganador", bg: "#E9F7E7", fg: "#2D5016", bd: "#CFE8CB" },
-    yellow: { label: "Descubrimiento", bg: "#FFF6D9", fg: "#7A5A00", bd: "#F1E0A5" },
-    red: { label: "Explorar", bg: "#FDE8E8", fg: "#7A1E1E", bd: "#F6CACA" },
-    blue: { label: "High Ticket", bg: "#E8F1FF", fg: "#1E3A8A", bd: "#C7DBFF" },
+    ARBITRAJE_POSITIVO: { label: "ARBITRAJE +", bg: "#E9F7E7", fg: "#2D5016", bd: "#CFE8CB" },
+    UNDERVALUED_ML: { label: "UNDERVALUED", bg: "#FFF6D9", fg: "#7A5A00", bd: "#F1E0A5" },
+    NEUTRAL: { label: "NEUTRAL", bg: "#F3F4F6", fg: "#374151", bd: "#E5E7EB" },
   };
-  const s = map[traffic] || map.yellow;
+  const s = map[t] || { label: t || "SIGNAL", bg: "#F3F4F6", fg: "#374151", bd: "#E5E7EB" };
 
   return (
     <span className="text-[11px] px-2 py-0.5 rounded-full border" style={{ backgroundColor: s.bg, color: s.fg, borderColor: s.bd }}>
@@ -339,30 +309,9 @@ function TrafficPill({ traffic }) {
   );
 }
 
-function HighTicketPill({ tier }) {
-  const t = String(tier || "").toUpperCase();
-  const label =
-    t.includes("100") ? "HT 100K+" : t.includes("80") ? "HT 80K+" : t.includes("50") ? "HT 50K+" : "High Ticket";
-
+function TagPill({ children }) {
   return (
-    <span
-      className="text-[11px] px-2 py-0.5 rounded-full border"
-      style={{ backgroundColor: "#E8F1FF", color: "#1E3A8A", borderColor: "#C7DBFF" }}
-    >
-      {label}
-    </span>
-  );
-}
-
-function TagPill({ children, subtle }) {
-  return (
-    <span
-      className="text-[11px] px-2 py-0.5 rounded-full"
-      style={{
-        backgroundColor: subtle ? "#F3F4F6" : "#F5E6D3",
-        color: subtle ? "#374151" : "#2D5016",
-      }}
-    >
+    <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ backgroundColor: "#F5E6D3", color: "#2D5016" }}>
       {children}
     </span>
   );
