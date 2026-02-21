@@ -53,43 +53,6 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ==========================
-  // ✅ Winners via VIEW (Top60 export con retail match)
-  // Fuente: public.v_winners_top60_export_365d
-  // ==========================
-  async function fetchWinnersTop60FromView() {
-    const { data, error } = await supabase
-      .from("v_winners_top60_export_365d")
-      .select(
-        [
-          "page",
-          "categoria",
-          "title",
-          "image_url",
-          "product_url",
-          "ml_price_clp",
-          "scraped_at",
-          "score",
-          "best_retail_price_clp",
-          "best_rating",
-          "best_reviews_count",
-          "offers_7d",
-          "last_retail_fetch_at",
-          "signal_type",
-          "signal_score",
-        ].join(",")
-      )
-      // Orden principal (ranking final): señal > ofertas > score > recencia
-      .order("signal_score", { ascending: false, nullsFirst: false })
-      .order("offers_7d", { ascending: false, nullsFirst: false })
-      .order("score", { ascending: false, nullsFirst: false })
-      .order("scraped_at", { ascending: false, nullsFirst: false })
-      .limit(60);
-
-    if (error) throw error;
-    return data || [];
-  }
-
   function calcProfitMargin(mlPrice, suggestedPrice) {
     if (mlPrice == null || suggestedPrice == null) return { profit: null, margin: null };
     const cost = Number(mlPrice);
@@ -101,64 +64,91 @@ export default function Dashboard() {
     return { profit, margin };
   }
 
-  function mapViewWinnerToUI(x) {
-    const mlPrice = x?.ml_price_clp ?? null;
+  // ==========================
+  // ✅ Winners desde VIEW (NO EDGE) — NO ROMPE NADA
+  // Fuente: public.v_winners_top60_prod_365d
+  // Columnas confirmadas por tu captura:
+  // page, categoria, title, image_url, product_url, ml_price_clp, scraped_at, score,
+  // best_retail_price_clp, best_rating, best_reviews_count, offers_7d, last_retail_fetch_at,
+  // signal_type, signal_score
+  // ==========================
+  async function fetchWinnersFromView() {
+    const { data, error: qErr } = await supabase
+      .from("v_winners_top60_prod_365d")
+      .select(
+        [
+          "page",
+          "categoria",
+          "title",
+          "image_url",
+          "product_url",
+          "ml_price_clp",
+          "scraped_at",
+          "score",
+          "best_retail_price_clp",
+          "offers_7d",
+          "last_retail_fetch_at",
+          "signal_type",
+          "signal_score",
+        ].join(",")
+      )
+      .order("page", { ascending: true })
+      .order("signal_score", { ascending: false, nullsFirst: false })
+      .limit(60);
 
-    // ✅ precio sugerido = x2.5 (como venías mostrando)
-    const suggested = mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null;
+    if (qErr) throw qErr;
 
-    const { profit, margin } = calcProfitMargin(mlPrice, suggested);
+    const rows = data || [];
+    return rows.map((x) => {
+      const mlPrice = x?.ml_price_clp ?? null;
 
-    const htTier =
-      suggested !== null && suggested >= 100000
-        ? "HT3_100K"
-        : suggested !== null && suggested >= 80000
-        ? "HT2_80K"
-        : suggested !== null && suggested >= 50000
-        ? "HT1_50K"
-        : null;
+      // ✅ precio sugerido = x2.5 (como venías mostrando)
+      const suggested = mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null;
+      const { profit, margin } = calcProfitMargin(mlPrice, suggested);
 
-    // Semáforo simple: si es high ticket -> "blue", si no -> "green"
-    const traffic_light_final = htTier ? "blue" : "green";
+      const htTier =
+        suggested !== null && suggested >= 100000
+          ? "HT3_100K"
+          : suggested !== null && suggested >= 80000
+          ? "HT2_80K"
+          : suggested !== null && suggested >= 50000
+          ? "HT1_50K"
+          : null;
 
-    const url = x?.product_url || "";
+      // Semáforo simple
+      const traffic_light_final = htTier ? "blue" : "green";
 
-    return {
-      // WinnerCard (contrato actual)
-      keloke_category: x?.categoria || "otros",
-      product_family: "",
-      title: x?.title || "Producto",
-      url,
-      ml_price_clp: mlPrice,
-      suggested_price_25: suggested,
-      profit_clp: profit,
-      margin_pct: margin,
-      traffic_light_final,
-      high_ticket_tier: htTier,
-      adjusted_winner_score: x?.signal_score ?? null, // señal real
-      ml_ratio: null,
-      price_fetched_at: x?.scraped_at || null,
+      return {
+        // ✅ lo que ya usas en la UI
+        keloke_category: x?.categoria || "otros",
+        product_family: "",
+        title: x?.title || "Producto",
+        url: x?.product_url || "",
+        ml_price_clp: mlPrice,
+        suggested_price_25: suggested,
+        profit_clp: profit,
+        margin_pct: margin,
+        traffic_light_final,
+        high_ticket_tier: htTier,
+        adjusted_winner_score: x?.score ?? null,
+        ml_ratio: null,
+        price_fetched_at: x?.scraped_at || null,
 
-      // imagen
-      image_url: x?.image_url || null,
+        image_url: x?.image_url || null,
 
-      // info adicional
-      page: x?.page ?? null,
-      categoria: x?.categoria || null,
-      scraped_at: x?.scraped_at || null,
-      product_url: url,
+        // ✅ extras nuevas que pediste mostrar
+        signal_type: x?.signal_type || null,
+        offers_7d: x?.offers_7d ?? null,
+        best_retail_price_clp: x?.best_retail_price_clp ?? null,
+        last_retail_fetch_at: x?.last_retail_fetch_at ?? null,
 
-      // ✅ retail + señal (para mostrar en card)
-      best_retail_price_clp: x?.best_retail_price_clp ?? null,
-      offers_7d: x?.offers_7d ?? null,
-      signal_type: x?.signal_type ?? null,
-      signal_score: x?.signal_score ?? null,
-      last_retail_fetch_at: x?.last_retail_fetch_at ?? null,
-
-      // extra (por si después lo muestras)
-      best_rating: x?.best_rating ?? null,
-      best_reviews_count: x?.best_reviews_count ?? null,
-    };
+        // ✅ para segmentación por página
+        page: x?.page ?? null,
+        categoria: x?.categoria || null,
+        scraped_at: x?.scraped_at || null,
+        product_url: x?.product_url || null,
+      };
+    });
   }
 
   // ==========================
@@ -195,6 +185,7 @@ export default function Dashboard() {
         traffic_light_final: item?.traffic_light_final ?? null,
         score: item?.adjusted_winner_score ?? null,
 
+        // ✅ tu preferencia: 5–7 días. Dejamos 7 por defecto.
         stale_days: 7,
         force,
       };
@@ -291,7 +282,7 @@ export default function Dashboard() {
       });
 
       // ====== FEEDS ======
-      const [suggRes, alertsUnreadRes, alertsFallbackRes, winnersFallbackRes, logsRes] = await Promise.all([
+      const [suggRes, alertsUnreadRes, alertsFallbackRes, logsRes] = await Promise.all([
         supabase.from("ai_suggestions").select("*").eq("is_done", false).order("created_at", { ascending: false }).limit(5),
 
         supabase
@@ -304,63 +295,22 @@ export default function Dashboard() {
 
         supabase.from("dashboard_alerts").select("*").eq("category", "business").order("created_at", { ascending: false }).limit(5),
 
-        // ✅ fallback (si la nueva view falla)
-        supabase
-          .from("v_winners_with_pricing_ht")
-          .select(
-            [
-              "keloke_category",
-              "product_family",
-              "title",
-              "url",
-              "ml_price_clp",
-              "suggested_price_25",
-              "profit_clp",
-              "margin_pct",
-              "traffic_light_final",
-              "high_ticket_tier",
-              "adjusted_winner_score",
-              "ml_ratio",
-              "price_fetched_at",
-              "image_url",
-            ].join(",")
-          )
-          .order("adjusted_winner_score", { ascending: false, nullsFirst: false })
-          .limit(60),
-
         supabase.from("system_logs").select("*").order("created_at", { ascending: false }).limit(3),
       ]);
 
       setSuggestions(suggRes.data || []);
 
       const unread = alertsUnreadRes.data || [];
-      const fallbackAlerts = alertsFallbackRes.data || [];
-      setBusinessAlerts(unread.length > 0 ? unread : fallbackAlerts);
+      const fallback = alertsFallbackRes.data || [];
+      setBusinessAlerts(unread.length > 0 ? unread : fallback);
 
-      // ✅ Winners: VIEW Top60 export (principal). Si falla: fallback.
-      let winnersData = winnersFallbackRes.data || [];
-
+      // ✅ Winners: DIRECTO VIEW confiable
+      let winnersData = [];
       try {
-        const rows = await fetchWinnersTop60FromView();
-        if (rows?.length) {
-          winnersData = rows.map(mapViewWinnerToUI);
-        }
+        winnersData = await fetchWinnersFromView();
       } catch (e) {
-        console.error("Top60 export view error:", e);
-
-        // Completa profit/margin en fallback si vienen null
-        winnersData =
-          (winnersData || []).map((it) => {
-            const ml = it?.ml_price_clp ?? null;
-            const sp = it?.suggested_price_25 ?? (ml != null ? Math.round(Number(ml) * 2.5) : null);
-            const { profit, margin } = calcProfitMargin(ml, sp);
-            return {
-              ...it,
-              suggested_price_25: sp,
-              profit_clp: it?.profit_clp ?? profit,
-              margin_pct: it?.margin_pct ?? margin,
-            };
-          }) || [];
+        console.error("fetchWinnersFromView error:", e);
+        winnersData = [];
       }
 
       setWinnersPage(1);
@@ -377,7 +327,7 @@ export default function Dashboard() {
     }
   }
 
-  // ✅ segmentación por página (basado en campo item.page si viene desde VIEW)
+  // ✅ segmentación por página (basado en campo item.page)
   const winnersByPage = useMemo(() => {
     const hasPage = (winningProducts || []).some((x) => x?.page != null);
     if (hasPage) {
@@ -388,9 +338,11 @@ export default function Dashboard() {
         map.get(p).push(w);
       }
       const obj = {};
-      [...map.keys()].sort((a, b) => a - b).forEach((k) => {
-        obj[k] = map.get(k);
-      });
+      [...map.keys()]
+        .sort((a, b) => a - b)
+        .forEach((k) => {
+          obj[k] = map.get(k);
+        });
       return { mode: "page_field", pages: obj };
     }
 
@@ -421,7 +373,6 @@ export default function Dashboard() {
 
     async function run() {
       const items = winnersCurrentItems || [];
-      // Solo si tienen pricing (tú ya lo usas así)
       const targets = items.filter((it) => {
         const url = it?.url || it?.product_url;
         if (!url) return false;
@@ -430,7 +381,6 @@ export default function Dashboard() {
         return hasPricing;
       });
 
-      // Concurrencia baja para no reventar
       const maxConcurrent = 2;
       let i = 0;
 
@@ -452,7 +402,6 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [winnersPage, winnersCurrentItems]);
 
-  // Etiquetas bonitas por source/type
   function formatAlertTitle(a) {
     const type = a?.type || "event";
     const source = a?.source || "system";
@@ -663,7 +612,7 @@ export default function Dashboard() {
                 Top Productos Ganadores (Chile)
               </h2>
               <p className="text-xs text-gray-500 mt-1">
-                4 páginas • 15 productos por página • precio sugerido x2.5 + ganancia/margen calculados • señal retail incluida
+                4 páginas • 15 productos por página • precio sugerido x2.5 + ganancia/margen • señal retail incluida
               </p>
             </div>
 
@@ -789,11 +738,10 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
   const htTier = item?.high_ticket_tier || null;
 
   const hasPricing = mlPrice !== null && sellPrice !== null;
-
   const url = item?.url || item?.product_url;
 
-  // ✅ NUEVO: Retail/Señal (para mostrar)
-  const signalType = item?.signal_type ?? null; // ARBITRAJE_POSITIVO / UNDERVALUED_ML / NEUTRAL
+  // ✅ NUEVO: retail info
+  const signalType = item?.signal_type || null; // ARBITRAJE_POSITIVO / UNDERVALUED_ML / NEUTRAL
   const offers7d = item?.offers_7d ?? null;
   const bestRetail = item?.best_retail_price_clp ?? null;
 
@@ -821,6 +769,7 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
 
                 <TrafficPill traffic={traffic} />
                 {htTier ? <HighTicketPill tier={htTier} /> : null}
+                {signalType ? <SignalPill type={signalType} /> : null}
               </div>
 
               <div className="flex items-center gap-2 mt-2 flex-wrap">
@@ -828,56 +777,23 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
                 {fam ? <TagPill subtle>{fam}</TagPill> : null}
                 {score !== null ? (
                   <span className="text-[11px] text-gray-500">
-                    Señal score: <span className="font-semibold">{Number(score).toFixed(2)}</span>
+                    Score: <span className="font-semibold">{Number(score).toFixed(2)}</span>
                   </span>
                 ) : null}
-              </div>
-
-              {/* ✅ NUEVO: Línea compacta retail */}
-              <div className="flex items-center gap-2 mt-2 flex-wrap">
-                {signalType ? <SignalPill type={signalType} /> : null}
-                <span className="text-[11px] text-gray-500">
-                  Ofertas 7d: <span className="font-semibold">{offers7d !== null ? offers7d : "—"}</span>
-                </span>
-                <span className="text-[11px] text-gray-500">
-                  Best retail:{" "}
-                  <span className="font-semibold">
-                    {bestRetail !== null ? `$${Number(bestRetail).toLocaleString("es-CL")}` : "—"}
-                  </span>
-                </span>
               </div>
             </div>
           </div>
 
           {/* Pricing row */}
           <div className="mt-3 grid grid-cols-2 gap-3">
-            <div className="rounded-lg border border-gray-100 p-3">
-              <p className="text-[11px] text-gray-500">Precio ML (costo)</p>
-              <p className="text-sm font-semibold" style={{ color: "#2D5016" }}>
-                {mlPrice !== null ? `$${Number(mlPrice).toLocaleString("es-CL")}` : "—"}
-              </p>
-            </div>
+            <Box label="Precio ML (costo)" value={mlPrice !== null ? moneyCLP(mlPrice) : "—"} strong />
+            <Box label="Precio sugerido (x2.5)" value={sellPrice !== null ? moneyCLP(sellPrice) : "—"} strong />
+            <Box label="Ganancia" value={profit !== null ? moneyCLP(profit) : "—"} accent />
+            <Box label="Margen" value={margin !== null ? `${Number(margin).toFixed(1)}%` : "—"} />
 
-            <div className="rounded-lg border border-gray-100 p-3">
-              <p className="text-[11px] text-gray-500">Precio sugerido (x2.5)</p>
-              <p className="text-sm font-semibold" style={{ color: "#2D5016" }}>
-                {sellPrice !== null ? `$${Number(sellPrice).toLocaleString("es-CL")}` : "—"}
-              </p>
-            </div>
-
-            <div className="rounded-lg border border-gray-100 p-3">
-              <p className="text-[11px] text-gray-500">Ganancia</p>
-              <p className="text-sm font-semibold" style={{ color: "#D4A017" }}>
-                {profit !== null ? `$${Number(profit).toLocaleString("es-CL")}` : "—"}
-              </p>
-            </div>
-
-            <div className="rounded-lg border border-gray-100 p-3">
-              <p className="text-[11px] text-gray-500">Margen</p>
-              <p className="text-sm font-semibold text-gray-800">
-                {margin !== null ? `${Number(margin).toFixed(1)}%` : "—"}
-              </p>
-            </div>
+            {/* ✅ NUEVO: retail */}
+            <Box label="Mejor precio retail" value={bestRetail !== null ? moneyCLP(bestRetail) : "—"} strong />
+            <Box label="Ofertas 7 días" value={offers7d !== null ? String(offers7d) : "—"} />
           </div>
 
           <div className="mt-3 flex items-start justify-between gap-3">
@@ -888,7 +804,11 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
             ) : (
               <div className="min-w-0">
                 <p className="text-xs text-gray-500">
-                  {why ? why : whyLoading ? "Generando explicación IA…" : "Explicación IA lista para generarse (cache 7 días)."}
+                  {why
+                    ? why
+                    : whyLoading
+                    ? "Generando explicación IA…"
+                    : "Explicación IA lista para generarse (cache 7 días)."}
                 </p>
               </div>
             )}
@@ -915,12 +835,30 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
           </button>
 
           {item?.price_fetched_at ? (
-            <span className="text-[11px] text-gray-400">
-              {new Date(item.price_fetched_at).toLocaleString("es-CL")}
-            </span>
+            <span className="text-[11px] text-gray-400">{new Date(item.price_fetched_at).toLocaleString("es-CL")}</span>
           ) : null}
         </div>
       </div>
+    </div>
+  );
+}
+
+function moneyCLP(n) {
+  const v = Number(n);
+  if (Number.isNaN(v)) return "—";
+  return `$${v.toLocaleString("es-CL")}`;
+}
+
+function Box({ label, value, strong, accent }) {
+  return (
+    <div className="rounded-lg border border-gray-100 p-3">
+      <p className="text-[11px] text-gray-500">{label}</p>
+      <p
+        className={`text-sm ${strong ? "font-semibold" : "font-medium"}`}
+        style={accent ? { color: "#D4A017", fontWeight: 700 } : { color: "#2D5016", fontWeight: strong ? 700 : 600 }}
+      >
+        {value}
+      </p>
     </div>
   );
 }
@@ -946,12 +884,29 @@ function TrafficPill({ traffic }) {
   );
 }
 
+function SignalPill({ type }) {
+  const t = String(type || "").toUpperCase();
+  const map = {
+    ARBITRAJE_POSITIVO: { label: "ARBITRAJE +", bg: "#E9F7E7", fg: "#2D5016", bd: "#CFE8CB" },
+    UNDERVALUED_ML: { label: "UNDERVALUED", bg: "#FFF6D9", fg: "#7A5A00", bd: "#F1E0A5" },
+    NEUTRAL: { label: "NEUTRAL", bg: "#F3F4F6", fg: "#374151", bd: "#E5E7EB" },
+  };
+  const s = map[t] || { label: t || "SIGNAL", bg: "#F3F4F6", fg: "#374151", bd: "#E5E7EB" };
+
+  return (
+    <span
+      className="text-[11px] px-2 py-0.5 rounded-full border"
+      style={{ backgroundColor: s.bg, color: s.fg, borderColor: s.bd }}
+      title={`Signal: ${t}`}
+    >
+      {s.label}
+    </span>
+  );
+}
+
 function HighTicketPill({ tier }) {
   const label =
-    tier === "HT3_100K" ? "HT 100K+" :
-    tier === "HT2_80K" ? "HT 80K+" :
-    tier === "HT1_50K" ? "HT 50K+" :
-    "High Ticket";
+    tier === "HT3_100K" ? "HT 100K+" : tier === "HT2_80K" ? "HT 80K+" : tier === "HT1_50K" ? "HT 50K+" : "High Ticket";
 
   return (
     <span
@@ -960,31 +915,6 @@ function HighTicketPill({ tier }) {
       title="Producto high ticket"
     >
       {label}
-    </span>
-  );
-}
-
-// ✅ NUEVO: Pill para signal_type
-function SignalPill({ type }) {
-  const t = String(type || "").toUpperCase();
-
-  const map = {
-    ARBITRAJE_POSITIVO: { label: "ARBITRAJE", bg: "#E9F7E7", fg: "#2D5016", bd: "#CFE8CB" },
-    UNDERVALUED_ML: { label: "UNDERVALUED", bg: "#E8F1FF", fg: "#1E3A8A", bd: "#C7DBFF" },
-    NEUTRAL: { label: "NEUTRAL", bg: "#F3F4F6", fg: "#374151", bd: "#E5E7EB" },
-    NO_RETAIL: { label: "NO RETAIL", bg: "#FFF6D9", fg: "#7A5A00", bd: "#F1E0A5" },
-    NO_ML_PRICE: { label: "NO ML PRICE", bg: "#FDE8E8", fg: "#7A1E1E", bd: "#F6CACA" },
-  };
-
-  const s = map[t] || { label: t || "SIGNAL", bg: "#F3F4F6", fg: "#374151", bd: "#E5E7EB" };
-
-  return (
-    <span
-      className="text-[11px] px-2 py-0.5 rounded-full border"
-      style={{ backgroundColor: s.bg, color: s.fg, borderColor: s.bd }}
-      title={`signal_type: ${t}`}
-    >
-      {s.label}
     </span>
   );
 }
@@ -1023,10 +953,7 @@ function StatCard({ title, value, icon: Icon }) {
 
 function QuickButton({ icon: Icon, title, subtitle, onClick }) {
   return (
-    <button
-      onClick={onClick}
-      className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left"
-    >
+    <button onClick={onClick} className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left">
       <Icon className="w-6 h-6 mb-2" style={{ color: "#2D5016" }} />
       <p className="font-medium text-sm">{title}</p>
       <p className="text-xs text-gray-500 mt-1">{subtitle}</p>
