@@ -54,36 +54,40 @@ export default function Dashboard() {
   }, []);
 
   // ==========================
-  // ✅ Winners via Edge Function
+  // ✅ Winners via VIEW (Top60 export con retail match)
+  // Fuente: public.v_winners_top60_export_365d
   // ==========================
-  async function fetchWinnersPage(page = 1) {
-    const base = import.meta.env.VITE_SUPABASE_URL;
-    const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
+  async function fetchWinnersTop60FromView() {
+    const { data, error } = await supabase
+      .from("v_winners_top60_export_365d")
+      .select(
+        [
+          "page",
+          "categoria",
+          "title",
+          "image_url",
+          "product_url",
+          "ml_price_clp",
+          "scraped_at",
+          "score",
+          "best_retail_price_clp",
+          "best_rating",
+          "best_reviews_count",
+          "offers_7d",
+          "last_retail_fetch_at",
+          "signal_type",
+          "signal_score",
+        ].join(",")
+      )
+      // Orden principal (ranking final): señal > ofertas > score > recencia
+      .order("signal_score", { ascending: false, nullsFirst: false })
+      .order("offers_7d", { ascending: false, nullsFirst: false })
+      .order("score", { ascending: false, nullsFirst: false })
+      .order("scraped_at", { ascending: false, nullsFirst: false })
+      .limit(60);
 
-    if (!base || !anon) {
-      throw new Error("Faltan VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY en el .env");
-    }
-
-    const res = await fetch(`${base}/functions/v1/meli-winners?page=${page}`, {
-      method: "GET",
-      headers: {
-        apikey: anon,
-        Authorization: `Bearer ${anon}`,
-        "Content-Type": "application/json",
-      },
-    });
-
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok || !json?.ok) {
-      throw new Error(json?.error || `meli-winners failed (${res.status})`);
-    }
-    return json.items || [];
-  }
-
-  async function fetchWinnersAllPages() {
-    const pages = [1, 2, 3, 4];
-    const all = await Promise.all(pages.map((p) => fetchWinnersPage(p)));
-    return all.flat();
+    if (error) throw error;
+    return data || [];
   }
 
   function calcProfitMargin(mlPrice, suggestedPrice) {
@@ -97,8 +101,8 @@ export default function Dashboard() {
     return { profit, margin };
   }
 
-  function mapEdgeWinnerToUI(x) {
-    const mlPrice = x?.price ?? null;
+  function mapViewWinnerToUI(x) {
+    const mlPrice = x?.ml_price_clp ?? null;
 
     // ✅ precio sugerido = x2.5 (como venías mostrando)
     const suggested = mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null;
@@ -117,19 +121,21 @@ export default function Dashboard() {
     // Semáforo simple: si es high ticket -> "blue", si no -> "green"
     const traffic_light_final = htTier ? "blue" : "green";
 
+    const url = x?.product_url || "";
+
     return {
-      // WinnerCard
-      keloke_category: x?.category || "otros",
+      // WinnerCard (contrato actual)
+      keloke_category: x?.categoria || "otros",
       product_family: "",
       title: x?.title || "Producto",
-      url: x?.product_url || "",
+      url,
       ml_price_clp: mlPrice,
       suggested_price_25: suggested,
       profit_clp: profit,
       margin_pct: margin,
       traffic_light_final,
       high_ticket_tier: htTier,
-      adjusted_winner_score: null,
+      adjusted_winner_score: x?.signal_score ?? null, // señal real
       ml_ratio: null,
       price_fetched_at: x?.scraped_at || null,
 
@@ -138,9 +144,20 @@ export default function Dashboard() {
 
       // info adicional
       page: x?.page ?? null,
-      categoria: x?.category || null,
+      categoria: x?.categoria || null,
       scraped_at: x?.scraped_at || null,
-      product_url: x?.product_url || null,
+      product_url: url,
+
+      // ✅ retail + señal (para mostrar en card)
+      best_retail_price_clp: x?.best_retail_price_clp ?? null,
+      offers_7d: x?.offers_7d ?? null,
+      signal_type: x?.signal_type ?? null,
+      signal_score: x?.signal_score ?? null,
+      last_retail_fetch_at: x?.last_retail_fetch_at ?? null,
+
+      // extra (por si después lo muestras)
+      best_rating: x?.best_rating ?? null,
+      best_reviews_count: x?.best_reviews_count ?? null,
     };
   }
 
@@ -274,7 +291,7 @@ export default function Dashboard() {
       });
 
       // ====== FEEDS ======
-      const [suggRes, alertsUnreadRes, alertsFallbackRes, winnersRes, logsRes] = await Promise.all([
+      const [suggRes, alertsUnreadRes, alertsFallbackRes, winnersFallbackRes, logsRes] = await Promise.all([
         supabase.from("ai_suggestions").select("*").eq("is_done", false).order("created_at", { ascending: false }).limit(5),
 
         supabase
@@ -287,7 +304,7 @@ export default function Dashboard() {
 
         supabase.from("dashboard_alerts").select("*").eq("category", "business").order("created_at", { ascending: false }).limit(5),
 
-        // ✅ fallback (si edge falla). OJO: acá no tienes page por defecto, por eso solo sirve de “plan B”
+        // ✅ fallback (si la nueva view falla)
         supabase
           .from("v_winners_with_pricing_ht")
           .select(
@@ -314,24 +331,24 @@ export default function Dashboard() {
         supabase.from("system_logs").select("*").order("created_at", { ascending: false }).limit(3),
       ]);
 
-      if (winnersRes?.error) console.error("Winners view error:", winnersRes.error);
-
       setSuggestions(suggRes.data || []);
 
       const unread = alertsUnreadRes.data || [];
-      const fallback = alertsFallbackRes.data || [];
-      setBusinessAlerts(unread.length > 0 ? unread : fallback);
+      const fallbackAlerts = alertsFallbackRes.data || [];
+      setBusinessAlerts(unread.length > 0 ? unread : fallbackAlerts);
 
-      // ✅ Winners: Edge 4 páginas (page=1..4). Si falla: usa view.
-      let winnersData = winnersRes.data || [];
+      // ✅ Winners: VIEW Top60 export (principal). Si falla: fallback.
+      let winnersData = winnersFallbackRes.data || [];
+
       try {
-        const edgeItems = await fetchWinnersAllPages();
-        if (edgeItems?.length) {
-          winnersData = edgeItems.map(mapEdgeWinnerToUI);
+        const rows = await fetchWinnersTop60FromView();
+        if (rows?.length) {
+          winnersData = rows.map(mapViewWinnerToUI);
         }
       } catch (e) {
-        console.error("meli-winners (edge) error:", e);
-        // intenta completar profit/margin también en fallback si vienen null
+        console.error("Top60 export view error:", e);
+
+        // Completa profit/margin en fallback si vienen null
         winnersData =
           (winnersData || []).map((it) => {
             const ml = it?.ml_price_clp ?? null;
@@ -346,7 +363,6 @@ export default function Dashboard() {
           }) || [];
       }
 
-      // ✅ Si por cualquier razón la página actual quedó fuera de rango, resetea
       setWinnersPage(1);
       setWinningProducts(winnersData);
       setSystemLogs(logsRes.data || []);
@@ -361,7 +377,7 @@ export default function Dashboard() {
     }
   }
 
-  // ✅ segmentación por página (basado en campo item.page si viene desde Edge)
+  // ✅ segmentación por página (basado en campo item.page si viene desde VIEW)
   const winnersByPage = useMemo(() => {
     const hasPage = (winningProducts || []).some((x) => x?.page != null);
     if (hasPage) {
@@ -647,7 +663,7 @@ export default function Dashboard() {
                 Top Productos Ganadores (Chile)
               </h2>
               <p className="text-xs text-gray-500 mt-1">
-                4 páginas • 15 productos por página • precio sugerido x2.5 + ganancia/margen calculados
+                4 páginas • 15 productos por página • precio sugerido x2.5 + ganancia/margen calculados • señal retail incluida
               </p>
             </div>
 
@@ -776,6 +792,11 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
 
   const url = item?.url || item?.product_url;
 
+  // ✅ NUEVO: Retail/Señal (para mostrar)
+  const signalType = item?.signal_type ?? null; // ARBITRAJE_POSITIVO / UNDERVALUED_ML / NEUTRAL
+  const offers7d = item?.offers_7d ?? null;
+  const bestRetail = item?.best_retail_price_clp ?? null;
+
   return (
     <div className="p-4 rounded-xl border border-gray-100 hover:border-gray-200 transition-colors bg-white">
       <div className="flex items-start justify-between gap-3">
@@ -807,9 +828,23 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
                 {fam ? <TagPill subtle>{fam}</TagPill> : null}
                 {score !== null ? (
                   <span className="text-[11px] text-gray-500">
-                    Score: <span className="font-semibold">{Number(score).toFixed(2)}</span>
+                    Señal score: <span className="font-semibold">{Number(score).toFixed(2)}</span>
                   </span>
                 ) : null}
+              </div>
+
+              {/* ✅ NUEVO: Línea compacta retail */}
+              <div className="flex items-center gap-2 mt-2 flex-wrap">
+                {signalType ? <SignalPill type={signalType} /> : null}
+                <span className="text-[11px] text-gray-500">
+                  Ofertas 7d: <span className="font-semibold">{offers7d !== null ? offers7d : "—"}</span>
+                </span>
+                <span className="text-[11px] text-gray-500">
+                  Best retail:{" "}
+                  <span className="font-semibold">
+                    {bestRetail !== null ? `$${Number(bestRetail).toLocaleString("es-CL")}` : "—"}
+                  </span>
+                </span>
               </div>
             </div>
           </div>
@@ -853,11 +888,7 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
             ) : (
               <div className="min-w-0">
                 <p className="text-xs text-gray-500">
-                  {why
-                    ? why
-                    : whyLoading
-                    ? "Generando explicación IA…"
-                    : "Explicación IA lista para generarse (cache 7 días)."}
+                  {why ? why : whyLoading ? "Generando explicación IA…" : "Explicación IA lista para generarse (cache 7 días)."}
                 </p>
               </div>
             )}
@@ -929,6 +960,31 @@ function HighTicketPill({ tier }) {
       title="Producto high ticket"
     >
       {label}
+    </span>
+  );
+}
+
+// ✅ NUEVO: Pill para signal_type
+function SignalPill({ type }) {
+  const t = String(type || "").toUpperCase();
+
+  const map = {
+    ARBITRAJE_POSITIVO: { label: "ARBITRAJE", bg: "#E9F7E7", fg: "#2D5016", bd: "#CFE8CB" },
+    UNDERVALUED_ML: { label: "UNDERVALUED", bg: "#E8F1FF", fg: "#1E3A8A", bd: "#C7DBFF" },
+    NEUTRAL: { label: "NEUTRAL", bg: "#F3F4F6", fg: "#374151", bd: "#E5E7EB" },
+    NO_RETAIL: { label: "NO RETAIL", bg: "#FFF6D9", fg: "#7A5A00", bd: "#F1E0A5" },
+    NO_ML_PRICE: { label: "NO ML PRICE", bg: "#FDE8E8", fg: "#7A1E1E", bd: "#F6CACA" },
+  };
+
+  const s = map[t] || { label: t || "SIGNAL", bg: "#F3F4F6", fg: "#374151", bd: "#E5E7EB" };
+
+  return (
+    <span
+      className="text-[11px] px-2 py-0.5 rounded-full border"
+      style={{ backgroundColor: s.bg, color: s.fg, borderColor: s.bd }}
+      title={`signal_type: ${t}`}
+    >
+      {s.label}
     </span>
   );
 }
