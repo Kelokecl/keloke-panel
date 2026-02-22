@@ -65,90 +65,109 @@ export default function Dashboard() {
   }
 
   // ==========================
-  // ✅ Winners desde VIEW (NO EDGE) — NO ROMPE NADA
-  // Fuente: public.v_winners_top60_prod_365d
-  // Columnas confirmadas por tu captura:
-  // page, categoria, title, image_url, product_url, ml_price_clp, scraped_at, score,
-  // best_retail_price_clp, best_rating, best_reviews_count, offers_7d, last_retail_fetch_at,
-  // signal_type, signal_score
+  // ✅ Winners via Edge Function (evita RLS / “top vacío”)
   // ==========================
-  async function fetchWinnersFromView() {
-    const { data, error: qErr } = await supabase
-      .from("v_winners_with_pricing_ht_prod_365d")
-      .select(
-        [
-          "page",
-          "categoria",
-          "title",
-          "image_url",
-          "product_url",
-          "ml_price_clp",
-          "scraped_at",
-          "score",
-          "best_retail_price_clp",
-          "offers_7d",
-          "last_retail_fetch_at",
-          "signal_type",
-          "signal_score",
-        ].join(",")
-      )
-      .order("page", { ascending: true })
-      .order("signal_score", { ascending: false, nullsFirst: false })
-      .limit(60);
+  async function fetchWinnersPage(page = 1) {
+    const base = import.meta.env.VITE_SUPABASE_URL;
+    const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-    if (qErr) throw qErr;
+    if (!base || !anon) {
+      throw new Error("Faltan VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY en el .env");
+    }
 
-    const rows = data || [];
-    return rows.map((x) => {
-      const mlPrice = x?.ml_price_clp ?? null;
-
-      // ✅ precio sugerido = x2.5 (como venías mostrando)
-      const suggested = mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null;
-      const { profit, margin } = calcProfitMargin(mlPrice, suggested);
-
-      const htTier =
-        suggested !== null && suggested >= 100000
-          ? "HT3_100K"
-          : suggested !== null && suggested >= 80000
-          ? "HT2_80K"
-          : suggested !== null && suggested >= 50000
-          ? "HT1_50K"
-          : null;
-
-      // Semáforo simple
-      const traffic_light_final = htTier ? "blue" : "green";
-
-      return {
-        // ✅ lo que ya usas en la UI
-        keloke_category: x?.categoria || "otros",
-        product_family: "",
-        title: x?.title || "Producto",
-        url: x?.product_url || "",
-        ml_price_clp: mlPrice,
-        suggested_price_25: suggested,
-        profit_clp: profit,
-        margin_pct: margin,
-        traffic_light_final,
-        high_ticket_tier: htTier,
-        adjusted_winner_score: x?.score ?? null,
-        ml_ratio: null,
-        price_fetched_at: x?.scraped_at || null,
-
-        image_url: x?.image_url || null,
-
-        // ✅ extras nuevas que pediste mostrar
-        signal_type: x?.signal_type || null,
-        offers_7d: x?.offers_7d ?? null,
-        best_retail_price_clp: x?.best_retail_price_clp ?? null,
-        last_retail_fetch_at: x?.last_retail_fetch_at ?? null,
-
-        // ✅ para segmentación por página
-        page: x?.page ?? null,
-        categoria: x?.categoria || null,
-        scraped_at: x?.scraped_at || null,
-        product_url: x?.product_url || null,
-      };
+    const res = await fetch(`${base}/functions/v1/meli-winners?page=${page}`, {
+      method: "GET",
+      headers: {
+        apikey: anon,
+        Authorization: `Bearer ${anon}`,
+        "Content-Type": "application/json",
+      },
     });
+
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json?.ok) {
+      throw new Error(json?.error || `meli-winners failed (${res.status})`);
+    }
+    return json.items || [];
+  }
+
+  async function fetchWinnersAllPages() {
+    // 4 páginas esperadas (15 c/u)
+    const pages = [1, 2, 3, 4];
+    const all = await Promise.all(pages.map((p) => fetchWinnersPage(p)));
+    return all.flat();
+  }
+
+  // ==========================
+  // ✅ Mapeo Edge -> UI (tolerante)
+  // Incluye: signal_type / offers_7d / best_retail_price_clp si vienen
+  // + dedup por URL para evitar repetidos en el front
+  // ==========================
+  function mapEdgeWinnerToUI(x) {
+    const mlPrice = x?.price ?? x?.ml_price_clp ?? null;
+
+    // ✅ precio sugerido = x2.5 (como venías mostrando)
+    const suggested = mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null;
+    const { profit, margin } = calcProfitMargin(mlPrice, suggested);
+
+    const htTier =
+      suggested !== null && suggested >= 100000
+        ? "HT3_100K"
+        : suggested !== null && suggested >= 80000
+        ? "HT2_80K"
+        : suggested !== null && suggested >= 50000
+        ? "HT1_50K"
+        : null;
+
+    const traffic_light_final = htTier ? "blue" : "green";
+
+    const url = x?.product_url || x?.url || "";
+    const cat = x?.category || x?.categoria || x?.keloke_category || "otros";
+
+    return {
+      // WinnerCard
+      keloke_category: cat,
+      product_family: "",
+      title: x?.title || "Producto",
+      url,
+      ml_price_clp: mlPrice,
+      suggested_price_25: suggested,
+      profit_clp: profit,
+      margin_pct: margin,
+      traffic_light_final,
+      high_ticket_tier: htTier,
+      adjusted_winner_score: x?.score ?? x?.adjusted_winner_score ?? null,
+      ml_ratio: x?.ml_ratio ?? null,
+      price_fetched_at: x?.scraped_at || x?.price_fetched_at || null,
+
+      // imagen
+      image_url: x?.image_url || null,
+
+      // ✅ retail extras (si el edge los trae)
+      signal_type: x?.signal_type ?? null,
+      offers_7d: x?.offers_7d ?? null,
+      best_retail_price_clp: x?.best_retail_price_clp ?? null,
+      last_retail_fetch_at: x?.last_retail_fetch_at ?? null,
+
+      // para segmentación por página (si viene)
+      page: x?.page ?? null,
+      categoria: cat,
+      scraped_at: x?.scraped_at || null,
+      product_url: url,
+    };
+  }
+
+  function dedupByUrlKeepFirst(arr) {
+    const seen = new Set();
+    const out = [];
+    for (const it of arr || []) {
+      const key = (it?.url || it?.product_url || "").trim();
+      if (!key) continue;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(it);
+    }
+    return out;
   }
 
   // ==========================
@@ -158,10 +177,7 @@ export default function Dashboard() {
     const url = item?.url || item?.product_url;
     if (!url) return null;
 
-    // ya tengo cache en UI
     if (!force && whyByUrl[url]) return whyByUrl[url];
-
-    // evita doble llamada simultánea
     if (!force && whyLoadingByUrl[url]) return null;
 
     setWhyLoadingByUrl((m) => ({ ...m, [url]: true }));
@@ -185,8 +201,7 @@ export default function Dashboard() {
         traffic_light_final: item?.traffic_light_final ?? null,
         score: item?.adjusted_winner_score ?? null,
 
-        // ✅ tu preferencia: 5–7 días. Dejamos 7 por defecto.
-        stale_days: 7,
+        stale_days: 7, // (tú querías 5–7; dejamos 7 por defecto)
         force,
       };
 
@@ -304,12 +319,13 @@ export default function Dashboard() {
       const fallback = alertsFallbackRes.data || [];
       setBusinessAlerts(unread.length > 0 ? unread : fallback);
 
-      // ✅ Winners: DIRECTO VIEW confiable
+      // ✅ Winners: Edge -> dedup -> set
       let winnersData = [];
       try {
-        winnersData = await fetchWinnersFromView();
+        const edgeItems = await fetchWinnersAllPages();
+        winnersData = dedupByUrlKeepFirst(edgeItems.map(mapEdgeWinnerToUI));
       } catch (e) {
-        console.error("fetchWinnersFromView error:", e);
+        console.error("meli-winners (edge) error:", e);
         winnersData = [];
       }
 
@@ -327,7 +343,7 @@ export default function Dashboard() {
     }
   }
 
-  // ✅ segmentación por página (basado en campo item.page)
+  // ✅ segmentación por página (basado en campo item.page si viene desde Edge)
   const winnersByPage = useMemo(() => {
     const hasPage = (winningProducts || []).some((x) => x?.page != null);
     if (hasPage) {
@@ -338,11 +354,9 @@ export default function Dashboard() {
         map.get(p).push(w);
       }
       const obj = {};
-      [...map.keys()]
-        .sort((a, b) => a - b)
-        .forEach((k) => {
-          obj[k] = map.get(k);
-        });
+      [...map.keys()].sort((a, b) => a - b).forEach((k) => {
+        obj[k] = map.get(k);
+      });
       return { mode: "page_field", pages: obj };
     }
 
@@ -424,10 +438,7 @@ export default function Dashboard() {
     return (
       <div className="flex items-center justify-center h-screen">
         <div className="text-center">
-          <div
-            className="animate-spin rounded-full h-12 w-12 border-4 border-gray-200 mx-auto"
-            style={{ borderTopColor: "#2D5016" }}
-          />
+          <div className="animate-spin rounded-full h-12 w-12 border-4 border-gray-200 mx-auto" style={{ borderTopColor: "#2D5016" }} />
           <p className="text-gray-600 mt-4">Cargando dashboard...</p>
         </div>
       </div>
@@ -465,10 +476,7 @@ export default function Dashboard() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => loadDashboardData()}
-            className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
-          >
+          <button onClick={() => loadDashboardData()} className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm">
             Actualizar
           </button>
           <button
@@ -506,9 +514,7 @@ export default function Dashboard() {
         </div>
 
         {suggestions.length === 0 ? (
-          <p className="text-gray-600 text-sm">
-            Aún no hay sugerencias guardadas. Entra al Auto-Gerente y presiona “Generar sugerencias”.
-          </p>
+          <p className="text-gray-600 text-sm">Aún no hay sugerencias guardadas. Entra al Auto-Gerente y presiona “Generar sugerencias”.</p>
         ) : (
           <div className="space-y-2">
             {suggestions.map((s) => (
@@ -555,9 +561,7 @@ export default function Dashboard() {
           </div>
 
           {businessAlerts.length === 0 ? (
-            <p className="text-gray-500 text-sm text-center py-8">
-              Aún no hay alertas del negocio (ventas, mensajes, comentarios, stock, etc.)
-            </p>
+            <p className="text-gray-500 text-sm text-center py-8">Aún no hay alertas del negocio (ventas, mensajes, comentarios, stock, etc.)</p>
           ) : (
             <div className="space-y-3">
               {businessAlerts.map((a) => (
@@ -567,9 +571,7 @@ export default function Dashboard() {
                       {formatAlertTitle(a)}
                     </p>
 
-                    {formatAlertMessage(a) ? (
-                      <p className="text-xs text-gray-600 mt-1 break-words">{formatAlertMessage(a)}</p>
-                    ) : null}
+                    {formatAlertMessage(a) ? <p className="text-xs text-gray-600 mt-1 break-words">{formatAlertMessage(a)}</p> : null}
 
                     <div className="flex items-center gap-2 mt-2">
                       <span
@@ -580,9 +582,7 @@ export default function Dashboard() {
                         {a.source || "system"} • {a.type || "event"}
                       </span>
 
-                      <p className="text-xs text-gray-500">
-                        {a.created_at ? new Date(a.created_at).toLocaleString("es-CL") : ""}
-                      </p>
+                      <p className="text-xs text-gray-500">{a.created_at ? new Date(a.created_at).toLocaleString("es-CL") : ""}</p>
                     </div>
                   </div>
 
@@ -627,8 +627,7 @@ export default function Dashboard() {
               </button>
 
               <span className="text-sm text-gray-600">
-                Página <span className="font-semibold">{winnersPage}</span> /{" "}
-                <span className="font-semibold">{winnersTotalPages}</span>
+                Página <span className="font-semibold">{winnersPage}</span> / <span className="font-semibold">{winnersTotalPages}</span>
               </span>
 
               <button
@@ -647,10 +646,7 @@ export default function Dashboard() {
           {winnersCurrentItems.length === 0 ? (
             <div className="text-center py-8">
               <p className="text-gray-500 text-sm mb-3">Aún no hay productos ganadores en esta página.</p>
-              <button
-                onClick={() => navigate("/trends")}
-                className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
-              >
+              <button onClick={() => navigate("/trends")} className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm">
                 Ver módulo de Tendencias / Ganadores
               </button>
             </div>
@@ -721,7 +717,7 @@ export default function Dashboard() {
 }
 
 // ======================
-// Winners Card (bonito)
+// Winners Card
 // ======================
 function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
   const title = item?.title || "Producto";
@@ -740,7 +736,7 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
   const hasPricing = mlPrice !== null && sellPrice !== null;
   const url = item?.url || item?.product_url;
 
-  // ✅ NUEVO: retail info
+  // ✅ retail info
   const signalType = item?.signal_type || null; // ARBITRAJE_POSITIVO / UNDERVALUED_ML / NEUTRAL
   const offers7d = item?.offers_7d ?? null;
   const bestRetail = item?.best_retail_price_clp ?? null;
@@ -749,7 +745,6 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
     <div className="p-4 rounded-xl border border-gray-100 hover:border-gray-200 transition-colors bg-white">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 w-full">
-          {/* Header row + Imagen */}
           <div className="flex items-start gap-3">
             {item?.image_url ? (
               <img
@@ -784,31 +779,23 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
             </div>
           </div>
 
-          {/* Pricing row */}
           <div className="mt-3 grid grid-cols-2 gap-3">
             <Box label="Precio ML (costo)" value={mlPrice !== null ? moneyCLP(mlPrice) : "—"} strong />
             <Box label="Precio sugerido (x2.5)" value={sellPrice !== null ? moneyCLP(sellPrice) : "—"} strong />
             <Box label="Ganancia" value={profit !== null ? moneyCLP(profit) : "—"} accent />
             <Box label="Margen" value={margin !== null ? `${Number(margin).toFixed(1)}%` : "—"} />
 
-            {/* ✅ NUEVO: retail */}
             <Box label="Mejor precio retail" value={bestRetail !== null ? moneyCLP(bestRetail) : "—"} strong />
             <Box label="Ofertas 7 días" value={offers7d !== null ? String(offers7d) : "—"} />
           </div>
 
           <div className="mt-3 flex items-start justify-between gap-3">
             {!hasPricing ? (
-              <p className="text-xs text-gray-500">
-                Falta pricing automático (ML). Cuando corras el backfill, se completan precio/ganancia/margen.
-              </p>
+              <p className="text-xs text-gray-500">Falta pricing automático (ML). Cuando corras el backfill, se completan precio/ganancia/margen.</p>
             ) : (
               <div className="min-w-0">
                 <p className="text-xs text-gray-500">
-                  {why
-                    ? why
-                    : whyLoading
-                    ? "Generando explicación IA…"
-                    : "Explicación IA lista para generarse (cache 7 días)."}
+                  {why ? why : whyLoading ? "Generando explicación IA…" : "Explicación IA lista para generarse (cache 7 días)."}
                 </p>
               </div>
             )}
@@ -826,17 +813,11 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
         </div>
 
         <div className="shrink-0 flex flex-col items-end gap-2">
-          <button
-            onClick={onOpen}
-            className="px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
-            title="Abrir en MercadoLibre"
-          >
+          <button onClick={onOpen} className="px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm" title="Abrir en MercadoLibre">
             Ver <ExternalLink className="w-4 h-4 inline-block ml-1" />
           </button>
 
-          {item?.price_fetched_at ? (
-            <span className="text-[11px] text-gray-400">{new Date(item.price_fetched_at).toLocaleString("es-CL")}</span>
-          ) : null}
+          {item?.price_fetched_at ? <span className="text-[11px] text-gray-400">{new Date(item.price_fetched_at).toLocaleString("es-CL")}</span> : null}
         </div>
       </div>
     </div>
@@ -874,11 +855,7 @@ function TrafficPill({ traffic }) {
   const s = map[t] || map.yellow;
 
   return (
-    <span
-      className="text-[11px] px-2 py-0.5 rounded-full border"
-      style={{ backgroundColor: s.bg, color: s.fg, borderColor: s.bd }}
-      title={`Semáforo: ${s.label}`}
-    >
+    <span className="text-[11px] px-2 py-0.5 rounded-full border" style={{ backgroundColor: s.bg, color: s.fg, borderColor: s.bd }} title={`Semáforo: ${s.label}`}>
       {s.label}
     </span>
   );
@@ -894,11 +871,7 @@ function SignalPill({ type }) {
   const s = map[t] || { label: t || "SIGNAL", bg: "#F3F4F6", fg: "#374151", bd: "#E5E7EB" };
 
   return (
-    <span
-      className="text-[11px] px-2 py-0.5 rounded-full border"
-      style={{ backgroundColor: s.bg, color: s.fg, borderColor: s.bd }}
-      title={`Signal: ${t}`}
-    >
+    <span className="text-[11px] px-2 py-0.5 rounded-full border" style={{ backgroundColor: s.bg, color: s.fg, borderColor: s.bd }} title={`Signal: ${t}`}>
       {s.label}
     </span>
   );
@@ -909,11 +882,7 @@ function HighTicketPill({ tier }) {
     tier === "HT3_100K" ? "HT 100K+" : tier === "HT2_80K" ? "HT 80K+" : tier === "HT1_50K" ? "HT 50K+" : "High Ticket";
 
   return (
-    <span
-      className="text-[11px] px-2 py-0.5 rounded-full border"
-      style={{ backgroundColor: "#E8F1FF", color: "#1E3A8A", borderColor: "#C7DBFF" }}
-      title="Producto high ticket"
-    >
+    <span className="text-[11px] px-2 py-0.5 rounded-full border" style={{ backgroundColor: "#E8F1FF", color: "#1E3A8A", borderColor: "#C7DBFF" }} title="Producto high ticket">
       {label}
     </span>
   );
