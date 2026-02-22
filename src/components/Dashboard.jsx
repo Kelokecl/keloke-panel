@@ -74,7 +74,7 @@ export default function Dashboard() {
   // ==========================
   async function fetchWinnersFromView() {
     const { data, error: qErr } = await supabase
-      .from("public.v_winners_top60_prod_365d_dedup_full")
+      .from("public.v_winners_top60_prod_365d_dedup")
       .select(
         [
           "page",
