@@ -1,10 +1,9 @@
 // src/pages/Trends.jsx
 import React, { useEffect, useMemo, useState } from "react";
-import { supabase } from "../lib/supabase";
 import { TrendingUp, RefreshCw, AlertCircle, ExternalLink } from "lucide-react";
 
 export default function Trends() {
-  const [items, setItems] = useState([]);
+  const [allItems, setAllItems] = useState([]); // ✅ se carga por Edge (evita RLS)
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
@@ -12,61 +11,96 @@ export default function Trends() {
   // Pagination
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
-  const [totalRows, setTotalRows] = useState(0);
+
+  const totalRows = allItems.length;
 
   const totalPages = useMemo(() => {
     const t = Math.ceil((totalRows || 0) / pageSize);
     return t <= 0 ? 1 : t;
   }, [totalRows, pageSize]);
 
+  const pageItems = useMemo(() => {
+    const p = Math.max(1, page);
+    const from = (p - 1) * pageSize;
+    const to = from + pageSize;
+    return (allItems || []).slice(from, to);
+  }, [allItems, page, pageSize]);
+
   useEffect(() => {
-    loadPage(1);
+    loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageSize]);
 
-  async function loadPage(nextPage) {
+  async function fetchWinnersPage(p = 1) {
+    const base = import.meta.env.VITE_SUPABASE_URL;
+    const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+    if (!base || !anon) {
+      throw new Error("Faltan VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY en el .env");
+    }
+
+    const res = await fetch(`${base}/functions/v1/meli-winners?page=${p}`, {
+      method: "GET",
+      headers: {
+        apikey: anon,
+        Authorization: `Bearer ${anon}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json?.ok) {
+      throw new Error(json?.error || `meli-winners failed (${res.status})`);
+    }
+    return json.items || [];
+  }
+
+  async function loadAll() {
     setLoading(true);
     setError("");
     try {
-      const p = Math.max(1, nextPage);
-      const from = (p - 1) * pageSize;
-      const to = from + pageSize - 1;
+      const pages = [1, 2, 3, 4];
+      const all = (await Promise.all(pages.map((p) => fetchWinnersPage(p)))).flat();
 
-      // ✅ CAMBIO: leer desde v_winners_top60_prod_365d (tu fuente real con señal retail)
-      const { data, error: qErr, count } = await supabase
-        .from("v_winners_with_pricing_ht_prod_365d")
-        .select(
-          [
-            "page",
-            "categoria",
-            "title",
-            "image_url",
-            "product_url",
-            "ml_price_clp",
-            "scraped_at",
-            "score",
-            "best_retail_price_clp",
-            "offers_7d",
-            "last_retail_fetch_at",
-            "signal_type",
-            "signal_score",
-          ].join(","),
-          { count: "exact" }
-        )
-        .order("page", { ascending: true })
-        .order("signal_score", { ascending: false, nullsFirst: false })
-        .range(from, to);
+      // map + dedup por URL
+      const mapped = all.map((x) => {
+        const url = x?.product_url || x?.url || null;
+        const mlPrice = x?.price ?? x?.ml_price_clp ?? null;
 
-      if (qErr) throw qErr;
+        return {
+          page: x?.page ?? null,
+          categoria: x?.category || x?.categoria || "otros",
+          title: x?.title || "Producto",
+          image_url: x?.image_url || null,
+          product_url: url,
+          ml_price_clp: mlPrice,
+          scraped_at: x?.scraped_at || null,
+          score: x?.score ?? x?.adjusted_winner_score ?? null,
 
-      setItems(data || []);
-      setTotalRows(count || 0);
-      setPage(p);
+          best_retail_price_clp: x?.best_retail_price_clp ?? null,
+          offers_7d: x?.offers_7d ?? null,
+          last_retail_fetch_at: x?.last_retail_fetch_at ?? null,
+          signal_type: x?.signal_type ?? null,
+          signal_score: x?.signal_score ?? null,
+        };
+      });
+
+      const seen = new Set();
+      const dedup = [];
+      for (const it of mapped) {
+        const key = (it?.product_url || "").trim();
+        if (!key) continue;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        dedup.push(it);
+      }
+
+      setAllItems(dedup);
+      setPage(1);
     } catch (e) {
-      console.error("loadPage error:", e);
-      setError("No se pudo cargar el listado. Revisa que exista la vista v_winners_top60_prod_365d.");
-      setItems([]);
-      setTotalRows(0);
+      console.error("loadAll error:", e);
+      setError("No se pudo cargar el listado (Edge). Revisa la función meli-winners y el .env.");
+      setAllItems([]);
       setPage(1);
     } finally {
       setLoading(false);
@@ -77,8 +111,7 @@ export default function Trends() {
     setRunning(true);
     setError("");
     try {
-      // Por ahora solo recarga (tu backfill/cron corre aparte)
-      await loadPage(1);
+      await loadAll();
     } catch (e) {
       console.error("runScan error:", e);
       setError("Falló el refresh. Revisa permisos.");
@@ -106,9 +139,7 @@ export default function Trends() {
           <h1 className="text-3xl font-bold" style={{ color: "#2D5016" }}>
             Productos Ganadores IA
           </h1>
-          <p className="text-gray-600 mt-1">
-            Top 60 con retail match (señal + ofertas 7d + mejor precio retail) • paginación.
-          </p>
+          <p className="text-gray-600 mt-1">Top (via Edge) • dedup por URL • señal retail (si viene) • paginación.</p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -122,10 +153,7 @@ export default function Trends() {
             {running ? "Actualizando..." : "Actualizar ahora"}
           </button>
 
-          <button
-            onClick={() => loadPage(1)}
-            className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300"
-          >
+          <button onClick={() => loadAll()} className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300">
             Recargar
           </button>
         </div>
@@ -171,13 +199,11 @@ export default function Trends() {
 
         {loading ? (
           <div className="p-6 text-gray-600">Cargando...</div>
-        ) : items.length === 0 ? (
-          <div className="p-6 text-gray-600">
-            No hay items. Si tu query de conteo da 60, revisa RLS/permisos del anon key o que esta vista sea accesible.
-          </div>
+        ) : pageItems.length === 0 ? (
+          <div className="p-6 text-gray-600">No hay items.</div>
         ) : (
           <div className="divide-y divide-gray-100">
-            {items.map((p, idx) => (
+            {pageItems.map((p, idx) => (
               <WinnerRow key={`${p.product_url || idx}-${idx}`} idx={(page - 1) * pageSize + idx} item={p} />
             ))}
           </div>
@@ -187,7 +213,7 @@ export default function Trends() {
       {/* Pagination */}
       <div className="flex items-center justify-between gap-3">
         <button
-          onClick={() => loadPage(Math.max(1, page - 1))}
+          onClick={() => setPage((p) => Math.max(1, p - 1))}
           disabled={page <= 1 || loading}
           className="px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 disabled:opacity-50"
         >
@@ -198,11 +224,9 @@ export default function Trends() {
           {pageButtons().map((n) => (
             <button
               key={n}
-              onClick={() => loadPage(n)}
+              onClick={() => setPage(n)}
               disabled={loading}
-              className={`w-10 h-10 rounded-lg border text-sm ${
-                n === page ? "border-gray-400 font-semibold" : "border-gray-200 hover:border-gray-300"
-              }`}
+              className={`w-10 h-10 rounded-lg border text-sm ${n === page ? "border-gray-400 font-semibold" : "border-gray-200 hover:border-gray-300"}`}
               style={n === page ? { backgroundColor: "#F5E6D3", color: "#2D5016" } : {}}
             >
               {n}
@@ -211,7 +235,7 @@ export default function Trends() {
         </div>
 
         <button
-          onClick={() => loadPage(Math.min(totalPages, page + 1))}
+          onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
           disabled={page >= totalPages || loading}
           className="px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 disabled:opacity-50"
         >
@@ -267,9 +291,7 @@ function WinnerRow({ idx, item }) {
             Ver <ExternalLink className="w-4 h-4 inline-block ml-1" />
           </button>
 
-          {item?.scraped_at ? (
-            <span className="text-[11px] text-gray-400">{new Date(item.scraped_at).toLocaleString("es-CL")}</span>
-          ) : null}
+          {item?.scraped_at ? <span className="text-[11px] text-gray-400">{new Date(item.scraped_at).toLocaleString("es-CL")}</span> : null}
         </div>
       </div>
     </div>
