@@ -34,7 +34,7 @@ export default function Trends() {
 
       // ✅ CAMBIO: leer desde v_winners_top60_prod_365d (tu fuente real con señal retail)
       const { data, error: qErr, count } = await supabase
-        .from("public.v_winners_top60_prod_365d")
+        .from("v_winners_with_pricing_ht_prod_365d")
         .select(
           [
             "page",
