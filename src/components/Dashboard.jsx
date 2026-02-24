@@ -40,7 +40,7 @@ export default function Dashboard() {
   const [markingAll, setMarkingAll] = useState(false);
   const [markingOneId, setMarkingOneId] = useState(null);
 
-  // ✅ Winners UI pagination (4 páginas, 15 c/u)
+  // ✅ Winners UI pagination (ahora sobre 15 fijos, igual sirve por si reduces)
   const [winnersPage, setWinnersPage] = useState(1);
   const winnersPageSize = 15;
 
@@ -92,19 +92,17 @@ export default function Dashboard() {
   }
 
   async function fetchWinnersAllPages() {
-    // 4 páginas esperadas (15 c/u)
-    const pages = [1, 2, 3, 4];
-    const all = await Promise.all(pages.map((p) => fetchWinnersPage(p)));
-    return all.flat();
+    // ✅ 15 fijos -> solo page=1 (igual que Trends)
+    const all = await fetchWinnersPage(1);
+    return all;
   }
 
   // ==========================
   // ✅ Mapeo Edge -> UI (tolerante)
-  // Incluye: signal_type / offers_7d / best_retail_price_clp si vienen
-  // + dedup por URL para evitar repetidos en el front
   // ==========================
   function mapEdgeWinnerToUI(x) {
-    const mlPrice = x?.price ?? x?.ml_price_clp ?? null;
+    // ✅ preferir campo final si viene
+    const mlPrice = x?.ml_price_clp ?? x?.price ?? x?.ml_price ?? null;
 
     // ✅ precio sugerido = x2.5 (como venías mostrando)
     const suggested = mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null;
@@ -122,7 +120,7 @@ export default function Dashboard() {
     const traffic_light_final = htTier ? "blue" : "green";
 
     const url = x?.product_url || x?.url || "";
-    const cat = x?.category || x?.categoria || x?.keloke_category || "otros";
+    const cat = x?.categoria || x?.category || x?.keloke_category || "otros";
 
     return {
       // WinnerCard
@@ -143,14 +141,14 @@ export default function Dashboard() {
       // imagen
       image_url: x?.image_url || null,
 
-      // ✅ retail extras (si el edge los trae)
+      // retail extras (si el edge los trae)
       signal_type: x?.signal_type ?? null,
       offers_7d: x?.offers_7d ?? null,
       best_retail_price_clp: x?.best_retail_price_clp ?? null,
       last_retail_fetch_at: x?.last_retail_fetch_at ?? null,
 
-      // para segmentación por página (si viene)
-      page: x?.page ?? null,
+      // para segmentación por página (si viene desde edge; si no, queda null)
+      page: x?.page ?? 1,
       categoria: cat,
       scraped_at: x?.scraped_at || null,
       product_url: url,
@@ -201,7 +199,7 @@ export default function Dashboard() {
         traffic_light_final: item?.traffic_light_final ?? null,
         score: item?.adjusted_winner_score ?? null,
 
-        stale_days: 7, // (tú querías 5–7; dejamos 7 por defecto)
+        stale_days: 7,
         force,
       };
 
@@ -240,7 +238,6 @@ export default function Dashboard() {
     try {
       const { error: rpcError } = await supabase.rpc("mark_dashboard_alerts_read", {});
       if (rpcError) throw rpcError;
-
       await loadDashboardData();
     } catch (e) {
       console.error("markAllAlertsRead error:", e);
@@ -253,11 +250,8 @@ export default function Dashboard() {
   async function markOneAlertRead(alertId) {
     setMarkingOneId(alertId);
     try {
-      const { error: rpcError } = await supabase.rpc("mark_dashboard_alerts_read", {
-        p_ids: [alertId],
-      });
+      const { error: rpcError } = await supabase.rpc("mark_dashboard_alerts_read", { p_ids: [alertId] });
       if (rpcError) throw rpcError;
-
       await loadDashboardData();
     } catch (e) {
       console.error("markOneAlertRead error:", e);
@@ -319,11 +313,11 @@ export default function Dashboard() {
       const fallback = alertsFallbackRes.data || [];
       setBusinessAlerts(unread.length > 0 ? unread : fallback);
 
-      // ✅ Winners: Edge -> dedup -> set
+      // ✅ Winners: Edge -> map -> dedup -> top 15
       let winnersData = [];
       try {
         const edgeItems = await fetchWinnersAllPages();
-        winnersData = dedupByUrlKeepFirst(edgeItems.map(mapEdgeWinnerToUI));
+        winnersData = dedupByUrlKeepFirst(edgeItems.map(mapEdgeWinnerToUI)).slice(0, 15);
       } catch (e) {
         console.error("meli-winners (edge) error:", e);
         winnersData = [];
@@ -343,7 +337,7 @@ export default function Dashboard() {
     }
   }
 
-  // ✅ segmentación por página (basado en campo item.page si viene desde Edge)
+  // ✅ segmentación por página (si no viene page, cae en chunks)
   const winnersByPage = useMemo(() => {
     const hasPage = (winningProducts || []).some((x) => x?.page != null);
     if (hasPage) {
@@ -360,7 +354,7 @@ export default function Dashboard() {
       return { mode: "page_field", pages: obj };
     }
 
-    // fallback: corta en chunks de 15
+    // fallback: chunks de 15 (con 15 fijos será 1 página)
     const chunks = {};
     const arr = winningProducts || [];
     const totalPages = Math.max(1, Math.ceil(arr.length / winnersPageSize));
@@ -452,11 +446,7 @@ export default function Dashboard() {
           <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
           <h2 className="text-xl font-bold text-gray-900 mb-2">Error al cargar</h2>
           <p className="text-gray-600 mb-4">{error}</p>
-          <button
-            onClick={() => loadDashboardData()}
-            className="px-6 py-2 text-white rounded-lg hover:opacity-90"
-            style={{ backgroundColor: "#2D5016" }}
-          >
+          <button onClick={() => loadDashboardData()} className="px-6 py-2 text-white rounded-lg hover:opacity-90" style={{ backgroundColor: "#2D5016" }}>
             Reintentar
           </button>
         </div>
@@ -525,10 +515,7 @@ export default function Dashboard() {
                   </p>
                   {s.detail && <p className="text-xs text-gray-600 mt-1">{s.detail}</p>}
                 </div>
-                <span
-                  className="text-xs px-2 py-1 rounded-full border"
-                  style={{ backgroundColor: "#F5E6D3", color: "#2D5016", borderColor: "#E6D6C3" }}
-                >
+                <span className="text-xs px-2 py-1 rounded-full border" style={{ backgroundColor: "#F5E6D3", color: "#2D5016", borderColor: "#E6D6C3" }}>
                   {s.priority || "medium"}
                 </span>
               </div>
@@ -612,7 +599,7 @@ export default function Dashboard() {
                 Top Productos Ganadores (Chile)
               </h2>
               <p className="text-xs text-gray-500 mt-1">
-                4 páginas • 15 productos por página • precio sugerido x2.5 + ganancia/margen • señal retail incluida
+                15 fijos • precio sugerido x2.5 + ganancia/margen • señal retail incluida
               </p>
             </div>
 
@@ -645,7 +632,7 @@ export default function Dashboard() {
 
           {winnersCurrentItems.length === 0 ? (
             <div className="text-center py-8">
-              <p className="text-gray-500 text-sm mb-3">Aún no hay productos ganadores en esta página.</p>
+              <p className="text-gray-500 text-sm mb-3">Aún no hay productos ganadores.</p>
               <button onClick={() => navigate("/trends")} className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm">
                 Ver módulo de Tendencias / Ganadores
               </button>
@@ -736,8 +723,7 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
   const hasPricing = mlPrice !== null && sellPrice !== null;
   const url = item?.url || item?.product_url;
 
-  // ✅ retail info
-  const signalType = item?.signal_type || null; // ARBITRAJE_POSITIVO / UNDERVALUED_ML / NEUTRAL
+  const signalType = item?.signal_type || null;
   const offers7d = item?.offers_7d ?? null;
   const bestRetail = item?.best_retail_price_clp ?? null;
 
@@ -878,8 +864,7 @@ function SignalPill({ type }) {
 }
 
 function HighTicketPill({ tier }) {
-  const label =
-    tier === "HT3_100K" ? "HT 100K+" : tier === "HT2_80K" ? "HT 80K+" : tier === "HT1_50K" ? "HT 50K+" : "High Ticket";
+  const label = tier === "HT3_100K" ? "HT 100K+" : tier === "HT2_80K" ? "HT 80K+" : tier === "HT1_50K" ? "HT 50K+" : "High Ticket";
 
   return (
     <span className="text-[11px] px-2 py-0.5 rounded-full border" style={{ backgroundColor: "#E8F1FF", color: "#1E3A8A", borderColor: "#C7DBFF" }} title="Producto high ticket">
