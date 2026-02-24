@@ -40,7 +40,7 @@ export default function Dashboard() {
   const [markingAll, setMarkingAll] = useState(false);
   const [markingOneId, setMarkingOneId] = useState(null);
 
-  // ✅ Winners UI pagination (ahora: 15 fijos -> 1 página)
+  // ✅ Winners UI pagination (4 páginas, 15 c/u)
   const [winnersPage, setWinnersPage] = useState(1);
   const winnersPageSize = 15;
 
@@ -65,7 +65,7 @@ export default function Dashboard() {
   }
 
   // ==========================
-  // ✅ Winners via Edge Function
+  // ✅ Winners via Edge Function (evita RLS / “top vacío”)
   // ==========================
   async function fetchWinnersPage(page = 1) {
     const base = import.meta.env.VITE_SUPABASE_URL;
@@ -91,66 +91,66 @@ export default function Dashboard() {
     return json.items || [];
   }
 
-  async function fetchWinnersFixed15() {
-    // ✅ 15 fijos -> solo page=1
-    const items = await fetchWinnersPage(1);
-    return items || [];
+  async function fetchWinnersAllPages() {
+    // 4 páginas esperadas (15 c/u)
+    const pages = [1, 2, 3, 4];
+    const all = await Promise.all(pages.map((p) => fetchWinnersPage(p)));
+    return all.flat();
   }
 
   // ==========================
   // ✅ Mapeo Edge -> UI (tolerante)
-  // OJO: ahora el edge te puede traer ya los campos finales (ml_price_clp, suggested_price_25, etc.)
+  // Incluye: signal_type / offers_7d / best_retail_price_clp si vienen
+  // + dedup por URL para evitar repetidos en el front
   // ==========================
   function mapEdgeWinnerToUI(x) {
-    const url = x?.product_url || x?.url || "";
-    const cat = x?.keloke_category || x?.category || x?.categoria || "otros";
+    const mlPrice = x?.price ?? x?.ml_price_clp ?? null;
 
-    // ✅ Si vienen ya calculados desde la view, los respetamos.
-    const mlPrice = x?.ml_price_clp ?? x?.price ?? x?.ml_price ?? x?.ml_price_clp ?? null;
-    const suggested = x?.suggested_price_25 ?? null;
-
-    // ✅ Si NO viene suggested, fallback a x2.5
-    const suggestedFallback = mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null;
-    const sell = suggested !== null ? Number(suggested) : suggestedFallback;
-
-    const { profit, margin } = calcProfitMargin(mlPrice, sell);
+    // ✅ precio sugerido = x2.5 (como venías mostrando)
+    const suggested = mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null;
+    const { profit, margin } = calcProfitMargin(mlPrice, suggested);
 
     const htTier =
-      sell !== null && sell >= 100000
+      suggested !== null && suggested >= 100000
         ? "HT3_100K"
-        : sell !== null && sell >= 80000
+        : suggested !== null && suggested >= 80000
         ? "HT2_80K"
-        : sell !== null && sell >= 50000
+        : suggested !== null && suggested >= 50000
         ? "HT1_50K"
         : null;
 
-    // ✅ Si viene traffic_light_final desde DB, lo respetamos; si no, fallback.
-    const traffic_light_final = (x?.traffic_light_final ?? (htTier ? "blue" : "green")) || "green";
+    const traffic_light_final = htTier ? "blue" : "green";
+
+    const url = x?.product_url || x?.url || "";
+    const cat = x?.category || x?.categoria || x?.keloke_category || "otros";
 
     return {
+      // WinnerCard
       keloke_category: cat,
-      product_family: x?.product_family || "",
+      product_family: "",
       title: x?.title || "Producto",
       url,
       ml_price_clp: mlPrice,
-      suggested_price_25: sell,
-      profit_clp: x?.profit_clp ?? profit,
-      margin_pct: x?.margin_pct ?? margin,
-      traffic_light_final: traffic_light_final,
-      high_ticket_tier: x?.high_ticket_tier ?? htTier,
-      adjusted_winner_score: x?.adjusted_winner_score ?? x?.score ?? null,
+      suggested_price_25: suggested,
+      profit_clp: profit,
+      margin_pct: margin,
+      traffic_light_final,
+      high_ticket_tier: htTier,
+      adjusted_winner_score: x?.score ?? x?.adjusted_winner_score ?? null,
       ml_ratio: x?.ml_ratio ?? null,
-      price_fetched_at: x?.price_fetched_at ?? x?.scraped_at ?? null,
+      price_fetched_at: x?.scraped_at || x?.price_fetched_at || null,
 
+      // imagen
       image_url: x?.image_url || null,
 
+      // ✅ retail extras (si el edge los trae)
       signal_type: x?.signal_type ?? null,
       offers_7d: x?.offers_7d ?? null,
       best_retail_price_clp: x?.best_retail_price_clp ?? null,
       last_retail_fetch_at: x?.last_retail_fetch_at ?? null,
 
-      // compat
-      page: x?.page ?? 1,
+      // para segmentación por página (si viene)
+      page: x?.page ?? null,
       categoria: cat,
       scraped_at: x?.scraped_at || null,
       product_url: url,
@@ -201,7 +201,7 @@ export default function Dashboard() {
         traffic_light_final: item?.traffic_light_final ?? null,
         score: item?.adjusted_winner_score ?? null,
 
-        stale_days: 7,
+        stale_days: 7, // (tú querías 5–7; dejamos 7 por defecto)
         force,
       };
 
@@ -319,11 +319,11 @@ export default function Dashboard() {
       const fallback = alertsFallbackRes.data || [];
       setBusinessAlerts(unread.length > 0 ? unread : fallback);
 
-      // ✅ Winners: ahora 15 fijos (solo page 1)
+      // ✅ Winners: Edge -> dedup -> set
       let winnersData = [];
       try {
-        const edgeItems = await fetchWinnersFixed15();
-        winnersData = dedupByUrlKeepFirst(edgeItems.map(mapEdgeWinnerToUI)).slice(0, winnersPageSize);
+        const edgeItems = await fetchWinnersAllPages();
+        winnersData = dedupByUrlKeepFirst(edgeItems.map(mapEdgeWinnerToUI));
       } catch (e) {
         console.error("meli-winners (edge) error:", e);
         winnersData = [];
@@ -343,12 +343,43 @@ export default function Dashboard() {
     }
   }
 
-  // ✅ 15 fijos = 1 sola página
-  const winnersTotalPages = 1;
+  // ✅ segmentación por página (basado en campo item.page si viene desde Edge)
+  const winnersByPage = useMemo(() => {
+    const hasPage = (winningProducts || []).some((x) => x?.page != null);
+    if (hasPage) {
+      const map = new Map();
+      for (const w of winningProducts || []) {
+        const p = Number(w?.page || 1);
+        if (!map.has(p)) map.set(p, []);
+        map.get(p).push(w);
+      }
+      const obj = {};
+      [...map.keys()].sort((a, b) => a - b).forEach((k) => {
+        obj[k] = map.get(k);
+      });
+      return { mode: "page_field", pages: obj };
+    }
+
+    // fallback: corta en chunks de 15
+    const chunks = {};
+    const arr = winningProducts || [];
+    const totalPages = Math.max(1, Math.ceil(arr.length / winnersPageSize));
+    for (let p = 1; p <= totalPages; p++) {
+      const start = (p - 1) * winnersPageSize;
+      chunks[p] = arr.slice(start, start + winnersPageSize);
+    }
+    return { mode: "chunk", pages: chunks };
+  }, [winningProducts]);
+
+  const winnersTotalPages = useMemo(() => {
+    const keys = Object.keys(winnersByPage.pages || {});
+    if (!keys.length) return 1;
+    return Math.max(...keys.map((k) => Number(k)));
+  }, [winnersByPage]);
 
   const winnersCurrentItems = useMemo(() => {
-    return (winningProducts || []).slice(0, winnersPageSize);
-  }, [winningProducts]);
+    return winnersByPage.pages?.[winnersPage] || [];
+  }, [winnersByPage, winnersPage]);
 
   // ✅ Prefetch IA de la página actual (sin spamear)
   useEffect(() => {
@@ -580,13 +611,15 @@ export default function Dashboard() {
               <h2 className="text-xl font-bold" style={{ color: "#2D5016" }}>
                 Top Productos Ganadores (Chile)
               </h2>
-              <p className="text-xs text-gray-500 mt-1">15 productos fijos • se refrescan por cron • señal retail incluida</p>
+              <p className="text-xs text-gray-500 mt-1">
+                4 páginas • 15 productos por página • precio sugerido x2.5 + ganancia/margen • señal retail incluida
+              </p>
             </div>
 
             <div className="flex items-center gap-2">
               <button
-                onClick={() => setWinnersPage(1)}
-                disabled
+                onClick={() => setWinnersPage((p) => Math.max(1, p - 1))}
+                disabled={winnersPage <= 1}
                 className="px-2 py-2 rounded-lg border border-gray-200 bg-white disabled:opacity-40"
                 title="Página anterior"
               >
@@ -594,12 +627,12 @@ export default function Dashboard() {
               </button>
 
               <span className="text-sm text-gray-600">
-                Página <span className="font-semibold">1</span> / <span className="font-semibold">1</span>
+                Página <span className="font-semibold">{winnersPage}</span> / <span className="font-semibold">{winnersTotalPages}</span>
               </span>
 
               <button
-                onClick={() => setWinnersPage(1)}
-                disabled
+                onClick={() => setWinnersPage((p) => Math.min(winnersTotalPages, p + 1))}
+                disabled={winnersPage >= winnersTotalPages}
                 className="px-2 py-2 rounded-lg border border-gray-200 bg-white disabled:opacity-40"
                 title="Página siguiente"
               >
@@ -612,7 +645,7 @@ export default function Dashboard() {
 
           {winnersCurrentItems.length === 0 ? (
             <div className="text-center py-8">
-              <p className="text-gray-500 text-sm mb-3">Aún no hay productos ganadores.</p>
+              <p className="text-gray-500 text-sm mb-3">Aún no hay productos ganadores en esta página.</p>
               <button onClick={() => navigate("/trends")} className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm">
                 Ver módulo de Tendencias / Ganadores
               </button>
@@ -621,8 +654,8 @@ export default function Dashboard() {
             <div className="space-y-3">
               {winnersCurrentItems.map((p, idx) => (
                 <WinnerCard
-                  key={`${p.url || ""}-fixed-${idx}`}
-                  idx={idx}
+                  key={`${p.url || ""}-${winnersPage}-${idx}`}
+                  idx={(winnersPage - 1) * winnersPageSize + idx}
                   item={p}
                   why={whyByUrl[p?.url || p?.product_url] || null}
                   whyLoading={!!whyLoadingByUrl[p?.url || p?.product_url]}
@@ -704,7 +737,7 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
   const url = item?.url || item?.product_url;
 
   // ✅ retail info
-  const signalType = item?.signal_type || null;
+  const signalType = item?.signal_type || null; // ARBITRAJE_POSITIVO / UNDERVALUED_ML / NEUTRAL
   const offers7d = item?.offers_7d ?? null;
   const bestRetail = item?.best_retail_price_clp ?? null;
 
@@ -748,7 +781,7 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
 
           <div className="mt-3 grid grid-cols-2 gap-3">
             <Box label="Precio ML (costo)" value={mlPrice !== null ? moneyCLP(mlPrice) : "—"} strong />
-            <Box label="Precio sugerido" value={sellPrice !== null ? moneyCLP(sellPrice) : "—"} strong />
+            <Box label="Precio sugerido (x2.5)" value={sellPrice !== null ? moneyCLP(sellPrice) : "—"} strong />
             <Box label="Ganancia" value={profit !== null ? moneyCLP(profit) : "—"} accent />
             <Box label="Margen" value={margin !== null ? `${Number(margin).toFixed(1)}%` : "—"} />
 
