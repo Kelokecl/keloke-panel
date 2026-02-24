@@ -8,7 +8,7 @@ export default function Trends() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
 
-  // Pagination
+  // Pagination (sobre 15 items)
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
 
@@ -59,22 +59,25 @@ export default function Trends() {
     setLoading(true);
     setError("");
     try {
-      const pages = [1, 2, 3, 4];
-      const all = (await Promise.all(pages.map((p) => fetchWinnersPage(p)))).flat();
+      // ✅ 15 fijos -> solo page=1
+      const all = await fetchWinnersPage(1);
 
-      // map + dedup por URL
-      const mapped = all.map((x) => {
+      // map + dedup por URL + cut 15
+      const mapped = (all || []).map((x) => {
         const url = x?.product_url || x?.url || null;
-        const mlPrice = x?.price ?? x?.ml_price_clp ?? null;
+
+        // ✅ preferir el campo final si viene
+        const mlPrice = x?.ml_price_clp ?? x?.price ?? x?.ml_price ?? null;
 
         return {
-          page: x?.page ?? null,
-          categoria: x?.category || x?.categoria || "otros",
+          page: x?.page ?? 1,
+          categoria: x?.categoria ?? x?.category ?? x?.keloke_category ?? "otros",
           title: x?.title || "Producto",
           image_url: x?.image_url || null,
           product_url: url,
+
           ml_price_clp: mlPrice,
-          scraped_at: x?.scraped_at || null,
+          scraped_at: x?.scraped_at || x?.price_fetched_at || null,
           score: x?.score ?? x?.adjusted_winner_score ?? null,
 
           best_retail_price_clp: x?.best_retail_price_clp ?? null,
@@ -95,7 +98,7 @@ export default function Trends() {
         dedup.push(it);
       }
 
-      setAllItems(dedup);
+      setAllItems(dedup.slice(0, 15)); // ✅ máximo 15 siempre
       setPage(1);
     } catch (e) {
       console.error("loadAll error:", e);
@@ -139,7 +142,9 @@ export default function Trends() {
           <h1 className="text-3xl font-bold" style={{ color: "#2D5016" }}>
             Productos Ganadores IA
           </h1>
-          <p className="text-gray-600 mt-1">Top (via Edge) • dedup por URL • señal retail (si viene) • paginación.</p>
+          <p className="text-gray-600 mt-1">
+            15 fijos (via Edge) • dedup por URL • señal retail (si viene) • paginación.
+          </p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -226,7 +231,9 @@ export default function Trends() {
               key={n}
               onClick={() => setPage(n)}
               disabled={loading}
-              className={`w-10 h-10 rounded-lg border text-sm ${n === page ? "border-gray-400 font-semibold" : "border-gray-200 hover:border-gray-300"}`}
+              className={`w-10 h-10 rounded-lg border text-sm ${
+                n === page ? "border-gray-400 font-semibold" : "border-gray-200 hover:border-gray-300"
+              }`}
               style={n === page ? { backgroundColor: "#F5E6D3", color: "#2D5016" } : {}}
             >
               {n}
@@ -291,7 +298,9 @@ function WinnerRow({ idx, item }) {
             Ver <ExternalLink className="w-4 h-4 inline-block ml-1" />
           </button>
 
-          {item?.scraped_at ? <span className="text-[11px] text-gray-400">{new Date(item.scraped_at).toLocaleString("es-CL")}</span> : null}
+          {item?.scraped_at ? (
+            <span className="text-[11px] text-gray-400">{new Date(item.scraped_at).toLocaleString("es-CL")}</span>
+          ) : null}
         </div>
       </div>
     </div>
