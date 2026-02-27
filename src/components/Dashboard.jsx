@@ -1,5 +1,5 @@
 // src/components/Dashboard.jsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../lib/supabase";
 import {
   Calendar,
@@ -48,6 +48,11 @@ export default function Dashboard() {
   const [whyByUrl, setWhyByUrl] = useState({});
   const [whyLoadingByUrl, setWhyLoadingByUrl] = useState({});
 
+  // ✅ Anti-loop / anti-race refs
+  const loadSeqRef = useRef(0);
+  const whyCacheRef = useRef(new Map());      // product_url -> why_text
+  const whyInFlightRef = useRef(new Set());   // product_url in-flight
+
   useEffect(() => {
     loadDashboardData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -92,7 +97,7 @@ export default function Dashboard() {
   }
 
   async function fetchWinnersAllPages() {
-    // ✅ 15 fijos -> solo page=1 (igual que Trends)
+    // ✅ 15 fijos -> solo page=1
     const all = await fetchWinnersPage(1);
     return all;
   }
@@ -101,10 +106,7 @@ export default function Dashboard() {
   // ✅ Mapeo Edge -> UI (tolerante)
   // ==========================
   function mapEdgeWinnerToUI(x) {
-    // ✅ preferir campo final si viene
     const mlPrice = x?.ml_price_clp ?? x?.price ?? x?.ml_price ?? null;
-
-    // ✅ precio sugerido = x2.5 (como venías mostrando)
     const suggested = mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null;
     const { profit, margin } = calcProfitMargin(mlPrice, suggested);
 
@@ -123,7 +125,6 @@ export default function Dashboard() {
     const cat = x?.categoria || x?.category || x?.keloke_category || "otros";
 
     return {
-      // WinnerCard
       keloke_category: cat,
       product_family: "",
       title: x?.title || "Producto",
@@ -137,17 +138,13 @@ export default function Dashboard() {
       adjusted_winner_score: x?.score ?? x?.adjusted_winner_score ?? null,
       ml_ratio: x?.ml_ratio ?? null,
       price_fetched_at: x?.scraped_at || x?.price_fetched_at || null,
-
-      // imagen
       image_url: x?.image_url || null,
 
-      // retail extras (si el edge los trae)
       signal_type: x?.signal_type ?? null,
       offers_7d: x?.offers_7d ?? null,
       best_retail_price_clp: x?.best_retail_price_clp ?? null,
       last_retail_fetch_at: x?.last_retail_fetch_at ?? null,
 
-      // para segmentación por página (si viene desde edge; si no, queda null)
       page: x?.page ?? 1,
       categoria: cat,
       scraped_at: x?.scraped_at || null,
@@ -169,22 +166,32 @@ export default function Dashboard() {
   }
 
   // ==========================
-  // ✅ IA: winner-why (cache)
+  // ✅ IA: winner-why (cache + anti-loop)
   // ==========================
   async function fetchWinnerWhy(item, { force = false } = {}) {
-    const url = item?.url || item?.product_url;
+    const url = (item?.url || item?.product_url || "").trim();
     if (!url) return null;
 
-    if (!force && whyByUrl[url]) return whyByUrl[url];
-    if (!force && whyLoadingByUrl[url]) return null;
+    // ✅ cache fuerte (ref) evita loops aunque el state esté “atrasado”
+    if (!force) {
+      const cached = whyCacheRef.current.get(url);
+      if (cached) return cached;
+    }
 
+    // ✅ evita duplicados en vuelo
+    if (!force && whyInFlightRef.current.has(url)) return null;
+
+    whyInFlightRef.current.add(url);
     setWhyLoadingByUrl((m) => ({ ...m, [url]: true }));
 
     try {
       const base = import.meta.env.VITE_SUPABASE_URL;
       const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
       if (!base || !anon) throw new Error("Faltan VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY en el .env");
+
+      // ✅ usa JWT real si existe (mejor que Bearer anon)
+      const { data: sess } = await supabase.auth.getSession();
+      const jwt = sess?.session?.access_token || null;
 
       const payload = {
         product_url: url,
@@ -207,7 +214,7 @@ export default function Dashboard() {
         method: "POST",
         headers: {
           apikey: anon,
-          Authorization: `Bearer ${anon}`,
+          ...(jwt ? { Authorization: `Bearer ${jwt}` } : { Authorization: `Bearer ${anon}` }),
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
@@ -220,6 +227,8 @@ export default function Dashboard() {
 
       const why = (json?.why || "").trim();
       if (why) {
+        // ✅ guarda en ref + state
+        whyCacheRef.current.set(url, why);
         setWhyByUrl((m) => ({ ...m, [url]: why }));
         return why;
       }
@@ -228,7 +237,8 @@ export default function Dashboard() {
       console.error("winner-why error:", e);
       return null;
     } finally {
-      setWhyLoadingByUrl((m) => ({ ...m, [item?.url || item?.product_url]: false }));
+      whyInFlightRef.current.delete(url);
+      setWhyLoadingByUrl((m) => ({ ...m, [url]: false }));
     }
   }
 
@@ -262,7 +272,12 @@ export default function Dashboard() {
   }
 
   async function loadDashboardData() {
+    // ✅ secuencia para evitar que un timeout viejo pise un load nuevo
+    const seq = ++loadSeqRef.current;
+
     const timeout = setTimeout(() => {
+      // solo si este load sigue siendo el actual
+      if (loadSeqRef.current !== seq) return;
       setError("La carga está tardando más de lo esperado. Verifica tu conexión.");
       setLoading(false);
     }, 12000);
@@ -282,6 +297,9 @@ export default function Dashboard() {
           .eq("is_read", false)
           .eq("category", "business"),
       ]);
+
+      // si ya no es el load actual, aborta updates
+      if (loadSeqRef.current !== seq) return;
 
       setStats({
         totalProducts: productsRes.count || 0,
@@ -307,6 +325,8 @@ export default function Dashboard() {
         supabase.from("system_logs").select("*").order("created_at", { ascending: false }).limit(3),
       ]);
 
+      if (loadSeqRef.current !== seq) return;
+
       setSuggestions(suggRes.data || []);
 
       const unread = alertsUnreadRes.data || [];
@@ -323,6 +343,8 @@ export default function Dashboard() {
         winnersData = [];
       }
 
+      if (loadSeqRef.current !== seq) return;
+
       setWinnersPage(1);
       setWinningProducts(winnersData);
       setSystemLogs(logsRes.data || []);
@@ -330,9 +352,13 @@ export default function Dashboard() {
       clearTimeout(timeout);
     } catch (e) {
       console.error("Dashboard load error:", e);
-      setError("Error al cargar el dashboard. Por favor, intenta recargar la página.");
       clearTimeout(timeout);
+      // solo si sigue siendo el load actual
+      if (loadSeqRef.current !== seq) return;
+      setError("Error al cargar el dashboard. Por favor, intenta recargar la página.");
     } finally {
+      clearTimeout(timeout);
+      if (loadSeqRef.current !== seq) return;
       setLoading(false);
     }
   }
@@ -354,7 +380,6 @@ export default function Dashboard() {
       return { mode: "page_field", pages: obj };
     }
 
-    // fallback: chunks de 15 (con 15 fijos será 1 página)
     const chunks = {};
     const arr = winningProducts || [];
     const totalPages = Math.max(1, Math.ceil(arr.length / winnersPageSize));
@@ -375,16 +400,24 @@ export default function Dashboard() {
     return winnersByPage.pages?.[winnersPage] || [];
   }, [winnersByPage, winnersPage]);
 
-  // ✅ Prefetch IA de la página actual (sin spamear)
+  // ✅ Prefetch IA de la página actual (sin spamear / sin loops)
   useEffect(() => {
+    if (loading || error) return;
+
     let cancelled = false;
 
     async function run() {
       const items = winnersCurrentItems || [];
+      if (!items.length) return;
+
       const targets = items.filter((it) => {
-        const url = it?.url || it?.product_url;
+        const url = (it?.url || it?.product_url || "").trim();
         if (!url) return false;
-        if (whyByUrl[url]) return false;
+
+        // cache (ref) manda
+        if (whyCacheRef.current.has(url)) return false;
+        if (whyInFlightRef.current.has(url)) return false;
+
         const hasPricing = it?.ml_price_clp != null && it?.suggested_price_25 != null;
         return hasPricing;
       });
@@ -408,7 +441,7 @@ export default function Dashboard() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [winnersPage, winnersCurrentItems]);
+  }, [winnersPage, winnersCurrentItems, loading, error]);
 
   function formatAlertTitle(a) {
     const type = a?.type || "event";
@@ -432,7 +465,10 @@ export default function Dashboard() {
     return (
       <div className="flex items-center justify-center h-screen">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-4 border-gray-200 mx-auto" style={{ borderTopColor: "#2D5016" }} />
+          <div
+            className="animate-spin rounded-full h-12 w-12 border-4 border-gray-200 mx-auto"
+            style={{ borderTopColor: "#2D5016" }}
+          />
           <p className="text-gray-600 mt-4">Cargando dashboard...</p>
         </div>
       </div>
@@ -446,7 +482,11 @@ export default function Dashboard() {
           <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
           <h2 className="text-xl font-bold text-gray-900 mb-2">Error al cargar</h2>
           <p className="text-gray-600 mb-4">{error}</p>
-          <button onClick={() => loadDashboardData()} className="px-6 py-2 text-white rounded-lg hover:opacity-90" style={{ backgroundColor: "#2D5016" }}>
+          <button
+            onClick={() => loadDashboardData()}
+            className="px-6 py-2 text-white rounded-lg hover:opacity-90"
+            style={{ backgroundColor: "#2D5016" }}
+          >
             Reintentar
           </button>
         </div>
@@ -466,7 +506,10 @@ export default function Dashboard() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button onClick={() => loadDashboardData()} className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm">
+          <button
+            onClick={() => loadDashboardData()}
+            className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
+          >
             Actualizar
           </button>
           <button
@@ -504,7 +547,9 @@ export default function Dashboard() {
         </div>
 
         {suggestions.length === 0 ? (
-          <p className="text-gray-600 text-sm">Aún no hay sugerencias guardadas. Entra al Auto-Gerente y presiona “Generar sugerencias”.</p>
+          <p className="text-gray-600 text-sm">
+            Aún no hay sugerencias guardadas. Entra al Auto-Gerente y presiona “Generar sugerencias”.
+          </p>
         ) : (
           <div className="space-y-2">
             {suggestions.map((s) => (
@@ -515,7 +560,10 @@ export default function Dashboard() {
                   </p>
                   {s.detail && <p className="text-xs text-gray-600 mt-1">{s.detail}</p>}
                 </div>
-                <span className="text-xs px-2 py-1 rounded-full border" style={{ backgroundColor: "#F5E6D3", color: "#2D5016", borderColor: "#E6D6C3" }}>
+                <span
+                  className="text-xs px-2 py-1 rounded-full border"
+                  style={{ backgroundColor: "#F5E6D3", color: "#2D5016", borderColor: "#E6D6C3" }}
+                >
                   {s.priority || "medium"}
                 </span>
               </div>
@@ -548,7 +596,9 @@ export default function Dashboard() {
           </div>
 
           {businessAlerts.length === 0 ? (
-            <p className="text-gray-500 text-sm text-center py-8">Aún no hay alertas del negocio (ventas, mensajes, comentarios, stock, etc.)</p>
+            <p className="text-gray-500 text-sm text-center py-8">
+              Aún no hay alertas del negocio (ventas, mensajes, comentarios, stock, etc.)
+            </p>
           ) : (
             <div className="space-y-3">
               {businessAlerts.map((a) => (
@@ -558,7 +608,9 @@ export default function Dashboard() {
                       {formatAlertTitle(a)}
                     </p>
 
-                    {formatAlertMessage(a) ? <p className="text-xs text-gray-600 mt-1 break-words">{formatAlertMessage(a)}</p> : null}
+                    {formatAlertMessage(a) ? (
+                      <p className="text-xs text-gray-600 mt-1 break-words">{formatAlertMessage(a)}</p>
+                    ) : null}
 
                     <div className="flex items-center gap-2 mt-2">
                       <span
@@ -569,7 +621,9 @@ export default function Dashboard() {
                         {a.source || "system"} • {a.type || "event"}
                       </span>
 
-                      <p className="text-xs text-gray-500">{a.created_at ? new Date(a.created_at).toLocaleString("es-CL") : ""}</p>
+                      <p className="text-xs text-gray-500">
+                        {a.created_at ? new Date(a.created_at).toLocaleString("es-CL") : ""}
+                      </p>
                     </div>
                   </div>
 
@@ -614,7 +668,8 @@ export default function Dashboard() {
               </button>
 
               <span className="text-sm text-gray-600">
-                Página <span className="font-semibold">{winnersPage}</span> / <span className="font-semibold">{winnersTotalPages}</span>
+                Página <span className="font-semibold">{winnersPage}</span> /{" "}
+                <span className="font-semibold">{winnersTotalPages}</span>
               </span>
 
               <button
@@ -633,7 +688,10 @@ export default function Dashboard() {
           {winnersCurrentItems.length === 0 ? (
             <div className="text-center py-8">
               <p className="text-gray-500 text-sm mb-3">Aún no hay productos ganadores.</p>
-              <button onClick={() => navigate("/trends")} className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm">
+              <button
+                onClick={() => navigate("/trends")}
+                className="px-4 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
+              >
                 Ver módulo de Tendencias / Ganadores
               </button>
             </div>
@@ -777,7 +835,9 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
 
           <div className="mt-3 flex items-start justify-between gap-3">
             {!hasPricing ? (
-              <p className="text-xs text-gray-500">Falta pricing automático (ML). Cuando corras el backfill, se completan precio/ganancia/margen.</p>
+              <p className="text-xs text-gray-500">
+                Falta pricing automático (ML). Cuando corras el backfill, se completan precio/ganancia/margen.
+              </p>
             ) : (
               <div className="min-w-0">
                 <p className="text-xs text-gray-500">
@@ -803,7 +863,9 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
             Ver <ExternalLink className="w-4 h-4 inline-block ml-1" />
           </button>
 
-          {item?.price_fetched_at ? <span className="text-[11px] text-gray-400">{new Date(item.price_fetched_at).toLocaleString("es-CL")}</span> : null}
+          {item?.price_fetched_at ? (
+            <span className="text-[11px] text-gray-400">{new Date(item.price_fetched_at).toLocaleString("es-CL")}</span>
+          ) : null}
         </div>
       </div>
     </div>
