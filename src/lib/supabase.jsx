@@ -1,41 +1,33 @@
 // src/lib/supabase.js
 import { createClient } from "@supabase/supabase-js";
 
-// Vite envs
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-// Si faltan envs, avisamos (y en DEV lanzamos error para no “quedar colgado”)
+// ✅ No sigas si faltan envs (evita requests sin apikey y errores raros/intermitentes)
 if (!supabaseUrl || !supabaseAnonKey) {
-  const msg =
-    "⚠️ Supabase no está configurado. Revisa VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY en tu .env(.local).";
-  console.warn(msg);
-
-  // En DEV conviene fallar rápido para que no quede la app en “loading infinito”
-  if (import.meta.env.DEV) {
-    throw new Error(msg);
-  }
+  throw new Error(
+    "Faltan VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY en .env(.local)."
+  );
 }
 
-// ✅ Singleton global para evitar múltiples GoTrueClient en el mismo browser context
+// ✅ Singleton real (evita múltiples GoTrueClient en el mismo browser y loops)
 const GLOBAL_KEY = "__KELOKE_SUPABASE__";
 
-function makeClient() {
-  return createClient(supabaseUrl, supabaseAnonKey, {
+export const supabase =
+  globalThis[GLOBAL_KEY] ??
+  (globalThis[GLOBAL_KEY] = createClient(supabaseUrl, supabaseAnonKey, {
     auth: {
-      // Mantén sesión estable y evita comportamiento raro por duplicados
       persistSession: true,
       autoRefreshToken: true,
       detectSessionInUrl: true,
 
-      // ✅ clave explícita para aislar storage y evitar conflictos si hay otros proyectos/apps
-      storageKey: "keloke-auth",
+      // ✅ clave única del storage para ESTE panel (evita conflicto con otros proyectos/apps)
+      storageKey: "keloke-panel-auth",
     },
     global: {
-      // opcional: timeout/fetch custom si quieres
+      headers: {
+        "X-Client-Info": "keloke-panel",
+      },
     },
-  });
-}
-
-export const supabase =
-  globalThis[GLOBAL_KEY] ?? (globalThis[GLOBAL_KEY] = makeClient());
+  }));
