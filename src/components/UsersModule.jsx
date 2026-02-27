@@ -45,6 +45,16 @@ export default function UsersModule({ currentUser }) {
     is_active: true,
   });
 
+  // listar
+const { data, error } = await supabase.functions.invoke("admin-users", {
+  body: { action: "list" },
+});
+
+// crear
+await supabase.functions.invoke("admin-users", {
+  body: { action: "create", email, password, role, is_active: true },
+});
+
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
