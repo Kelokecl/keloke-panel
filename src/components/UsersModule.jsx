@@ -67,11 +67,24 @@ export default function UsersModule({ currentUser }) {
 
   // ---------- Edge helpers ----------
   async function edgeInvoke(body) {
-    const { data, error } = await supabase.functions.invoke("admin-users", { body });
-    if (error) throw error;
-    if (data?.error) throw new Error(data.error);
-    return data;
-  }
+  const { data: { session }, error: sessErr } = await supabase.auth.getSession();
+  if (sessErr) throw sessErr;
+
+  const token = session?.access_token;
+  if (!token) throw new Error("No hay sesión activa (token faltante). Vuelve a iniciar sesión.");
+
+  const { data, error } = await supabase.functions.invoke("admin-users", {
+    body,
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (error) throw error;
+  if (data?.error) throw new Error(data.error);
+
+  return data;
+}
 
   async function loadUsers() {
     const timeout = setTimeout(() => {
