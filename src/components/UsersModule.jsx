@@ -1,7 +1,19 @@
 // src/components/UsersModule.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
-import { Users, Edit2, Lock, Search, Filter, CheckCircle, XCircle, Eye, EyeOff } from "lucide-react";
+import {
+  Users,
+  Edit2,
+  Lock,
+  Search,
+  Filter,
+  CheckCircle,
+  XCircle,
+  Eye,
+  EyeOff,
+  Trash2,
+  Plus,
+} from "lucide-react";
 
 const roles = [
   { value: "admin", label: "Administrador" },
@@ -41,39 +53,25 @@ export default function UsersModule({ currentUser }) {
   const [filterRole, setFilterRole] = useState("all");
 
   const [formData, setFormData] = useState({
+    // para editar
     role: "community_manager",
     is_active: true,
+
+    // para crear
+    email: "",
+    password: "",
   });
-
-  // listar
-const { data, error } = await supabase.functions.invoke("admin-users", {
-  body: { action: "list" },
-});
-
-// crear
-await supabase.functions.invoke("admin-users", {
-  body: { action: "create", email, password, role, is_active: true },
-});
 
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
-  useEffect(() => {
-    loadUsers();
-
-    // realtime opcional (solo si lo necesitas; no rompe)
-    const channel = supabase
-      .channel("users_changes")
-      .on("postgres_changes", { event: "*", schema: "public", table: "users" }, () => {
-        loadUsers();
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // ---------- Edge helpers ----------
+  async function edgeInvoke(body) {
+    const { data, error } = await supabase.functions.invoke("admin-users", { body });
+    if (error) throw error;
+    if (data?.error) throw new Error(data.error);
+    return data;
+  }
 
   async function loadUsers() {
     const timeout = setTimeout(() => {
@@ -86,14 +84,8 @@ await supabase.functions.invoke("admin-users", {
       setError("");
       setSuccess("");
 
-      const { data, error: qErr } = await supabase
-        .from("users")
-        .select("id,email,role,is_active,created_at")
-        .order("created_at", { ascending: false });
-
-      if (qErr) throw qErr;
-
-      setUsers(data || []);
+      const data = await edgeInvoke({ action: "list" });
+      setUsers(data?.users || []);
       clearTimeout(timeout);
     } catch (err) {
       console.error("Error loading users:", err);
@@ -104,9 +96,30 @@ await supabase.functions.invoke("admin-users", {
     }
   }
 
+  useEffect(() => {
+    loadUsers();
+    // no realtime aquí: tu tabla es mínima y así evitamos loops/eventos raros
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function openCreate() {
+    setEditingUser(null);
+    setFormData({
+      email: "",
+      password: "",
+      role: "community_manager",
+      is_active: true,
+    });
+    setShowModal(true);
+    setError("");
+    setSuccess("");
+  }
+
   function handleEdit(u) {
     setEditingUser(u);
     setFormData({
+      email: u?.email || "",
+      password: "",
       role: u?.role || "community_manager",
       is_active: !!u?.is_active,
     });
@@ -117,25 +130,40 @@ await supabase.functions.invoke("admin-users", {
 
   async function handleSave(e) {
     e.preventDefault();
-    if (!editingUser?.id) return;
 
     try {
       setError("");
       setSuccess("");
 
-      const { error: upErr } = await supabase
-        .from("users")
-        .update({
+      // EDITAR (solo profile)
+      if (editingUser?.id) {
+        await edgeInvoke({
+          action: "update_profile",
+          id: editingUser.id,
           role: formData.role,
           is_active: formData.is_active,
-        })
-        .eq("id", editingUser.id);
+        });
 
-      if (upErr) throw upErr;
+        setSuccess("Usuario actualizado correctamente");
+        setShowModal(false);
+        setEditingUser(null);
+        await loadUsers();
+        return;
+      }
 
-      setSuccess("Usuario actualizado correctamente");
+      // CREAR
+      const email = String(formData.email || "").trim().toLowerCase();
+      const password = String(formData.password || "");
+      const role = String(formData.role || "community_manager");
+      const is_active = formData.is_active !== false;
+
+      if (!email) throw new Error("Falta email");
+      if (!password || password.length < 6) throw new Error("La contraseña debe tener al menos 6 caracteres");
+
+      await edgeInvoke({ action: "create", email, password, role, is_active });
+
+      setSuccess("Usuario creado correctamente");
       setShowModal(false);
-      setEditingUser(null);
       await loadUsers();
     } catch (err) {
       console.error("Error saving user:", err);
@@ -148,18 +176,41 @@ await supabase.functions.invoke("admin-users", {
       setError("");
       setSuccess("");
 
-      const { error: upErr } = await supabase
-        .from("users")
-        .update({ is_active: !currentStatus })
-        .eq("id", userId);
-
-      if (upErr) throw upErr;
+      await edgeInvoke({
+        action: "update_profile",
+        id: userId,
+        is_active: !currentStatus,
+      });
 
       setSuccess(`Usuario ${!currentStatus ? "activado" : "desactivado"} correctamente`);
       await loadUsers();
     } catch (err) {
       console.error("Error toggling user status:", err);
       setError(err?.message || "Error al cambiar estado del usuario");
+    }
+  }
+
+  async function handleDelete(userId) {
+    if (!userId) return;
+    if (userId === currentUser?.id) {
+      setError("No puedes eliminar tu propio usuario.");
+      return;
+    }
+    if (!window.confirm("¿Eliminar este usuario? Esto borrará también el usuario de Auth. No se puede deshacer.")) {
+      return;
+    }
+
+    try {
+      setError("");
+      setSuccess("");
+
+      await edgeInvoke({ action: "delete", id: userId });
+
+      setSuccess("Usuario eliminado correctamente");
+      await loadUsers();
+    } catch (err) {
+      console.error("Error deleting user:", err);
+      setError(err?.message || "Error al eliminar usuario");
     }
   }
 
@@ -240,13 +291,12 @@ await supabase.functions.invoke("admin-users", {
           </select>
         </div>
 
-        {/* ✅ Crear usuario real requiere Edge (service role) */}
         <button
-          disabled
-          className="px-5 py-3 rounded-lg bg-gray-200 text-gray-600 cursor-not-allowed"
-          title="Crear/Eliminar usuarios de Auth requiere Edge Function con Service Role"
+          onClick={openCreate}
+          className="px-5 py-3 rounded-lg bg-[#FF6B35] text-white hover:bg-[#ff5722] transition-colors flex items-center gap-2"
         >
-          + Nuevo Usuario (requiere Edge)
+          <Plus className="w-5 h-5" />
+          Nuevo Usuario
         </button>
       </div>
 
@@ -294,7 +344,9 @@ await supabase.functions.invoke("admin-users", {
                   <button
                     onClick={() => toggleUserStatus(u.id, u.is_active)}
                     className={`p-2 rounded-lg transition-colors ${
-                      u.is_active ? "bg-yellow-100 text-yellow-700 hover:bg-yellow-200" : "bg-green-100 text-green-700 hover:bg-green-200"
+                      u.is_active
+                        ? "bg-yellow-100 text-yellow-700 hover:bg-yellow-200"
+                        : "bg-green-100 text-green-700 hover:bg-green-200"
                     }`}
                     title={u.is_active ? "Desactivar usuario" : "Activar usuario"}
                   >
@@ -308,6 +360,16 @@ await supabase.functions.invoke("admin-users", {
                   >
                     <Edit2 className="w-5 h-5" />
                   </button>
+
+                  {u.id !== currentUser?.id ? (
+                    <button
+                      onClick={() => handleDelete(u.id)}
+                      className="p-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors"
+                      title="Eliminar usuario"
+                    >
+                      <Trash2 className="w-5 h-5" />
+                    </button>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -322,16 +384,47 @@ await supabase.functions.invoke("admin-users", {
         </div>
       )}
 
-      {/* Modal editar */}
-      {showModal && editingUser ? (
+      {/* Modal crear/editar */}
+      {showModal ? (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-2xl max-w-xl w-full">
             <div className="p-6 border-b border-gray-200">
-              <h2 className="text-2xl font-bold text-gray-900">Editar Usuario</h2>
-              <p className="text-sm text-gray-600 mt-1">{editingUser.email}</p>
+              <h2 className="text-2xl font-bold text-gray-900">
+                {editingUser ? "Editar Usuario" : "Nuevo Usuario"}
+              </h2>
+              {editingUser ? <p className="text-sm text-gray-600 mt-1">{editingUser.email}</p> : null}
             </div>
 
             <form onSubmit={handleSave} className="p-6 space-y-6">
+              {!editingUser ? (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Email *</label>
+                    <input
+                      type="email"
+                      required
+                      value={formData.email}
+                      onChange={(e) => setFormData((m) => ({ ...m, email: e.target.value }))}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#FF6B35] focus:border-transparent"
+                      placeholder="usuario@ejemplo.com"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Contraseña *</label>
+                    <input
+                      type="password"
+                      required
+                      minLength={6}
+                      value={formData.password}
+                      onChange={(e) => setFormData((m) => ({ ...m, password: e.target.value }))}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#FF6B35] focus:border-transparent"
+                      placeholder="mínimo 6 caracteres"
+                    />
+                  </div>
+                </>
+              ) : null}
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Rol</label>
                 <select
@@ -371,8 +464,11 @@ await supabase.functions.invoke("admin-users", {
                 >
                   Cancelar
                 </button>
-                <button type="submit" className="flex-1 px-6 py-3 bg-[#FF6B35] text-white rounded-lg hover:bg-[#ff5722] transition-colors">
-                  Guardar
+                <button
+                  type="submit"
+                  className="flex-1 px-6 py-3 bg-[#FF6B35] text-white rounded-lg hover:bg-[#ff5722] transition-colors"
+                >
+                  {editingUser ? "Guardar" : "Crear"}
                 </button>
               </div>
             </form>
