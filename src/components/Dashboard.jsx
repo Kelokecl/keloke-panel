@@ -275,7 +275,7 @@ export default function Dashboard() {
       const [productsRes, contentRes, automationsRes, pendingAlertsRes] = await Promise.all([
         supabase.from("products").select("id", { count: "exact", head: true }),
         supabase.from("generated_content").select("id", { count: "exact", head: true }).eq("status", "scheduled"),
-        supabase.from("automations").select("id", { count: "exact", head: true }).eq("is_active", true),
+        supabase.from("automations").select("id", { count: "exact", head: true }).eq("enabled", true),
         supabase
           .from("dashboard_alerts")
           .select("id", { count: "exact", head: true })
