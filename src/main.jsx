@@ -3,7 +3,13 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./index.css";
 
-// Nota: React.StrictMode en DEV puede duplicar ciertos efectos (doble mount).
-// En PROD no aplica el doble-invoke, pero para estabilidad durante debug
-// dejamos el render simple.
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+// En DEV, StrictMode puede duplicar efectos/render (y gatillar bugs “fantasma”).
+// Dejamos StrictMode solo si realmente lo quieres en dev.
+// Si prefieres mantenerlo, cambia RootWrapper a React.StrictMode siempre.
+const RootWrapper = import.meta.env.DEV ? React.Fragment : React.Fragment;
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <RootWrapper>
+    <App />
+  </RootWrapper>
+);
