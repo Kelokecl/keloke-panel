@@ -18,6 +18,45 @@ import {
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
+// ======================
+// Helpers anti-cuelgue
+// ======================
+function withTimeout(promise, ms, label = "operation") {
+  let t;
+  const timeoutPromise = new Promise((_, reject) => {
+    t = setTimeout(() => reject(new Error(`Timeout: ${label}`)), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(t));
+}
+
+// Supabase wrapper con timeout (evita promesas colgadas)
+async function sb(promise, label, ms = 9000) {
+  return withTimeout(promise, ms, label);
+}
+
+// fetch JSON con AbortController + timeout
+async function fetchJson(url, { method = "GET", headers, body, timeoutMs = 12000, label = "fetch" } = {}) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method,
+      headers,
+      body,
+      signal: controller.signal,
+    });
+
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, json };
+  } catch (e) {
+    // AbortError o red
+    throw new Error(`${label}: ${e?.name === "AbortError" ? "aborted/timeout" : (e?.message || "network error")}`);
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 export default function Dashboard() {
   const navigate = useNavigate();
 
@@ -40,7 +79,7 @@ export default function Dashboard() {
   const [markingAll, setMarkingAll] = useState(false);
   const [markingOneId, setMarkingOneId] = useState(null);
 
-  // ✅ Winners UI pagination (ahora sobre 15 fijos, igual sirve por si reduces)
+  // ✅ Winners UI pagination (ahora sobre 15 fijos)
   const [winnersPage, setWinnersPage] = useState(1);
   const winnersPageSize = 15;
 
@@ -50,11 +89,16 @@ export default function Dashboard() {
 
   // ✅ Anti-loop / anti-race refs
   const loadSeqRef = useRef(0);
+  const mountedRef = useRef(false);
   const whyCacheRef = useRef(new Map());      // product_url -> why_text
   const whyInFlightRef = useRef(new Set());   // product_url in-flight
 
   useEffect(() => {
+    mountedRef.current = true;
     loadDashboardData();
+    return () => {
+      mountedRef.current = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -70,36 +114,34 @@ export default function Dashboard() {
   }
 
   // ==========================
-  // ✅ Winners via Edge Function (evita RLS / “top vacío”)
+  // ✅ Winners via Edge Function (blindado)
   // ==========================
   async function fetchWinnersPage(page = 1) {
     const base = import.meta.env.VITE_SUPABASE_URL;
     const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-    if (!base || !anon) {
-      throw new Error("Faltan VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY en el .env");
-    }
+    if (!base || !anon) throw new Error("Faltan VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY en el .env");
 
-    const res = await fetch(`${base}/functions/v1/meli-winners?page=${page}`, {
+    const { ok, status, json } = await fetchJson(`${base}/functions/v1/meli-winners?page=${page}`, {
       method: "GET",
       headers: {
         apikey: anon,
         Authorization: `Bearer ${anon}`,
         "Content-Type": "application/json",
       },
+      timeoutMs: 12000,
+      label: "meli-winners",
     });
 
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok || !json?.ok) {
-      throw new Error(json?.error || `meli-winners failed (${res.status})`);
+    if (!ok || !json?.ok) {
+      throw new Error(json?.error || `meli-winners failed (${status})`);
     }
     return json.items || [];
   }
 
   async function fetchWinnersAllPages() {
     // ✅ 15 fijos -> solo page=1
-    const all = await fetchWinnersPage(1);
-    return all;
+    return fetchWinnersPage(1);
   }
 
   // ==========================
@@ -166,31 +208,28 @@ export default function Dashboard() {
   }
 
   // ==========================
-  // ✅ IA: winner-why (cache + anti-loop)
+  // ✅ IA: winner-why (cache + anti-loop + timeout)
   // ==========================
   async function fetchWinnerWhy(item, { force = false } = {}) {
     const url = (item?.url || item?.product_url || "").trim();
     if (!url) return null;
 
-    // ✅ cache fuerte (ref) evita loops aunque el state esté “atrasado”
     if (!force) {
       const cached = whyCacheRef.current.get(url);
       if (cached) return cached;
     }
 
-    // ✅ evita duplicados en vuelo
     if (!force && whyInFlightRef.current.has(url)) return null;
 
     whyInFlightRef.current.add(url);
-    setWhyLoadingByUrl((m) => ({ ...m, [url]: true }));
+    if (mountedRef.current) setWhyLoadingByUrl((m) => ({ ...m, [url]: true }));
 
     try {
       const base = import.meta.env.VITE_SUPABASE_URL;
       const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
       if (!base || !anon) throw new Error("Faltan VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY en el .env");
 
-      // ✅ usa JWT real si existe (mejor que Bearer anon)
-      const { data: sess } = await supabase.auth.getSession();
+      const { data: sess } = await sb(supabase.auth.getSession(), "auth.getSession(for winner-why)", 7000);
       const jwt = sess?.session?.access_token || null;
 
       const payload = {
@@ -210,7 +249,7 @@ export default function Dashboard() {
         force,
       };
 
-      const res = await fetch(`${base}/functions/v1/winner-why`, {
+      const { ok, status, json } = await fetchJson(`${base}/functions/v1/winner-why`, {
         method: "POST",
         headers: {
           apikey: anon,
@@ -218,18 +257,18 @@ export default function Dashboard() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
+        timeoutMs: 15000,
+        label: "winner-why",
       });
 
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || !json?.ok) {
-        throw new Error(json?.error || `winner-why failed (${res.status})`);
+      if (!ok || !json?.ok) {
+        throw new Error(json?.error || `winner-why failed (${status})`);
       }
 
       const why = (json?.why || "").trim();
       if (why) {
-        // ✅ guarda en ref + state
         whyCacheRef.current.set(url, why);
-        setWhyByUrl((m) => ({ ...m, [url]: why }));
+        if (mountedRef.current) setWhyByUrl((m) => ({ ...m, [url]: why }));
         return why;
       }
       return null;
@@ -238,7 +277,7 @@ export default function Dashboard() {
       return null;
     } finally {
       whyInFlightRef.current.delete(url);
-      setWhyLoadingByUrl((m) => ({ ...m, [url]: false }));
+      if (mountedRef.current) setWhyLoadingByUrl((m) => ({ ...m, [url]: false }));
     }
   }
 
@@ -246,7 +285,7 @@ export default function Dashboard() {
   async function markAllAlertsRead() {
     setMarkingAll(true);
     try {
-      const { error: rpcError } = await supabase.rpc("mark_dashboard_alerts_read", {});
+      const { error: rpcError } = await sb(supabase.rpc("mark_dashboard_alerts_read", {}), "rpc mark_dashboard_alerts_read", 9000);
       if (rpcError) throw rpcError;
       await loadDashboardData();
     } catch (e) {
@@ -260,7 +299,11 @@ export default function Dashboard() {
   async function markOneAlertRead(alertId) {
     setMarkingOneId(alertId);
     try {
-      const { error: rpcError } = await supabase.rpc("mark_dashboard_alerts_read", { p_ids: [alertId] });
+      const { error: rpcError } = await sb(
+        supabase.rpc("mark_dashboard_alerts_read", { p_ids: [alertId] }),
+        "rpc mark_dashboard_alerts_read(p_ids)",
+        9000
+      );
       if (rpcError) throw rpcError;
       await loadDashboardData();
     } catch (e) {
@@ -272,34 +315,47 @@ export default function Dashboard() {
   }
 
   async function loadDashboardData() {
-    // ✅ secuencia para evitar que un timeout viejo pise un load nuevo
     const seq = ++loadSeqRef.current;
 
-    const timeout = setTimeout(() => {
-      // solo si este load sigue siendo el actual
+    // timeout UI (si algo demora demasiado)
+    const uiTimeout = setTimeout(() => {
       if (loadSeqRef.current !== seq) return;
+      if (!mountedRef.current) return;
       setError("La carga está tardando más de lo esperado. Verifica tu conexión.");
       setLoading(false);
-    }, 12000);
+    }, 15000);
 
     try {
+      if (!mountedRef.current) return;
       setError(null);
       setLoading(true);
 
       // ====== STATS ======
-      const [productsRes, contentRes, automationsRes, pendingAlertsRes] = await Promise.all([
-        supabase.from("products").select("id", { count: "exact", head: true }),
-        supabase.from("generated_content").select("id", { count: "exact", head: true }).eq("status", "scheduled"),
-        supabase.from("automations").select("id", { count: "exact", head: true }).eq("enabled", true),
-        supabase
-          .from("dashboard_alerts")
-          .select("id", { count: "exact", head: true })
-          .eq("is_read", false)
-          .eq("category", "business"),
+      const [
+        productsRes,
+        contentRes,
+        automationsRes,
+        pendingAlertsRes,
+      ] = await Promise.all([
+        sb(supabase.from("products").select("id", { count: "exact", head: true }), "count products", 9000),
+        sb(
+          supabase.from("generated_content").select("id", { count: "exact", head: true }).eq("status", "scheduled"),
+          "count generated_content scheduled",
+          9000
+        ),
+        sb(supabase.from("automations").select("id", { count: "exact", head: true }).eq("enabled", true), "count automations enabled", 9000),
+        sb(
+          supabase
+            .from("dashboard_alerts")
+            .select("id", { count: "exact", head: true })
+            .eq("is_read", false)
+            .eq("category", "business"),
+          "count dashboard_alerts unread business",
+          9000
+        ),
       ]);
 
-      // si ya no es el load actual, aborta updates
-      if (loadSeqRef.current !== seq) return;
+      if (loadSeqRef.current !== seq || !mountedRef.current) return;
 
       setStats({
         totalProducts: productsRes.count || 0,
@@ -310,22 +366,31 @@ export default function Dashboard() {
 
       // ====== FEEDS ======
       const [suggRes, alertsUnreadRes, alertsFallbackRes, logsRes] = await Promise.all([
-        supabase.from("ai_suggestions").select("*").eq("is_done", false).order("created_at", { ascending: false }).limit(5),
-
-        supabase
-          .from("dashboard_alerts")
-          .select("*")
-          .eq("category", "business")
-          .eq("is_read", false)
-          .order("created_at", { ascending: false })
-          .limit(5),
-
-        supabase.from("dashboard_alerts").select("*").eq("category", "business").order("created_at", { ascending: false }).limit(5),
-
-        supabase.from("system_logs").select("*").order("created_at", { ascending: false }).limit(3),
+        sb(
+          supabase.from("ai_suggestions").select("*").eq("is_done", false).order("created_at", { ascending: false }).limit(5),
+          "fetch ai_suggestions",
+          9000
+        ),
+        sb(
+          supabase
+            .from("dashboard_alerts")
+            .select("*")
+            .eq("category", "business")
+            .eq("is_read", false)
+            .order("created_at", { ascending: false })
+            .limit(5),
+          "fetch dashboard_alerts unread",
+          9000
+        ),
+        sb(
+          supabase.from("dashboard_alerts").select("*").eq("category", "business").order("created_at", { ascending: false }).limit(5),
+          "fetch dashboard_alerts fallback",
+          9000
+        ),
+        sb(supabase.from("system_logs").select("*").order("created_at", { ascending: false }).limit(3), "fetch system_logs", 9000),
       ]);
 
-      if (loadSeqRef.current !== seq) return;
+      if (loadSeqRef.current !== seq || !mountedRef.current) return;
 
       setSuggestions(suggRes.data || []);
 
@@ -333,7 +398,7 @@ export default function Dashboard() {
       const fallback = alertsFallbackRes.data || [];
       setBusinessAlerts(unread.length > 0 ? unread : fallback);
 
-      // ✅ Winners: Edge -> map -> dedup -> top 15
+      // ✅ Winners (Edge) con timeout/abort interno
       let winnersData = [];
       try {
         const edgeItems = await fetchWinnersAllPages();
@@ -343,22 +408,21 @@ export default function Dashboard() {
         winnersData = [];
       }
 
-      if (loadSeqRef.current !== seq) return;
+      if (loadSeqRef.current !== seq || !mountedRef.current) return;
 
       setWinnersPage(1);
       setWinningProducts(winnersData);
       setSystemLogs(logsRes.data || []);
-
-      clearTimeout(timeout);
     } catch (e) {
       console.error("Dashboard load error:", e);
-      clearTimeout(timeout);
-      // solo si sigue siendo el load actual
-      if (loadSeqRef.current !== seq) return;
-      setError("Error al cargar el dashboard. Por favor, intenta recargar la página.");
+      if (loadSeqRef.current !== seq || !mountedRef.current) return;
+      setError(e?.message?.startsWith("Timeout:")
+        ? "La carga tardó demasiado. Reintenta (o revisa tu conexión)."
+        : "Error al cargar el dashboard. Por favor, intenta recargar la página."
+      );
     } finally {
-      clearTimeout(timeout);
-      if (loadSeqRef.current !== seq) return;
+      clearTimeout(uiTimeout);
+      if (loadSeqRef.current !== seq || !mountedRef.current) return;
       setLoading(false);
     }
   }
@@ -414,7 +478,6 @@ export default function Dashboard() {
         const url = (it?.url || it?.product_url || "").trim();
         if (!url) return false;
 
-        // cache (ref) manda
         if (whyCacheRef.current.has(url)) return false;
         if (whyInFlightRef.current.has(url)) return false;
 
@@ -762,7 +825,7 @@ export default function Dashboard() {
 }
 
 // ======================
-// Winners Card
+// Winners Card + UI helpers (igual que tu versión)
 // ======================
 function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
   const title = item?.title || "Producto";
