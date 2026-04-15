@@ -15,6 +15,8 @@ import {
   Sparkles,
   ChevronLeft,
   ChevronRight,
+  Target,
+  Compass,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -35,7 +37,10 @@ async function sb(promise, label, ms = 9000) {
 }
 
 // fetch JSON con AbortController + timeout
-async function fetchJson(url, { method = "GET", headers, body, timeoutMs = 12000, label = "fetch" } = {}) {
+async function fetchJson(
+  url,
+  { method = "GET", headers, body, timeoutMs = 12000, label = "fetch" } = {}
+) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -50,8 +55,11 @@ async function fetchJson(url, { method = "GET", headers, body, timeoutMs = 12000
     const json = await res.json().catch(() => ({}));
     return { ok: res.ok, status: res.status, json };
   } catch (e) {
-    // AbortError o red
-    throw new Error(`${label}: ${e?.name === "AbortError" ? "aborted/timeout" : (e?.message || "network error")}`);
+    throw new Error(
+      `${label}: ${
+        e?.name === "AbortError" ? "aborted/timeout" : e?.message || "network error"
+      }`
+    );
   } finally {
     clearTimeout(id);
   }
@@ -75,23 +83,19 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Para evitar doble click / spam
   const [markingAll, setMarkingAll] = useState(false);
   const [markingOneId, setMarkingOneId] = useState(null);
 
-  // ✅ Winners UI pagination (ahora sobre 15 fijos)
   const [winnersPage, setWinnersPage] = useState(1);
   const winnersPageSize = 15;
 
-  // ✅ IA cache en UI (por URL)
   const [whyByUrl, setWhyByUrl] = useState({});
   const [whyLoadingByUrl, setWhyLoadingByUrl] = useState({});
 
-  // ✅ Anti-loop / anti-race refs
   const loadSeqRef = useRef(0);
   const mountedRef = useRef(false);
-  const whyCacheRef = useRef(new Map());      // product_url -> why_text
-  const whyInFlightRef = useRef(new Set());   // product_url in-flight
+  const whyCacheRef = useRef(new Map());
+  const whyInFlightRef = useRef(new Set());
 
   useEffect(() => {
     mountedRef.current = true;
@@ -106,7 +110,9 @@ export default function Dashboard() {
     if (mlPrice == null || suggestedPrice == null) return { profit: null, margin: null };
     const cost = Number(mlPrice);
     const sell = Number(suggestedPrice);
-    if (!Number.isFinite(cost) || !Number.isFinite(sell) || sell <= 0) return { profit: null, margin: null };
+    if (!Number.isFinite(cost) || !Number.isFinite(sell) || sell <= 0) {
+      return { profit: null, margin: null };
+    }
 
     const profit = Math.round(sell - cost);
     const margin = (profit / sell) * 100;
@@ -114,43 +120,48 @@ export default function Dashboard() {
   }
 
   // ==========================
-  // ✅ Winners via Edge Function (blindado)
+  // ✅ NUEVO: Winners desde vista SQL real
   // ==========================
-  async function fetchWinnersPage(page = 1) {
-    const base = import.meta.env.VITE_SUPABASE_URL;
-    const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
+  async function fetchWinnersV2() {
+    const { data, error } = await sb(
+      supabase
+        .from("v_winner_products_v2_dashboard")
+        .select("*")
+        .eq("status", "active")
+        .order("final_score", { ascending: false })
+        .limit(15),
+      "fetch v_winner_products_v2_dashboard",
+      10000
+    );
 
-    if (!base || !anon) throw new Error("Faltan VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY en el .env");
-
-    const { ok, status, json } = await fetchJson(`${base}/functions/v1/meli-winners?page=${page}`, {
-      method: "GET",
-      headers: {
-        apikey: anon,
-        Authorization: `Bearer ${anon}`,
-        "Content-Type": "application/json",
-      },
-      timeoutMs: 12000,
-      label: "meli-winners",
-    });
-
-    if (!ok || !json?.ok) {
-      throw new Error(json?.error || `meli-winners failed (${status})`);
-    }
-    return json.items || [];
-  }
-
-  async function fetchWinnersAllPages() {
-    // ✅ 15 fijos -> solo page=1
-    return fetchWinnersPage(1);
+    if (error) throw error;
+    return data || [];
   }
 
   // ==========================
-  // ✅ Mapeo Edge -> UI (tolerante)
+  // ✅ Mapeo vista SQL -> UI
   // ==========================
-  function mapEdgeWinnerToUI(x) {
+  function mapWinnerV2ToUI(x, idx = 0) {
     const mlPrice = x?.ml_price_clp ?? x?.price ?? x?.ml_price ?? null;
-    const suggested = mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null;
+    const suggested =
+      x?.suggested_price_clp ??
+      x?.suggested_price_25 ??
+      (mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null);
+
     const { profit, margin } = calcProfitMargin(mlPrice, suggested);
+
+    const score =
+      x?.final_score ??
+      x?.score ??
+      x?.adjusted_winner_score ??
+      null;
+
+    const intentType = x?.intent_type || null;
+    const winningAngle = x?.winning_angle || null;
+    const hookType = x?.hook_type || null;
+    const hookText = x?.hook_text || null;
+    const organicAngle = x?.organic_angle || null;
+    const paidAngle = x?.paid_angle || null;
 
     const htTier =
       suggested !== null && suggested >= 100000
@@ -161,45 +172,61 @@ export default function Dashboard() {
         ? "HT1_50K"
         : null;
 
-    const traffic_light_final = htTier ? "blue" : "green";
+    const trafficLight =
+      x?.traffic_light_final ||
+      x?.traffic_light ||
+      (htTier ? "blue" : "green");
 
-    const url = x?.product_url || x?.url || "";
-    const cat = x?.categoria || x?.category || x?.keloke_category || "otros";
+    const url = (x?.product_url || x?.url || "").trim();
 
     return {
-      keloke_category: cat,
-      product_family: "",
+      id: x?.id ?? idx + 1,
       title: x?.title || "Producto",
       url,
+      product_url: url,
+      image_url: x?.image_url || null,
+
+      keloke_category:
+        x?.keloke_category ||
+        x?.categoria ||
+        x?.category ||
+        x?.niche ||
+        "otros",
+
+      product_family: x?.product_family || "",
       ml_price_clp: mlPrice,
       suggested_price_25: suggested,
-      profit_clp: profit,
-      margin_pct: margin,
-      traffic_light_final,
+      profit_clp: x?.profit_clp ?? profit,
+      margin_pct: x?.margin_pct ?? margin,
+      adjusted_winner_score: score,
+      traffic_light_final: trafficLight,
       high_ticket_tier: htTier,
-      adjusted_winner_score: x?.score ?? x?.adjusted_winner_score ?? null,
-      ml_ratio: x?.ml_ratio ?? null,
-      price_fetched_at: x?.scraped_at || x?.price_fetched_at || null,
-      image_url: x?.image_url || null,
 
       signal_type: x?.signal_type ?? null,
       offers_7d: x?.offers_7d ?? null,
       best_retail_price_clp: x?.best_retail_price_clp ?? null,
       last_retail_fetch_at: x?.last_retail_fetch_at ?? null,
 
-      page: x?.page ?? 1,
-      categoria: cat,
-      scraped_at: x?.scraped_at || null,
-      product_url: url,
+      winning_angle: winningAngle,
+      intent_type: intentType,
+      hook_type: hookType,
+      hook_text: hookText,
+      organic_angle: organicAngle,
+      paid_angle: paidAngle,
+      status: x?.status || "active",
+
+      created_at: x?.created_at || null,
+      price_fetched_at: x?.created_at || null,
+      page: 1,
     };
   }
 
-  function dedupByUrlKeepFirst(arr) {
+  function dedupByTitleKeepFirst(arr) {
     const seen = new Set();
     const out = [];
     for (const it of arr || []) {
-      const key = (it?.url || it?.product_url || "").trim();
-      if (!key) continue;
+      const key = `${(it?.title || "").trim()}__${(it?.winning_angle || "").trim()}`;
+      if (!key.trim()) continue;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(it);
@@ -208,76 +235,74 @@ export default function Dashboard() {
   }
 
   // ==========================
-  // ✅ IA: winner-why (cache + anti-loop + timeout)
+  // ✅ IA: explicador local desde los nuevos campos
+  // (sin depender de winner-why viejo)
   // ==========================
   async function fetchWinnerWhy(item, { force = false } = {}) {
-    const url = (item?.url || item?.product_url || "").trim();
-    if (!url) return null;
+    const key = String(item?.id || item?.title || "").trim();
+    if (!key) return null;
 
     if (!force) {
-      const cached = whyCacheRef.current.get(url);
+      const cached = whyCacheRef.current.get(key);
       if (cached) return cached;
     }
 
-    if (!force && whyInFlightRef.current.has(url)) return null;
+    if (!force && whyInFlightRef.current.has(key)) return null;
 
-    whyInFlightRef.current.add(url);
-    if (mountedRef.current) setWhyLoadingByUrl((m) => ({ ...m, [url]: true }));
+    whyInFlightRef.current.add(key);
+    if (mountedRef.current) {
+      setWhyLoadingByUrl((m) => ({ ...m, [key]: true }));
+    }
 
     try {
-      const base = import.meta.env.VITE_SUPABASE_URL;
-      const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
-      if (!base || !anon) throw new Error("Faltan VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY en el .env");
+      const parts = [];
 
-      const { data: sess } = await sb(supabase.auth.getSession(), "auth.getSession(for winner-why)", 7000);
-      const jwt = sess?.session?.access_token || null;
-
-      const payload = {
-        product_url: url,
-        title: item?.title || null,
-        category: item?.keloke_category || item?.categoria || item?.category || null,
-
-        ml_price_clp: item?.ml_price_clp ?? null,
-        suggested_price_25: item?.suggested_price_25 ?? null,
-        profit_clp: item?.profit_clp ?? null,
-        margin_pct: item?.margin_pct ?? null,
-        high_ticket_tier: item?.high_ticket_tier ?? null,
-        traffic_light_final: item?.traffic_light_final ?? null,
-        score: item?.adjusted_winner_score ?? null,
-
-        stale_days: 7,
-        force,
-      };
-
-      const { ok, status, json } = await fetchJson(`${base}/functions/v1/winner-why`, {
-        method: "POST",
-        headers: {
-          apikey: anon,
-          ...(jwt ? { Authorization: `Bearer ${jwt}` } : { Authorization: `Bearer ${anon}` }),
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-        timeoutMs: 15000,
-        label: "winner-why",
-      });
-
-      if (!ok || !json?.ok) {
-        throw new Error(json?.error || `winner-why failed (${status})`);
+      if (item?.winning_angle) {
+        parts.push(`Ángulo ganador: ${item.winning_angle}.`);
       }
 
-      const why = (json?.why || "").trim();
-      if (why) {
-        whyCacheRef.current.set(url, why);
-        if (mountedRef.current) setWhyByUrl((m) => ({ ...m, [url]: why }));
-        return why;
+      if (item?.intent_type) {
+        parts.push(`Intención detectada: ${item.intent_type}.`);
       }
-      return null;
+
+      if (item?.organic_angle) {
+        parts.push(`Enfoque orgánico sugerido: ${item.organic_angle}.`);
+      }
+
+      if (item?.paid_angle) {
+        parts.push(`Enfoque pagado sugerido: ${item.paid_angle}.`);
+      }
+
+      if (item?.hook_text) {
+        parts.push(`Hook recomendado: ${item.hook_text}.`);
+      }
+
+      if (item?.profit_clp != null && item?.margin_pct != null) {
+        parts.push(
+          `Margen estimado: ${moneyCLP(item.profit_clp)} de ganancia y ${Number(
+            item.margin_pct
+          ).toFixed(1)}% de margen.`
+        );
+      }
+
+      const why =
+        parts.join(" ").trim() ||
+        "Producto priorizado por score y ángulo ganador detectado.";
+
+      whyCacheRef.current.set(key, why);
+      if (mountedRef.current) {
+        setWhyByUrl((m) => ({ ...m, [key]: why }));
+      }
+
+      return why;
     } catch (e) {
-      console.error("winner-why error:", e);
+      console.error("winner-why v2 error:", e);
       return null;
     } finally {
-      whyInFlightRef.current.delete(url);
-      if (mountedRef.current) setWhyLoadingByUrl((m) => ({ ...m, [url]: false }));
+      whyInFlightRef.current.delete(key);
+      if (mountedRef.current) {
+        setWhyLoadingByUrl((m) => ({ ...m, [key]: false }));
+      }
     }
   }
 
@@ -285,7 +310,11 @@ export default function Dashboard() {
   async function markAllAlertsRead() {
     setMarkingAll(true);
     try {
-      const { error: rpcError } = await sb(supabase.rpc("mark_dashboard_alerts_read", {}), "rpc mark_dashboard_alerts_read", 9000);
+      const { error: rpcError } = await sb(
+        supabase.rpc("mark_dashboard_alerts_read", {}),
+        "rpc mark_dashboard_alerts_read",
+        9000
+      );
       if (rpcError) throw rpcError;
       await loadDashboardData();
     } catch (e) {
@@ -317,7 +346,6 @@ export default function Dashboard() {
   async function loadDashboardData() {
     const seq = ++loadSeqRef.current;
 
-    // timeout UI (si algo demora demasiado)
     const uiTimeout = setTimeout(() => {
       if (loadSeqRef.current !== seq) return;
       if (!mountedRef.current) return;
@@ -331,29 +359,39 @@ export default function Dashboard() {
       setLoading(true);
 
       // ====== STATS ======
-      const [
-        productsRes,
-        contentRes,
-        automationsRes,
-        pendingAlertsRes,
-      ] = await Promise.all([
-        sb(supabase.from("products").select("id", { count: "exact", head: true }), "count products", 9000),
-        sb(
-          supabase.from("generated_content").select("id", { count: "exact", head: true }).eq("status", "scheduled"),
-          "count generated_content scheduled",
-          9000
-        ),
-        sb(supabase.from("automations").select("id", { count: "exact", head: true }).eq("enabled", true), "count automations enabled", 9000),
-        sb(
-          supabase
-            .from("dashboard_alerts")
-            .select("id", { count: "exact", head: true })
-            .eq("is_read", false)
-            .eq("category", "business"),
-          "count dashboard_alerts unread business",
-          9000
-        ),
-      ]);
+      const [productsRes, contentRes, automationsRes, pendingAlertsRes] =
+        await Promise.all([
+          sb(
+            supabase.from("products").select("id", { count: "exact", head: true }),
+            "count products",
+            9000
+          ),
+          sb(
+            supabase
+              .from("generated_content")
+              .select("id", { count: "exact", head: true })
+              .eq("status", "scheduled"),
+            "count generated_content scheduled",
+            9000
+          ),
+          sb(
+            supabase
+              .from("automations")
+              .select("id", { count: "exact", head: true })
+              .eq("enabled", true),
+            "count automations enabled",
+            9000
+          ),
+          sb(
+            supabase
+              .from("dashboard_alerts")
+              .select("id", { count: "exact", head: true })
+              .eq("is_read", false)
+              .eq("category", "business"),
+            "count dashboard_alerts unread business",
+            9000
+          ),
+        ]);
 
       if (loadSeqRef.current !== seq || !mountedRef.current) return;
 
@@ -365,30 +403,49 @@ export default function Dashboard() {
       });
 
       // ====== FEEDS ======
-      const [suggRes, alertsUnreadRes, alertsFallbackRes, logsRes] = await Promise.all([
-        sb(
-          supabase.from("ai_suggestions").select("*").eq("is_done", false).order("created_at", { ascending: false }).limit(5),
-          "fetch ai_suggestions",
-          9000
-        ),
-        sb(
-          supabase
-            .from("dashboard_alerts")
-            .select("*")
-            .eq("category", "business")
-            .eq("is_read", false)
-            .order("created_at", { ascending: false })
-            .limit(5),
-          "fetch dashboard_alerts unread",
-          9000
-        ),
-        sb(
-          supabase.from("dashboard_alerts").select("*").eq("category", "business").order("created_at", { ascending: false }).limit(5),
-          "fetch dashboard_alerts fallback",
-          9000
-        ),
-        sb(supabase.from("system_logs").select("*").order("created_at", { ascending: false }).limit(3), "fetch system_logs", 9000),
-      ]);
+      const [suggRes, alertsUnreadRes, alertsFallbackRes, logsRes] =
+        await Promise.all([
+          sb(
+            supabase
+              .from("ai_suggestions")
+              .select("*")
+              .eq("is_done", false)
+              .order("created_at", { ascending: false })
+              .limit(5),
+            "fetch ai_suggestions",
+            9000
+          ),
+          sb(
+            supabase
+              .from("dashboard_alerts")
+              .select("*")
+              .eq("category", "business")
+              .eq("is_read", false)
+              .order("created_at", { ascending: false })
+              .limit(5),
+            "fetch dashboard_alerts unread",
+            9000
+          ),
+          sb(
+            supabase
+              .from("dashboard_alerts")
+              .select("*")
+              .eq("category", "business")
+              .order("created_at", { ascending: false })
+              .limit(5),
+            "fetch dashboard_alerts fallback",
+            9000
+          ),
+          sb(
+            supabase
+              .from("system_logs")
+              .select("*")
+              .order("created_at", { ascending: false })
+              .limit(3),
+            "fetch system_logs",
+            9000
+          ),
+        ]);
 
       if (loadSeqRef.current !== seq || !mountedRef.current) return;
 
@@ -398,13 +455,15 @@ export default function Dashboard() {
       const fallback = alertsFallbackRes.data || [];
       setBusinessAlerts(unread.length > 0 ? unread : fallback);
 
-      // ✅ Winners (Edge) con timeout/abort interno
+      // ====== NUEVO detector real ======
       let winnersData = [];
       try {
-        const edgeItems = await fetchWinnersAllPages();
-        winnersData = dedupByUrlKeepFirst(edgeItems.map(mapEdgeWinnerToUI)).slice(0, 15);
+        const rows = await fetchWinnersV2();
+        winnersData = dedupByTitleKeepFirst(
+          rows.map((x, idx) => mapWinnerV2ToUI(x, idx))
+        ).slice(0, 15);
       } catch (e) {
-        console.error("meli-winners (edge) error:", e);
+        console.error("v_winner_products_v2_dashboard error:", e);
         winnersData = [];
       }
 
@@ -416,9 +475,11 @@ export default function Dashboard() {
     } catch (e) {
       console.error("Dashboard load error:", e);
       if (loadSeqRef.current !== seq || !mountedRef.current) return;
-      setError(e?.message?.startsWith("Timeout:")
-        ? "La carga tardó demasiado. Reintenta (o revisa tu conexión)."
-        : "Error al cargar el dashboard. Por favor, intenta recargar la página."
+
+      setError(
+        e?.message?.startsWith("Timeout:")
+          ? "La carga tardó demasiado. Reintenta (o revisa tu conexión)."
+          : "Error al cargar el dashboard. Por favor, intenta recargar la página."
       );
     } finally {
       clearTimeout(uiTimeout);
@@ -427,7 +488,6 @@ export default function Dashboard() {
     }
   }
 
-  // ✅ segmentación por página (si no viene page, cae en chunks)
   const winnersByPage = useMemo(() => {
     const hasPage = (winningProducts || []).some((x) => x?.page != null);
     if (hasPage) {
@@ -438,9 +498,11 @@ export default function Dashboard() {
         map.get(p).push(w);
       }
       const obj = {};
-      [...map.keys()].sort((a, b) => a - b).forEach((k) => {
-        obj[k] = map.get(k);
-      });
+      [...map.keys()]
+        .sort((a, b) => a - b)
+        .forEach((k) => {
+          obj[k] = map.get(k);
+        });
       return { mode: "page_field", pages: obj };
     }
 
@@ -464,7 +526,6 @@ export default function Dashboard() {
     return winnersByPage.pages?.[winnersPage] || [];
   }, [winnersByPage, winnersPage]);
 
-  // ✅ Prefetch IA de la página actual (sin spamear / sin loops)
   useEffect(() => {
     if (loading || error) return;
 
@@ -475,14 +536,11 @@ export default function Dashboard() {
       if (!items.length) return;
 
       const targets = items.filter((it) => {
-        const url = (it?.url || it?.product_url || "").trim();
-        if (!url) return false;
-
-        if (whyCacheRef.current.has(url)) return false;
-        if (whyInFlightRef.current.has(url)) return false;
-
-        const hasPricing = it?.ml_price_clp != null && it?.suggested_price_25 != null;
-        return hasPricing;
+        const key = String(it?.id || it?.title || "").trim();
+        if (!key) return false;
+        if (whyCacheRef.current.has(key)) return false;
+        if (whyInFlightRef.current.has(key)) return false;
+        return true;
       });
 
       const maxConcurrent = 2;
@@ -565,7 +623,9 @@ export default function Dashboard() {
           <h1 className="text-3xl font-bold" style={{ color: "#2D5016" }}>
             Dashboard General
           </h1>
-          <p className="text-gray-600 mt-1">Resumen del sistema (negocio + automatización + control técnico)</p>
+          <p className="text-gray-600 mt-1">
+            Resumen del sistema (negocio + automatización + control técnico)
+          </p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -616,7 +676,10 @@ export default function Dashboard() {
         ) : (
           <div className="space-y-2">
             {suggestions.map((s) => (
-              <div key={s.id} className="p-3 rounded-lg border border-gray-100 flex items-start justify-between gap-3">
+              <div
+                key={s.id}
+                className="p-3 rounded-lg border border-gray-100 flex items-start justify-between gap-3"
+              >
                 <div>
                   <p className="font-semibold text-sm" style={{ color: "#2D5016" }}>
                     {s.title}
@@ -625,7 +688,11 @@ export default function Dashboard() {
                 </div>
                 <span
                   className="text-xs px-2 py-1 rounded-full border"
-                  style={{ backgroundColor: "#F5E6D3", color: "#2D5016", borderColor: "#E6D6C3" }}
+                  style={{
+                    backgroundColor: "#F5E6D3",
+                    color: "#2D5016",
+                    borderColor: "#E6D6C3",
+                  }}
                 >
                   {s.priority || "medium"}
                 </span>
@@ -665,20 +732,29 @@ export default function Dashboard() {
           ) : (
             <div className="space-y-3">
               {businessAlerts.map((a) => (
-                <div key={a.id} className="p-4 rounded-lg border border-gray-100 flex items-start justify-between gap-3">
+                <div
+                  key={a.id}
+                  className="p-4 rounded-lg border border-gray-100 flex items-start justify-between gap-3"
+                >
                   <div className="min-w-0">
                     <p className="text-sm font-semibold" style={{ color: "#2D5016" }}>
                       {formatAlertTitle(a)}
                     </p>
 
                     {formatAlertMessage(a) ? (
-                      <p className="text-xs text-gray-600 mt-1 break-words">{formatAlertMessage(a)}</p>
+                      <p className="text-xs text-gray-600 mt-1 break-words">
+                        {formatAlertMessage(a)}
+                      </p>
                     ) : null}
 
                     <div className="flex items-center gap-2 mt-2">
                       <span
                         className="text-[11px] px-2 py-0.5 rounded-full border"
-                        style={{ backgroundColor: "#F5E6D3", color: "#2D5016", borderColor: "#E6D6C3" }}
+                        style={{
+                          backgroundColor: "#F5E6D3",
+                          color: "#2D5016",
+                          borderColor: "#E6D6C3",
+                        }}
                         title="Fuente / tipo"
                       >
                         {a.source || "system"} • {a.type || "event"}
@@ -716,7 +792,7 @@ export default function Dashboard() {
                 Top Productos Ganadores (Chile)
               </h2>
               <p className="text-xs text-gray-500 mt-1">
-                15 fijos • precio sugerido x2.5 + ganancia/margen • señal retail incluida
+                Detector real v2 • score final + ángulo ganador + intención + enfoque orgánico/pagado
               </p>
             </div>
 
@@ -762,11 +838,11 @@ export default function Dashboard() {
             <div className="space-y-3">
               {winnersCurrentItems.map((p, idx) => (
                 <WinnerCard
-                  key={`${p.url || ""}-${winnersPage}-${idx}`}
+                  key={`${p.id || ""}-${winnersPage}-${idx}`}
                   idx={(winnersPage - 1) * winnersPageSize + idx}
                   item={p}
-                  why={whyByUrl[p?.url || p?.product_url] || null}
-                  whyLoading={!!whyLoadingByUrl[p?.url || p?.product_url]}
+                  why={whyByUrl[String(p?.id || p?.title || "")] || null}
+                  whyLoading={!!whyLoadingByUrl[String(p?.id || p?.title || "")]}
                   onWhyRefresh={() => fetchWinnerWhy(p, { force: true })}
                   onOpen={() => {
                     const url = p?.url || p?.product_url;
@@ -786,19 +862,27 @@ export default function Dashboard() {
             <Wrench className="w-5 h-5" />
             Errores Técnicos Recientes (Publicación)
           </h2>
-          <button onClick={() => navigate("/settings")} className="text-sm underline" style={{ color: "#2D5016" }}>
+          <button
+            onClick={() => navigate("/settings")}
+            className="text-sm underline"
+            style={{ color: "#2D5016" }}
+          >
             Ver logs
           </button>
         </div>
 
         {systemLogs.length === 0 ? (
-          <p className="text-gray-500 text-sm text-center py-6">No hay errores técnicos recientes.</p>
+          <p className="text-gray-500 text-sm text-center py-6">
+            No hay errores técnicos recientes.
+          </p>
         ) : (
           <div className="space-y-3">
             {systemLogs.map((l) => (
               <div key={l.id} className="p-4 rounded-lg border border-red-100 bg-red-50">
                 <p className="text-sm font-semibold text-red-700">{l.title || "Error"}</p>
-                {l.message && <pre className="text-xs text-red-700 mt-2 whitespace-pre-wrap">{l.message}</pre>}
+                {l.message && (
+                  <pre className="text-xs text-red-700 mt-2 whitespace-pre-wrap">{l.message}</pre>
+                )}
                 <p className="text-xs text-red-600 mt-2">
                   {new Date(l.created_at).toLocaleString("es-CL")} • {l.module || "general"}
                 </p>
@@ -814,10 +898,30 @@ export default function Dashboard() {
           Acciones Rápidas
         </h2>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <QuickButton icon={Sparkles} title="Generar Contenido" subtitle="Crear nuevo post" onClick={() => navigate("/content")} />
-          <QuickButton icon={Calendar} title="Ver Calendario" subtitle="Programar publicaciones" onClick={() => navigate("/calendar")} />
-          <QuickButton icon={BarChart3} title="Analítica" subtitle="Ver métricas" onClick={() => navigate("/analytics")} />
-          <QuickButton icon={Settings} title="Configuración" subtitle="Ajustar sistema" onClick={() => navigate("/settings")} />
+          <QuickButton
+            icon={Sparkles}
+            title="Generar Contenido"
+            subtitle="Crear nuevo post"
+            onClick={() => navigate("/content")}
+          />
+          <QuickButton
+            icon={Calendar}
+            title="Ver Calendario"
+            subtitle="Programar publicaciones"
+            onClick={() => navigate("/calendar")}
+          />
+          <QuickButton
+            icon={BarChart3}
+            title="Analítica"
+            subtitle="Ver métricas"
+            onClick={() => navigate("/analytics")}
+          />
+          <QuickButton
+            icon={Settings}
+            title="Configuración"
+            subtitle="Ajustar sistema"
+            onClick={() => navigate("/settings")}
+          />
         </div>
       </div>
     </div>
@@ -825,7 +929,7 @@ export default function Dashboard() {
 }
 
 // ======================
-// Winners Card + UI helpers (igual que tu versión)
+// Winners Card + UI helpers
 // ======================
 function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
   const title = item?.title || "Producto";
@@ -838,10 +942,10 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
   const profit = item?.profit_clp ?? null;
   const margin = item?.margin_pct ?? null;
 
-  const traffic = (item?.traffic_light_final || "yellow").toLowerCase();
+  const traffic = (item?.traffic_light_final || "green").toLowerCase();
   const htTier = item?.high_ticket_tier || null;
 
-  const hasPricing = mlPrice !== null && sellPrice !== null;
+  const hasPricing = mlPrice !== null || sellPrice !== null || profit !== null || margin !== null;
   const url = item?.url || item?.product_url;
 
   const signalType = item?.signal_type || null;
@@ -872,6 +976,7 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
                 <TrafficPill traffic={traffic} />
                 {htTier ? <HighTicketPill tier={htTier} /> : null}
                 {signalType ? <SignalPill type={signalType} /> : null}
+                {item?.intent_type ? <IntentPill type={item.intent_type} /> : null}
               </div>
 
               <div className="flex items-center gap-2 mt-2 flex-wrap">
@@ -882,52 +987,100 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
                     Score: <span className="font-semibold">{Number(score).toFixed(2)}</span>
                   </span>
                 ) : null}
+                {item?.status ? (
+                  <span className="text-[11px] text-gray-500">
+                    Estado: <span className="font-semibold">{item.status}</span>
+                  </span>
+                ) : null}
               </div>
             </div>
           </div>
 
-          <div className="mt-3 grid grid-cols-2 gap-3">
-            <Box label="Precio ML (costo)" value={mlPrice !== null ? moneyCLP(mlPrice) : "—"} strong />
-            <Box label="Precio sugerido (x2.5)" value={sellPrice !== null ? moneyCLP(sellPrice) : "—"} strong />
-            <Box label="Ganancia" value={profit !== null ? moneyCLP(profit) : "—"} accent />
-            <Box label="Margen" value={margin !== null ? `${Number(margin).toFixed(1)}%` : "—"} />
+          {/* Ángulo ganador */}
+          {(item?.winning_angle || item?.organic_angle || item?.paid_angle || item?.hook_text) && (
+            <div className="mt-3 grid grid-cols-1 gap-3">
+              {item?.winning_angle ? (
+                <AngleBox
+                  icon={Target}
+                  label="Ángulo ganador"
+                  value={item.winning_angle}
+                />
+              ) : null}
 
-            <Box label="Mejor precio retail" value={bestRetail !== null ? moneyCLP(bestRetail) : "—"} strong />
-            <Box label="Ofertas 7 días" value={offers7d !== null ? String(offers7d) : "—"} />
-          </div>
+              {item?.organic_angle ? (
+                <AngleBox
+                  icon={Compass}
+                  label="Enfoque orgánico"
+                  value={item.organic_angle}
+                />
+              ) : null}
+
+              {item?.paid_angle ? (
+                <AngleBox
+                  icon={TrendingUp}
+                  label="Enfoque pagado"
+                  value={item.paid_angle}
+                />
+              ) : null}
+
+              {item?.hook_text ? (
+                <AngleBox
+                  icon={Sparkles}
+                  label="Hook sugerido"
+                  value={item.hook_text}
+                />
+              ) : null}
+            </div>
+          )}
+
+          {/* Pricing solo si existe */}
+          {hasPricing ? (
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <Box label="Precio costo" value={mlPrice !== null ? moneyCLP(mlPrice) : "—"} strong />
+              <Box label="Precio sugerido" value={sellPrice !== null ? moneyCLP(sellPrice) : "—"} strong />
+              <Box label="Ganancia" value={profit !== null ? moneyCLP(profit) : "—"} accent />
+              <Box label="Margen" value={margin !== null ? `${Number(margin).toFixed(1)}%` : "—"} />
+              <Box label="Mejor precio retail" value={bestRetail !== null ? moneyCLP(bestRetail) : "—"} strong />
+              <Box label="Ofertas 7 días" value={offers7d !== null ? String(offers7d) : "—"} />
+            </div>
+          ) : null}
 
           <div className="mt-3 flex items-start justify-between gap-3">
-            {!hasPricing ? (
+            <div className="min-w-0">
               <p className="text-xs text-gray-500">
-                Falta pricing automático (ML). Cuando corras el backfill, se completan precio/ganancia/margen.
+                {why
+                  ? why
+                  : whyLoading
+                  ? "Generando explicación…"
+                  : "Producto priorizado por detector manual v2."}
               </p>
-            ) : (
-              <div className="min-w-0">
-                <p className="text-xs text-gray-500">
-                  {why ? why : whyLoading ? "Generando explicación IA…" : "Explicación IA lista para generarse (cache 7 días)."}
-                </p>
-              </div>
-            )}
+            </div>
 
-            {hasPricing && url ? (
-              <button
-                onClick={onWhyRefresh}
-                className="shrink-0 px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
-                title="Regenerar explicación IA"
-              >
-                IA ↻
-              </button>
-            ) : null}
+            <button
+              onClick={onWhyRefresh}
+              className="shrink-0 px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
+              title="Regenerar explicación"
+            >
+              IA ↻
+            </button>
           </div>
         </div>
 
         <div className="shrink-0 flex flex-col items-end gap-2">
-          <button onClick={onOpen} className="px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm" title="Abrir en MercadoLibre">
-            Ver <ExternalLink className="w-4 h-4 inline-block ml-1" />
-          </button>
+          {url ? (
+            <button
+              onClick={onOpen}
+              className="px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-gray-300 text-sm"
+              title="Abrir producto"
+            >
+              Ver <ExternalLink className="w-4 h-4 inline-block ml-1" />
+            </button>
+          ) : null}
 
-          {item?.price_fetched_at ? (
-            <span className="text-[11px] text-gray-400">{new Date(item.price_fetched_at).toLocaleString("es-CL")}</span>
+          {item?.created_at ? (
+            <span className="text-[11px] text-gray-400">
+              {new Date(item.created_at).toLocaleString("es-CL")}
+            </span>
           ) : null}
         </div>
       </div>
@@ -947,7 +1100,11 @@ function Box({ label, value, strong, accent }) {
       <p className="text-[11px] text-gray-500">{label}</p>
       <p
         className={`text-sm ${strong ? "font-semibold" : "font-medium"}`}
-        style={accent ? { color: "#D4A017", fontWeight: 700 } : { color: "#2D5016", fontWeight: strong ? 700 : 600 }}
+        style={
+          accent
+            ? { color: "#D4A017", fontWeight: 700 }
+            : { color: "#2D5016", fontWeight: strong ? 700 : 600 }
+        }
       >
         {value}
       </p>
@@ -955,18 +1112,36 @@ function Box({ label, value, strong, accent }) {
   );
 }
 
+function AngleBox({ icon: Icon, label, value }) {
+  return (
+    <div className="rounded-lg border border-gray-100 p-3 bg-[#fcfcfa]">
+      <div className="flex items-center gap-2 mb-1">
+        <Icon className="w-4 h-4" style={{ color: "#2D5016" }} />
+        <p className="text-[11px] text-gray-500">{label}</p>
+      </div>
+      <p className="text-sm font-medium" style={{ color: "#2D5016" }}>
+        {value}
+      </p>
+    </div>
+  );
+}
+
 function TrafficPill({ traffic }) {
-  const t = (traffic || "yellow").toLowerCase();
+  const t = (traffic || "green").toLowerCase();
   const map = {
     green: { label: "Ganador", bg: "#E9F7E7", fg: "#2D5016", bd: "#CFE8CB" },
     yellow: { label: "Descubrimiento", bg: "#FFF6D9", fg: "#7A5A00", bd: "#F1E0A5" },
     red: { label: "Explorar", bg: "#FDE8E8", fg: "#7A1E1E", bd: "#F6CACA" },
     blue: { label: "High Ticket", bg: "#E8F1FF", fg: "#1E3A8A", bd: "#C7DBFF" },
   };
-  const s = map[t] || map.yellow;
+  const s = map[t] || map.green;
 
   return (
-    <span className="text-[11px] px-2 py-0.5 rounded-full border" style={{ backgroundColor: s.bg, color: s.fg, borderColor: s.bd }} title={`Semáforo: ${s.label}`}>
+    <span
+      className="text-[11px] px-2 py-0.5 rounded-full border"
+      style={{ backgroundColor: s.bg, color: s.fg, borderColor: s.bd }}
+      title={`Semáforo: ${s.label}`}
+    >
       {s.label}
     </span>
   );
@@ -975,24 +1150,81 @@ function TrafficPill({ traffic }) {
 function SignalPill({ type }) {
   const t = String(type || "").toUpperCase();
   const map = {
-    ARBITRAJE_POSITIVO: { label: "ARBITRAJE +", bg: "#E9F7E7", fg: "#2D5016", bd: "#CFE8CB" },
-    UNDERVALUED_ML: { label: "UNDERVALUED", bg: "#FFF6D9", fg: "#7A5A00", bd: "#F1E0A5" },
-    NEUTRAL: { label: "NEUTRAL", bg: "#F3F4F6", fg: "#374151", bd: "#E5E7EB" },
+    ARBITRAJE_POSITIVO: {
+      label: "ARBITRAJE +",
+      bg: "#E9F7E7",
+      fg: "#2D5016",
+      bd: "#CFE8CB",
+    },
+    UNDERVALUED_ML: {
+      label: "UNDERVALUED",
+      bg: "#FFF6D9",
+      fg: "#7A5A00",
+      bd: "#F1E0A5",
+    },
+    NEUTRAL: {
+      label: "NEUTRAL",
+      bg: "#F3F4F6",
+      fg: "#374151",
+      bd: "#E5E7EB",
+    },
   };
-  const s = map[t] || { label: t || "SIGNAL", bg: "#F3F4F6", fg: "#374151", bd: "#E5E7EB" };
+  const s = map[t] || {
+    label: t || "SIGNAL",
+    bg: "#F3F4F6",
+    fg: "#374151",
+    bd: "#E5E7EB",
+  };
 
   return (
-    <span className="text-[11px] px-2 py-0.5 rounded-full border" style={{ backgroundColor: s.bg, color: s.fg, borderColor: s.bd }} title={`Signal: ${t}`}>
+    <span
+      className="text-[11px] px-2 py-0.5 rounded-full border"
+      style={{ backgroundColor: s.bg, color: s.fg, borderColor: s.bd }}
+      title={`Signal: ${t}`}
+    >
       {s.label}
     </span>
   );
 }
 
 function HighTicketPill({ tier }) {
-  const label = tier === "HT3_100K" ? "HT 100K+" : tier === "HT2_80K" ? "HT 80K+" : tier === "HT1_50K" ? "HT 50K+" : "High Ticket";
+  const label =
+    tier === "HT3_100K"
+      ? "HT 100K+"
+      : tier === "HT2_80K"
+      ? "HT 80K+"
+      : tier === "HT1_50K"
+      ? "HT 50K+"
+      : "High Ticket";
 
   return (
-    <span className="text-[11px] px-2 py-0.5 rounded-full border" style={{ backgroundColor: "#E8F1FF", color: "#1E3A8A", borderColor: "#C7DBFF" }} title="Producto high ticket">
+    <span
+      className="text-[11px] px-2 py-0.5 rounded-full border"
+      style={{ backgroundColor: "#E8F1FF", color: "#1E3A8A", borderColor: "#C7DBFF" }}
+      title="Producto high ticket"
+    >
+      {label}
+    </span>
+  );
+}
+
+function IntentPill({ type }) {
+  const t = String(type || "").toLowerCase();
+  const label =
+    t === "viaje"
+      ? "INTENT: VIAJE"
+      : t === "problema"
+      ? "INTENT: PROBLEMA"
+      : t === "regalo"
+      ? "INTENT: REGALO"
+      : `INTENT: ${String(type || "").toUpperCase()}`;
+
+  return (
+    <span
+      className="text-[11px] px-2 py-0.5 rounded-full border"
+      style={{ backgroundColor: "#F5E6D3", color: "#2D5016", borderColor: "#E6D6C3" }}
+      title="Intención principal detectada"
+    >
       {label}
     </span>
   );
@@ -1022,7 +1254,10 @@ function StatCard({ title, value, icon: Icon }) {
             {value}
           </p>
         </div>
-        <div className="w-12 h-12 rounded-lg flex items-center justify-center" style={{ backgroundColor: "#F5E6D3" }}>
+        <div
+          className="w-12 h-12 rounded-lg flex items-center justify-center"
+          style={{ backgroundColor: "#F5E6D3" }}
+        >
           <Icon className="w-6 h-6" style={{ color: "#2D5016" }} />
         </div>
       </div>
@@ -1032,7 +1267,10 @@ function StatCard({ title, value, icon: Icon }) {
 
 function QuickButton({ icon: Icon, title, subtitle, onClick }) {
   return (
-    <button onClick={onClick} className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left">
+    <button
+      onClick={onClick}
+      className="p-4 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors text-left"
+    >
       <Icon className="w-6 h-6 mb-2" style={{ color: "#2D5016" }} />
       <p className="font-medium text-sm">{title}</p>
       <p className="text-xs text-gray-500 mt-1">{subtitle}</p>
