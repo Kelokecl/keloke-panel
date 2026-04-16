@@ -119,130 +119,127 @@ export default function Dashboard() {
     return { profit, margin };
   }
 
-  // ==========================
+ // ==========================
 // ✅ NUEVO: Winners desde vista SQL real
 // ==========================
 async function fetchWinnersV2() {
-  const { data, error } = await supabase
-    .from('v_winner_products_v2_dashboard')
-    .select(`
-      id,
-      title,
-      product_url,
-      image_url,
-      suggested_price_clp,
-      profit_clp,
-      margin_pct,
-      winning_angle,
-      intent_type,
-      final_score
-    `)
-    .order('final_score', { ascending: false })
-    .limit(10);
+  const { data, error } = await sb(
+    supabase
+      .from("v_winner_products_v2_dashboard")
+      .select(`
+        id,
+        title,
+        product_url,
+        image_url,
+        suggested_price_clp,
+        profit_clp,
+        margin_pct,
+        winning_angle,
+        intent_type,
+        final_score
+      `)
+      .order("final_score", { ascending: false })
+      .limit(10),
+    "fetch v_winner_products_v2_dashboard",
+    10000
+  );
 
   if (error) {
-    console.error('Error fetching winners:', error);
+    console.error("Error fetching winners v2:", error);
     return [];
   }
 
   return data || [];
 }
 
-  // ==========================
-  // ✅ Mapeo vista SQL -> UI
-  // ==========================
-  function mapWinnerV2ToUI(x, idx = 0) {
-    const mlPrice = x?.ml_price_clp ?? x?.price ?? x?.ml_price ?? null;
-    const suggested =
-      x?.suggested_price_clp ??
-      x?.suggested_price_25 ??
-      (mlPrice !== null ? Math.round(Number(mlPrice) * 2.5) : null);
+ // ==========================
+// ✅ Mapeo vista SQL -> UI
+// ==========================
+function mapWinnerV2ToUI(x, idx = 0) {
+  const suggested =
+    x?.suggested_price_clp != null ? Number(x.suggested_price_clp) : null;
 
-    const { profit, margin } = calcProfitMargin(mlPrice, suggested);
+  const profit =
+    x?.profit_clp != null ? Number(x.profit_clp) : null;
 
-    const score =
-      x?.final_score ??
-      x?.score ??
-      x?.adjusted_winner_score ??
-      null;
+  const margin =
+    x?.margin_pct != null ? Number(x.margin_pct) : null;
 
-    const intentType = x?.intent_type || null;
-    const winningAngle = x?.winning_angle || null;
-    const hookType = x?.hook_type || null;
-    const hookText = x?.hook_text || null;
-    const organicAngle = x?.organic_angle || null;
-    const paidAngle = x?.paid_angle || null;
+  const score =
+    x?.final_score != null
+      ? Number(x.final_score)
+      : x?.adjusted_winner_score != null
+      ? Number(x.adjusted_winner_score)
+      : null;
 
-    const htTier =
-      suggested !== null && suggested >= 100000
-        ? "HT3_100K"
-        : suggested !== null && suggested >= 80000
-        ? "HT2_80K"
-        : suggested !== null && suggested >= 50000
-        ? "HT1_50K"
-        : null;
+  const intentType = x?.intent_type || null;
+  const winningAngle = x?.winning_angle || null;
 
-    const trafficLight =
-      x?.traffic_light_final ||
-      x?.traffic_light ||
-      (htTier ? "blue" : "green");
+  const htTier =
+    suggested !== null && suggested >= 100000
+      ? "HT3_100K"
+      : suggested !== null && suggested >= 80000
+      ? "HT2_80K"
+      : suggested !== null && suggested >= 50000
+      ? "HT1_50K"
+      : null;
 
-    const url = (x?.product_url || x?.url || "").trim();
+  const trafficLight =
+    x?.traffic_light_final ||
+    x?.traffic_light ||
+    (score !== null && score >= 8
+      ? "blue"
+      : score !== null && score >= 7
+      ? "green"
+      : "yellow");
 
-    return {
-      id: x?.id ?? idx + 1,
-      title: x?.title || "Producto",
-      url,
-      product_url: url,
-      image_url: x?.image_url || null,
+  const url = (x?.product_url || x?.url || "").trim();
 
-      keloke_category:
-        x?.keloke_category ||
-        x?.categoria ||
-        x?.category ||
-        x?.niche ||
-        "otros",
+  return {
+    id: x?.id ?? idx + 1,
+    title: x?.title || "Producto",
+    url,
+    product_url: url,
+    image_url: x?.image_url || null,
 
-      product_family: x?.product_family || "",
-      ml_price_clp: mlPrice,
-      suggested_price_25: suggested,
-      profit_clp: x?.profit_clp ?? profit,
-      margin_pct: x?.margin_pct ?? margin,
-      adjusted_winner_score: score,
-      traffic_light_final: trafficLight,
-      high_ticket_tier: htTier,
+    keloke_category:
+      x?.keloke_category ||
+      x?.categoria ||
+      x?.category ||
+      x?.niche ||
+      "otros",
 
-      signal_type: x?.signal_type ?? null,
-      offers_7d: x?.offers_7d ?? null,
-      best_retail_price_clp: x?.best_retail_price_clp ?? null,
-      last_retail_fetch_at: x?.last_retail_fetch_at ?? null,
+    product_family: x?.product_family || "",
 
-      winning_angle: winningAngle,
-      intent_type: intentType,
-      hook_type: hookType,
-      hook_text: hookText,
-      organic_angle: organicAngle,
-      paid_angle: paidAngle,
-      status: x?.status || "active",
+    // ✅ para WinnerCard
+    ml_price_clp: x?.ml_price_clp != null ? Number(x.ml_price_clp) : null,
+    suggested_price_25: suggested,
+    profit_clp: profit,
+    margin_pct: margin,
+    adjusted_winner_score: score,
 
-      created_at: x?.created_at || null,
-      price_fetched_at: x?.created_at || null,
-      page: 1,
-    };
-  }
+    traffic_light_final: trafficLight,
+    high_ticket_tier: htTier,
 
-  function dedupByTitleKeepFirst(arr) {
-    const seen = new Set();
-    const out = [];
-    for (const it of arr || []) {
-      const key = `${(it?.title || "").trim()}__${(it?.winning_angle || "").trim()}`;
-      if (!key.trim()) continue;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(it);
-    }
-    return out;
-  }
+    signal_type: x?.signal_type ?? null,
+    offers_7d: x?.offers_7d ?? null,
+    best_retail_price_clp:
+      x?.best_retail_price_clp != null ? Number(x.best_retail_price_clp) : null,
+    last_retail_fetch_at: x?.last_retail_fetch_at ?? null,
+
+    winning_angle: winningAngle,
+    intent_type: intentType,
+    hook_type: x?.hook_type || null,
+    hook_text: x?.hook_text || null,
+    organic_angle: x?.organic_angle || null,
+    paid_angle: x?.paid_angle || null,
+    status: x?.status || "active",
+
+    created_at: x?.created_at || null,
+    price_fetched_at: x?.created_at || null,
+    page: x?.page ?? 1,
+  };
+}
 
   // ==========================
   // ✅ IA: explicador local desde los nuevos campos
@@ -498,81 +495,93 @@ async function fetchWinnersV2() {
     }
   }
 
-  const winnersByPage = useMemo(() => {
-    const hasPage = (winningProducts || []).some((x) => x?.page != null);
-    if (hasPage) {
-      const map = new Map();
-      for (const w of winningProducts || []) {
-        const p = Number(w?.page || 1);
-        if (!map.has(p)) map.set(p, []);
-        map.get(p).push(w);
-      }
-      const obj = {};
-      [...map.keys()]
-        .sort((a, b) => a - b)
-        .forEach((k) => {
-          obj[k] = map.get(k);
-        });
-      return { mode: "page_field", pages: obj };
+  const safeWinningProducts = useMemo(() => {
+  return Array.isArray(winningProducts) ? winningProducts : [];
+}, [winningProducts]);
+
+const winnersByPage = useMemo(() => {
+  const hasPage = safeWinningProducts.some((x) => x?.page != null);
+
+  if (hasPage) {
+    const map = new Map();
+
+    for (const w of safeWinningProducts) {
+      const p = Number(w?.page || 1);
+      if (!map.has(p)) map.set(p, []);
+      map.get(p).push(w);
     }
 
-    const chunks = {};
-    const arr = winningProducts || [];
-    const totalPages = Math.max(1, Math.ceil(arr.length / winnersPageSize));
-    for (let p = 1; p <= totalPages; p++) {
-      const start = (p - 1) * winnersPageSize;
-      chunks[p] = arr.slice(start, start + winnersPageSize);
-    }
-    return { mode: "chunk", pages: chunks };
-  }, [winningProducts]);
-
-  const winnersTotalPages = useMemo(() => {
-    const keys = Object.keys(winnersByPage.pages || {});
-    if (!keys.length) return 1;
-    return Math.max(...keys.map((k) => Number(k)));
-  }, [winnersByPage]);
-
-  const winnersCurrentItems = useMemo(() => {
-    return winnersByPage.pages?.[winnersPage] || [];
-  }, [winnersByPage, winnersPage]);
-
-  useEffect(() => {
-    if (loading || error) return;
-
-    let cancelled = false;
-
-    async function run() {
-      const items = winnersCurrentItems || [];
-      if (!items.length) return;
-
-      const targets = items.filter((it) => {
-        const key = String(it?.id || it?.title || "").trim();
-        if (!key) return false;
-        if (whyCacheRef.current.has(key)) return false;
-        if (whyInFlightRef.current.has(key)) return false;
-        return true;
+    const obj = {};
+    [...map.keys()]
+      .sort((a, b) => a - b)
+      .forEach((k) => {
+        obj[k] = map.get(k);
       });
 
-      const maxConcurrent = 2;
-      let i = 0;
+    return { mode: "page_field", pages: obj };
+  }
 
-      async function worker() {
-        while (i < targets.length && !cancelled) {
-          const it = targets[i++];
-          await fetchWinnerWhy(it);
-        }
+  const chunks = {};
+  const totalPages = Math.max(
+    1,
+    Math.ceil(safeWinningProducts.length / winnersPageSize)
+  );
+
+  for (let p = 1; p <= totalPages; p++) {
+    const start = (p - 1) * winnersPageSize;
+    chunks[p] = safeWinningProducts.slice(start, start + winnersPageSize);
+  }
+
+  return { mode: "chunk", pages: chunks };
+}, [safeWinningProducts, winnersPageSize]);
+
+const winnersTotalPages = useMemo(() => {
+  const keys = Object.keys(winnersByPage.pages || {});
+  if (!keys.length) return 1;
+  return Math.max(...keys.map((k) => Number(k)));
+}, [winnersByPage]);
+
+const winnersCurrentItems = useMemo(() => {
+  return winnersByPage.pages?.[winnersPage] || [];
+}, [winnersByPage, winnersPage]);
+
+useEffect(() => {
+  if (loading || error) return;
+
+  let cancelled = false;
+
+  async function run() {
+    const items = winnersCurrentItems || [];
+    if (!items.length) return;
+
+    const targets = items.filter((it) => {
+      const key = String(it?.id || it?.title || "").trim();
+      if (!key) return false;
+      if (whyCacheRef.current.has(key)) return false;
+      if (whyInFlightRef.current.has(key)) return false;
+      return true;
+    });
+
+    const maxConcurrent = 2;
+    let i = 0;
+
+    async function worker() {
+      while (i < targets.length && !cancelled) {
+        const it = targets[i++];
+        await fetchWinnerWhy(it);
       }
-
-      await Promise.all(new Array(maxConcurrent).fill(0).map(worker));
     }
 
-    run();
+    await Promise.all(new Array(maxConcurrent).fill(0).map(worker));
+  }
 
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [winnersPage, winnersCurrentItems, loading, error]);
+  run();
+
+  return () => {
+    cancelled = true;
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [winnersPage, winnersCurrentItems, loading, error]);
 
   function formatAlertTitle(a) {
     const type = a?.type || "event";
