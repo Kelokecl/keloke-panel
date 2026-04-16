@@ -964,13 +964,68 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
   const traffic = (item?.traffic_light_final || "green").toLowerCase();
   const htTier = item?.high_ticket_tier || null;
 
-  const hasPricing =
-    mlPrice !== null || sellPrice !== null || profit !== null || margin !== null;
   const url = item?.url || item?.product_url;
-
   const signalType = item?.signal_type || null;
   const offers7d = item?.offers_7d ?? null;
   const bestRetail = item?.best_retail_price_clp ?? null;
+
+  const pricingBoxes = [
+    {
+      key: "ml",
+      label: "Precio costo",
+      value: mlPrice !== null ? moneyCLP(mlPrice) : null,
+      strong: true,
+    },
+    {
+      key: "sell",
+      label: "Precio sugerido",
+      value: sellPrice !== null ? moneyCLP(sellPrice) : null,
+      strong: true,
+    },
+    {
+      key: "profit",
+      label: "Ganancia",
+      value: profit !== null ? moneyCLP(profit) : null,
+      accent: true,
+    },
+    {
+      key: "margin",
+      label: "Margen",
+      value: margin !== null ? `${Number(margin).toFixed(1)}%` : null,
+    },
+    {
+      key: "retail",
+      label: "Mejor precio retail",
+      value: bestRetail !== null ? moneyCLP(bestRetail) : null,
+      strong: true,
+    },
+    {
+      key: "offers",
+      label: "Ofertas 7 días",
+      value: offers7d !== null ? String(offers7d) : null,
+    },
+  ].filter((box) => box.value !== null && box.value !== "");
+
+  const angleBoxes = [
+    item?.winning_angle
+      ? { key: "winning", icon: Target, label: "Ángulo ganador", value: item.winning_angle }
+      : null,
+    item?.organic_angle
+      ? { key: "organic", icon: Compass, label: "Enfoque orgánico", value: item.organic_angle }
+      : null,
+    item?.paid_angle
+      ? { key: "paid", icon: TrendingUp, label: "Enfoque pagado", value: item.paid_angle }
+      : null,
+    item?.hook_text
+      ? { key: "hook", icon: Sparkles, label: "Hook sugerido", value: item.hook_text }
+      : null,
+  ].filter(Boolean);
+
+  const explanationText = why
+    ? why
+    : whyLoading
+    ? "Generando explicación…"
+    : "Producto priorizado por detector manual v2.";
 
   return (
     <div className="p-4 rounded-xl border border-gray-100 hover:border-gray-200 transition-colors bg-white">
@@ -1016,57 +1071,36 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
             </div>
           </div>
 
-          {(item?.winning_angle || item?.organic_angle || item?.paid_angle || item?.hook_text) && (
+          {angleBoxes.length > 0 ? (
             <div className="mt-3 grid grid-cols-1 gap-3">
-              {item?.winning_angle ? (
-                <AngleBox icon={Target} label="Ángulo ganador" value={item.winning_angle} />
-              ) : null}
-
-              {item?.organic_angle ? (
-                <AngleBox icon={Compass} label="Enfoque orgánico" value={item.organic_angle} />
-              ) : null}
-
-              {item?.paid_angle ? (
-                <AngleBox icon={TrendingUp} label="Enfoque pagado" value={item.paid_angle} />
-              ) : null}
-
-              {item?.hook_text ? (
-                <AngleBox icon={Sparkles} label="Hook sugerido" value={item.hook_text} />
-              ) : null}
+              {angleBoxes.map((box) => (
+                <AngleBox
+                  key={box.key}
+                  icon={box.icon}
+                  label={box.label}
+                  value={box.value}
+                />
+              ))}
             </div>
-          )}
+          ) : null}
 
-          {hasPricing ? (
+          {pricingBoxes.length > 0 ? (
             <div className="mt-3 grid grid-cols-2 gap-3">
-              <Box label="Precio costo" value={mlPrice !== null ? moneyCLP(mlPrice) : "—"} strong />
-              <Box
-                label="Precio sugerido"
-                value={sellPrice !== null ? moneyCLP(sellPrice) : "—"}
-                strong
-              />
-              <Box label="Ganancia" value={profit !== null ? moneyCLP(profit) : "—"} accent />
-              <Box
-                label="Margen"
-                value={margin !== null ? `${Number(margin).toFixed(1)}%` : "—"}
-              />
-              <Box
-                label="Mejor precio retail"
-                value={bestRetail !== null ? moneyCLP(bestRetail) : "—"}
-                strong
-              />
-              <Box label="Ofertas 7 días" value={offers7d !== null ? String(offers7d) : "—"} />
+              {pricingBoxes.map((box) => (
+                <Box
+                  key={box.key}
+                  label={box.label}
+                  value={box.value}
+                  strong={box.strong}
+                  accent={box.accent}
+                />
+              ))}
             </div>
           ) : null}
 
           <div className="mt-3 flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <p className="text-xs text-gray-500">
-                {why
-                  ? why
-                  : whyLoading
-                  ? "Generando explicación…"
-                  : "Producto priorizado por detector manual v2."}
-              </p>
+              <p className="text-xs text-gray-500">{explanationText}</p>
             </div>
 
             <button
@@ -1108,6 +1142,8 @@ function moneyCLP(n) {
 }
 
 function Box({ label, value, strong, accent }) {
+  if (value === null || value === undefined || value === "") return null;
+
   return (
     <div className="rounded-lg border border-gray-100 p-3">
       <p className="text-[11px] text-gray-500">{label}</p>
@@ -1126,6 +1162,8 @@ function Box({ label, value, strong, accent }) {
 }
 
 function AngleBox({ icon: Icon, label, value }) {
+  if (!value) return null;
+
   return (
     <div className="rounded-lg border border-gray-100 p-3 bg-[#fcfcfa]">
       <div className="flex items-center gap-2 mb-1">
