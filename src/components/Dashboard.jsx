@@ -120,32 +120,33 @@ export default function Dashboard() {
   }
 
   // ==========================
-  // ✅ NUEVO: Winners desde vista SQL real
-  // ==========================
-  async function fetchWinnersV2() {
-    const { data: winners, error } = await supabase
-  .from('v_winner_products_v2_dashboard')
-  .select(`
-    id,
-    title,
-    product_url,
-    image_url,
-    suggested_price_clp,
-    profit_clp,
-    margin_pct,
-    winning_angle,
-    intent_type,
-    final_score
-  `)
-  .order('final_score', { ascending: false })
-  .limit(10);
-      "fetch v_winner_products_v2_dashboard",
-      10000
-    );
+// ✅ NUEVO: Winners desde vista SQL real
+// ==========================
+async function fetchWinnersV2() {
+  const { data, error } = await supabase
+    .from('v_winner_products_v2_dashboard')
+    .select(`
+      id,
+      title,
+      product_url,
+      image_url,
+      suggested_price_clp,
+      profit_clp,
+      margin_pct,
+      winning_angle,
+      intent_type,
+      final_score
+    `)
+    .order('final_score', { ascending: false })
+    .limit(10);
 
-    if (error) throw error;
-    return data || [];
+  if (error) {
+    console.error('Error fetching winners:', error);
+    return [];
   }
+
+  return data || [];
+}
 
   // ==========================
   // ✅ Mapeo vista SQL -> UI
