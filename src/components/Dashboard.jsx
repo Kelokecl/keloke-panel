@@ -123,13 +123,22 @@ export default function Dashboard() {
   // ✅ NUEVO: Winners desde vista SQL real
   // ==========================
   async function fetchWinnersV2() {
-    const { data, error } = await sb(
-      supabase
-        .from("v_winner_products_v2_dashboard")
-        .select("*")
-        .eq("status", "active")
-        .order("final_score", { ascending: false })
-        .limit(15),
+    const { data: winners, error } = await supabase
+  .from('v_winner_products_v2_dashboard')
+  .select(`
+    id,
+    title,
+    product_url,
+    image_url,
+    suggested_price_clp,
+    profit_clp,
+    margin_pct,
+    winning_angle,
+    intent_type,
+    final_score
+  `)
+  .order('final_score', { ascending: false })
+  .limit(10);
       "fetch v_winner_products_v2_dashboard",
       10000
     );
