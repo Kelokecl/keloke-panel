@@ -36,6 +36,18 @@ async function sb(promise, label, ms = 9000) {
   return withTimeout(promise, ms, label);
 }
 
+function dedupByTitleKeepFirst(items = []) {
+  const seen = new Set();
+  const out = [];
+  for (const item of items) {
+    const key = String(item?.title || "").trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
 // fetch JSON con AbortController + timeout
 async function fetchJson(
   url,
@@ -106,145 +118,143 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function calcProfitMargin(mlPrice, suggestedPrice) {
-    if (mlPrice == null || suggestedPrice == null) return { profit: null, margin: null };
-    const cost = Number(mlPrice);
-    const sell = Number(suggestedPrice);
-    if (!Number.isFinite(cost) || !Number.isFinite(sell) || sell <= 0) {
-      return { profit: null, margin: null };
+  // ==========================
+  // ✅ NUEVO: Winners desde vista SQL real
+  // ==========================
+  async function fetchWinnersV2() {
+    const { data, error } = await sb(
+      supabase
+        .from("v_winner_products_v2_dashboard")
+        .select(`
+          id,
+          title,
+          product_url,
+          image_url,
+          cost_clp,
+          suggested_price_clp,
+          profit_clp,
+          margin_pct,
+          ml_price_clp,
+          best_retail_price_clp,
+          retail_delta_clp,
+          retail_delta_pct,
+          offers_7d,
+          signal_score,
+          winning_angle,
+          intent_type,
+          organic_focus,
+          paid_focus,
+          hook,
+          secondary_hook,
+          problem_solved,
+          target_audience,
+          final_score,
+          status,
+          created_at
+        `)
+        .order("final_score", { ascending: false })
+        .limit(10),
+      "fetch v_winner_products_v2_dashboard",
+      10000
+    );
+
+    if (error) {
+      console.error("Error fetching winners v2:", error);
+      return [];
     }
 
-    const profit = Math.round(sell - cost);
-    const margin = (profit / sell) * 100;
-    return { profit, margin };
+    return data || [];
   }
 
- // ==========================
-// ✅ NUEVO: Winners desde vista SQL real
-// ==========================
-async function fetchWinnersV2() {
-  const { data, error } = await sb(
-    supabase
-      .from("winner_products_v2")
-      .select(`
-  id,
-  title,
-  product_url,
-  image_url,
-  price_clp as suggested_price_clp,
-  margin_clp as profit_clp,
-  margin_pct,
-  winning_angle,
-  intent_type,
-  final_score
-`)
-.eq("status", "draft")
-.order("final_score", { ascending: false })
-.limit(10)
-    "fetch v_winner_products_v2_dashboard",
-    10000
-  );
+  // ==========================
+  // ✅ Mapeo vista SQL -> UI
+  // ==========================
+  function mapWinnerV2ToUI(x, idx = 0) {
+    const suggested =
+      x?.suggested_price_clp != null ? Number(x.suggested_price_clp) : null;
 
-  if (error) {
-    console.error("Error fetching winners v2:", error);
-    return [];
+    const profit =
+      x?.profit_clp != null ? Number(x.profit_clp) : null;
+
+    const margin =
+      x?.margin_pct != null ? Number(x.margin_pct) : null;
+
+    const score =
+      x?.final_score != null
+        ? Number(x.final_score)
+        : x?.adjusted_winner_score != null
+        ? Number(x.adjusted_winner_score)
+        : null;
+
+    const intentType = x?.intent_type || null;
+    const winningAngle = x?.winning_angle || null;
+
+    const htTier =
+      suggested !== null && suggested >= 100000
+        ? "HT3_100K"
+        : suggested !== null && suggested >= 80000
+        ? "HT2_80K"
+        : suggested !== null && suggested >= 50000
+        ? "HT1_50K"
+        : null;
+
+    const trafficLight =
+      score !== null && score >= 8
+        ? "blue"
+        : score !== null && score >= 7
+        ? "green"
+        : "yellow";
+
+    const url = (x?.product_url || x?.url || "").trim();
+
+    return {
+      id: x?.id ?? idx + 1,
+      title: x?.title || "Producto",
+      url,
+      product_url: url,
+      image_url: x?.image_url || null,
+
+      keloke_category:
+        x?.keloke_category ||
+        x?.categoria ||
+        x?.category ||
+        x?.niche ||
+        x?.intent_type ||
+        "otros",
+
+      product_family: x?.product_family || "",
+
+      ml_price_clp: x?.ml_price_clp != null ? Number(x.ml_price_clp) : null,
+      suggested_price_25: suggested,
+      profit_clp: profit,
+      margin_pct: margin,
+      adjusted_winner_score: score,
+
+      traffic_light_final: trafficLight,
+      high_ticket_tier: htTier,
+
+      signal_type: x?.signal_type ?? null,
+      offers_7d: x?.offers_7d ?? null,
+      best_retail_price_clp:
+        x?.best_retail_price_clp != null ? Number(x.best_retail_price_clp) : null,
+      last_retail_fetch_at: x?.last_retail_fetch_at ?? null,
+
+      winning_angle: winningAngle,
+      intent_type: intentType,
+      hook_type: x?.hook_type || null,
+      hook_text: x?.hook || null,
+      organic_angle: x?.organic_focus || null,
+      paid_angle: x?.paid_focus || null,
+      status: x?.status || "active",
+
+      created_at: x?.created_at || null,
+      price_fetched_at: x?.created_at || null,
+      page: null,
+    };
   }
-
-  return data || [];
-}
-
- // ==========================
-// ✅ Mapeo vista SQL -> UI
-// ==========================
-function mapWinnerV2ToUI(x, idx = 0) {
-  const suggested =
-    x?.suggested_price_clp != null ? Number(x.suggested_price_clp) : null;
-
-  const profit =
-    x?.profit_clp != null ? Number(x.profit_clp) : null;
-
-  const margin =
-    x?.margin_pct != null ? Number(x.margin_pct) : null;
-
-  const score =
-    x?.final_score != null
-      ? Number(x.final_score)
-      : x?.adjusted_winner_score != null
-      ? Number(x.adjusted_winner_score)
-      : null;
-
-  const intentType = x?.intent_type || null;
-  const winningAngle = x?.winning_angle || null;
-
-  const htTier =
-    suggested !== null && suggested >= 100000
-      ? "HT3_100K"
-      : suggested !== null && suggested >= 80000
-      ? "HT2_80K"
-      : suggested !== null && suggested >= 50000
-      ? "HT1_50K"
-      : null;
-
-  const trafficLight =
-    x?.traffic_light_final ||
-    x?.traffic_light ||
-    (score !== null && score >= 8
-      ? "blue"
-      : score !== null && score >= 7
-      ? "green"
-      : "yellow");
-
-  const url = (x?.product_url || x?.url || "").trim();
-
-  return {
-    id: x?.id ?? idx + 1,
-    title: x?.title || "Producto",
-    url,
-    product_url: url,
-    image_url: x?.image_url || null,
-
-    keloke_category:
-      x?.keloke_category ||
-      x?.categoria ||
-      x?.category ||
-      x?.niche ||
-      "otros",
-
-    product_family: x?.product_family || "",
-
-    // ✅ para WinnerCard
-    ml_price_clp: x?.ml_price_clp != null ? Number(x.ml_price_clp) : null,
-    suggested_price_25: suggested,
-    profit_clp: profit,
-    margin_pct: margin,
-    adjusted_winner_score: score,
-
-    traffic_light_final: trafficLight,
-    high_ticket_tier: htTier,
-
-    signal_type: x?.signal_type ?? null,
-    offers_7d: x?.offers_7d ?? null,
-    best_retail_price_clp:
-      x?.best_retail_price_clp != null ? Number(x.best_retail_price_clp) : null,
-    last_retail_fetch_at: x?.last_retail_fetch_at ?? null,
-
-    winning_angle: winningAngle,
-    intent_type: intentType,
-    hook_type: x?.hook_type || null,
-    hook_text: x?.hook_text || null,
-    organic_angle: x?.organic_angle || null,
-    paid_angle: x?.paid_angle || null,
-    status: x?.status || "active",
-
-    created_at: x?.created_at || null,
-    price_fetched_at: x?.created_at || null,
-    page: x?.page ?? 1,
-  };
-}
 
   // ==========================
   // ✅ IA: explicador local desde los nuevos campos
-  // (sin depender de winner-why viejo)
   // ==========================
   async function fetchWinnerWhy(item, { force = false } = {}) {
     const key = String(item?.id || item?.title || "").trim();
@@ -366,7 +376,6 @@ function mapWinnerV2ToUI(x, idx = 0) {
       setError(null);
       setLoading(true);
 
-      // ====== STATS ======
       const [productsRes, contentRes, automationsRes, pendingAlertsRes] =
         await Promise.all([
           sb(
@@ -410,7 +419,6 @@ function mapWinnerV2ToUI(x, idx = 0) {
         pendingBusinessAlerts: pendingAlertsRes.count || 0,
       });
 
-      // ====== FEEDS ======
       const [suggRes, alertsUnreadRes, alertsFallbackRes, logsRes] =
         await Promise.all([
           sb(
@@ -463,7 +471,6 @@ function mapWinnerV2ToUI(x, idx = 0) {
       const fallback = alertsFallbackRes.data || [];
       setBusinessAlerts(unread.length > 0 ? unread : fallback);
 
-      // ====== NUEVO detector real ======
       let winnersData = [];
       try {
         const rows = await fetchWinnersV2();
@@ -497,92 +504,92 @@ function mapWinnerV2ToUI(x, idx = 0) {
   }
 
   const safeWinningProducts = useMemo(() => {
-  return Array.isArray(winningProducts) ? winningProducts : [];
-}, [winningProducts]);
+    return Array.isArray(winningProducts) ? winningProducts : [];
+  }, [winningProducts]);
 
-const winnersByPage = useMemo(() => {
-  const hasPage = safeWinningProducts.some((x) => x?.page != null);
+  const winnersByPage = useMemo(() => {
+    const hasPage = safeWinningProducts.some((x) => x?.page != null);
 
-  if (hasPage) {
-    const map = new Map();
+    if (hasPage) {
+      const map = new Map();
 
-    for (const w of safeWinningProducts) {
-      const p = Number(w?.page || 1);
-      if (!map.has(p)) map.set(p, []);
-      map.get(p).push(w);
+      for (const w of safeWinningProducts) {
+        const p = Number(w?.page || 1);
+        if (!map.has(p)) map.set(p, []);
+        map.get(p).push(w);
+      }
+
+      const obj = {};
+      [...map.keys()]
+        .sort((a, b) => a - b)
+        .forEach((k) => {
+          obj[k] = map.get(k);
+        });
+
+      return { mode: "page_field", pages: obj };
     }
 
-    const obj = {};
-    [...map.keys()]
-      .sort((a, b) => a - b)
-      .forEach((k) => {
-        obj[k] = map.get(k);
+    const chunks = {};
+    const totalPages = Math.max(
+      1,
+      Math.ceil(safeWinningProducts.length / winnersPageSize)
+    );
+
+    for (let p = 1; p <= totalPages; p++) {
+      const start = (p - 1) * winnersPageSize;
+      chunks[p] = safeWinningProducts.slice(start, start + winnersPageSize);
+    }
+
+    return { mode: "chunk", pages: chunks };
+  }, [safeWinningProducts, winnersPageSize]);
+
+  const winnersTotalPages = useMemo(() => {
+    const keys = Object.keys(winnersByPage.pages || {});
+    if (!keys.length) return 1;
+    return Math.max(...keys.map((k) => Number(k)));
+  }, [winnersByPage]);
+
+  const winnersCurrentItems = useMemo(() => {
+    return winnersByPage.pages?.[winnersPage] || [];
+  }, [winnersByPage, winnersPage]);
+
+  useEffect(() => {
+    if (loading || error) return;
+
+    let cancelled = false;
+
+    async function run() {
+      const items = winnersCurrentItems || [];
+      if (!items.length) return;
+
+      const targets = items.filter((it) => {
+        const key = String(it?.id || it?.title || "").trim();
+        if (!key) return false;
+        if (whyCacheRef.current.has(key)) return false;
+        if (whyInFlightRef.current.has(key)) return false;
+        return true;
       });
 
-    return { mode: "page_field", pages: obj };
-  }
+      const maxConcurrent = 2;
+      let i = 0;
 
-  const chunks = {};
-  const totalPages = Math.max(
-    1,
-    Math.ceil(safeWinningProducts.length / winnersPageSize)
-  );
-
-  for (let p = 1; p <= totalPages; p++) {
-    const start = (p - 1) * winnersPageSize;
-    chunks[p] = safeWinningProducts.slice(start, start + winnersPageSize);
-  }
-
-  return { mode: "chunk", pages: chunks };
-}, [safeWinningProducts, winnersPageSize]);
-
-const winnersTotalPages = useMemo(() => {
-  const keys = Object.keys(winnersByPage.pages || {});
-  if (!keys.length) return 1;
-  return Math.max(...keys.map((k) => Number(k)));
-}, [winnersByPage]);
-
-const winnersCurrentItems = useMemo(() => {
-  return winnersByPage.pages?.[winnersPage] || [];
-}, [winnersByPage, winnersPage]);
-
-useEffect(() => {
-  if (loading || error) return;
-
-  let cancelled = false;
-
-  async function run() {
-    const items = winnersCurrentItems || [];
-    if (!items.length) return;
-
-    const targets = items.filter((it) => {
-      const key = String(it?.id || it?.title || "").trim();
-      if (!key) return false;
-      if (whyCacheRef.current.has(key)) return false;
-      if (whyInFlightRef.current.has(key)) return false;
-      return true;
-    });
-
-    const maxConcurrent = 2;
-    let i = 0;
-
-    async function worker() {
-      while (i < targets.length && !cancelled) {
-        const it = targets[i++];
-        await fetchWinnerWhy(it);
+      async function worker() {
+        while (i < targets.length && !cancelled) {
+          const it = targets[i++];
+          await fetchWinnerWhy(it);
+        }
       }
+
+      await Promise.all(new Array(maxConcurrent).fill(0).map(worker));
     }
 
-    await Promise.all(new Array(maxConcurrent).fill(0).map(worker));
-  }
+    run();
 
-  run();
-
-  return () => {
-    cancelled = true;
-  };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [winnersPage, winnersCurrentItems, loading, error]);
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [winnersPage, winnersCurrentItems, loading, error]);
 
   function formatAlertTitle(a) {
     const type = a?.type || "event";
@@ -637,7 +644,6 @@ useEffect(() => {
 
   return (
     <div className="p-6 space-y-6">
-      {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold" style={{ color: "#2D5016" }}>
@@ -665,7 +671,6 @@ useEffect(() => {
         </div>
       </div>
 
-      {/* Stats */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatCard title="Productos Activos" value={stats.totalProducts} icon={ShoppingBag} />
         <StatCard title="Contenido Programado" value={stats.scheduledContent} icon={Calendar} />
@@ -673,7 +678,6 @@ useEffect(() => {
         <StatCard title="Alertas Pendientes (Negocio)" value={stats.pendingBusinessAlerts} icon={Bell} />
       </div>
 
-      {/* Suggestions */}
       <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: "#2D5016" }}>
@@ -722,9 +726,7 @@ useEffect(() => {
         )}
       </div>
 
-      {/* Alerts + Winners */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Business Alerts */}
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-bold" style={{ color: "#2D5016" }}>
@@ -804,7 +806,6 @@ useEffect(() => {
           )}
         </div>
 
-        {/* Winners */}
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
           <div className="flex items-start justify-between gap-4 mb-4">
             <div>
@@ -875,7 +876,6 @@ useEffect(() => {
         </div>
       </div>
 
-      {/* Technical logs */}
       <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: "#2D5016" }}>
@@ -912,7 +912,6 @@ useEffect(() => {
         )}
       </div>
 
-      {/* Quick actions */}
       <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
         <h2 className="text-xl font-bold mb-4" style={{ color: "#2D5016" }}>
           Acciones Rápidas
@@ -965,7 +964,8 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
   const traffic = (item?.traffic_light_final || "green").toLowerCase();
   const htTier = item?.high_ticket_tier || null;
 
-  const hasPricing = mlPrice !== null || sellPrice !== null || profit !== null || margin !== null;
+  const hasPricing =
+    mlPrice !== null || sellPrice !== null || profit !== null || margin !== null;
   const url = item?.url || item?.product_url;
 
   const signalType = item?.signal_type || null;
@@ -1016,51 +1016,44 @@ function WinnerCard({ idx, item, why, whyLoading, onWhyRefresh, onOpen }) {
             </div>
           </div>
 
-          {/* Ángulo ganador */}
           {(item?.winning_angle || item?.organic_angle || item?.paid_angle || item?.hook_text) && (
             <div className="mt-3 grid grid-cols-1 gap-3">
               {item?.winning_angle ? (
-                <AngleBox
-                  icon={Target}
-                  label="Ángulo ganador"
-                  value={item.winning_angle}
-                />
+                <AngleBox icon={Target} label="Ángulo ganador" value={item.winning_angle} />
               ) : null}
 
               {item?.organic_angle ? (
-                <AngleBox
-                  icon={Compass}
-                  label="Enfoque orgánico"
-                  value={item.organic_angle}
-                />
+                <AngleBox icon={Compass} label="Enfoque orgánico" value={item.organic_angle} />
               ) : null}
 
               {item?.paid_angle ? (
-                <AngleBox
-                  icon={TrendingUp}
-                  label="Enfoque pagado"
-                  value={item.paid_angle}
-                />
+                <AngleBox icon={TrendingUp} label="Enfoque pagado" value={item.paid_angle} />
               ) : null}
 
               {item?.hook_text ? (
-                <AngleBox
-                  icon={Sparkles}
-                  label="Hook sugerido"
-                  value={item.hook_text}
-                />
+                <AngleBox icon={Sparkles} label="Hook sugerido" value={item.hook_text} />
               ) : null}
             </div>
           )}
 
-          {/* Pricing solo si existe */}
           {hasPricing ? (
             <div className="mt-3 grid grid-cols-2 gap-3">
               <Box label="Precio costo" value={mlPrice !== null ? moneyCLP(mlPrice) : "—"} strong />
-              <Box label="Precio sugerido" value={sellPrice !== null ? moneyCLP(sellPrice) : "—"} strong />
+              <Box
+                label="Precio sugerido"
+                value={sellPrice !== null ? moneyCLP(sellPrice) : "—"}
+                strong
+              />
               <Box label="Ganancia" value={profit !== null ? moneyCLP(profit) : "—"} accent />
-              <Box label="Margen" value={margin !== null ? `${Number(margin).toFixed(1)}%` : "—"} />
-              <Box label="Mejor precio retail" value={bestRetail !== null ? moneyCLP(bestRetail) : "—"} strong />
+              <Box
+                label="Margen"
+                value={margin !== null ? `${Number(margin).toFixed(1)}%` : "—"}
+              />
+              <Box
+                label="Mejor precio retail"
+                value={bestRetail !== null ? moneyCLP(bestRetail) : "—"}
+                strong
+              />
               <Box label="Ofertas 7 días" value={offers7d !== null ? String(offers7d) : "—"} />
             </div>
           ) : null}
