@@ -125,21 +125,22 @@ export default function Dashboard() {
 async function fetchWinnersV2() {
   const { data, error } = await sb(
     supabase
-      .from("v_winner_products_v2_dashboard")
+      .from("winner_products_v2")
       .select(`
-        id,
-        title,
-        product_url,
-        image_url,
-        suggested_price_clp,
-        profit_clp,
-        margin_pct,
-        winning_angle,
-        intent_type,
-        final_score
-      `)
-      .order("final_score", { ascending: false })
-      .limit(10),
+  id,
+  title,
+  product_url,
+  image_url,
+  price_clp as suggested_price_clp,
+  margin_clp as profit_clp,
+  margin_pct,
+  winning_angle,
+  intent_type,
+  final_score
+`)
+.eq("status", "draft")
+.order("final_score", { ascending: false })
+.limit(10)
     "fetch v_winner_products_v2_dashboard",
     10000
   );
