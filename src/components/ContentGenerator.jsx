@@ -1,6 +1,8 @@
 // ContentGenerator.jsx
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import CreativeStudioTools from './CreativeStudioTools';
+import {buildCreativeCaption} from '../lib/creativeCopy';
 import {
   FileText, Image as ImageIcon, Video, Sparkles,
   Download, Copy, Share2, Eye, Wand2, RefreshCw,
@@ -50,6 +52,23 @@ export default function ContentGenerator() {
   const [ageRange, setAgeRange] = useState('25-45');
   const [interests, setInterests] = useState('');
   const [tone, setTone] = useState('profesional');
+  const [brief,setBrief]=useState('');
+  const [destinationUrl,setDestinationUrl]=useState('');
+  const [engine,setEngine]=useState(null);
+  const [checkingEngine,setCheckingEngine]=useState(false);
+  const [drafts,setDrafts]=useState([]);
+  async function loadDrafts(){const {data}=await supabase.from('generated_content').select('id,title,product_id,platform,content_type,created_at').eq('status','draft').order('created_at',{ascending:false}).limit(8);setDrafts(data||[])}
+  async function restoreDraft(id){const {data,error}=await supabase.from('generated_content').select('*').eq('id',id).eq('status','draft').single();if(error){setStatusMsg({type:'err',text:'No pudimos abrir el borrador.'});return}setSelectedProduct(data.product_id||'');setPlatform(data.platform||'instagram');setContentType(data.content_type||'post');setBrief(data.creative_payload?.brief||'');setDestinationUrl(data.creative_payload?.destination_url||'');setGeneratedContent({...data,...data.creative_payload});}
+  const activeProduct=products.find(p=>String(p.id)===String(selectedProduct))||null;
+  useEffect(()=>{supabase.from('keloke_runtime_checks').select('payload').eq('key','capabilities').maybeSingle().then(({data})=>{setEngine(data?.payload||null);if(!data)checkEngine()});},[]);
+  async function checkEngine(){setCheckingEngine(true);try{const {data,error}=await supabase.functions.invoke('keloke-capabilities',{body:{}});if(error||!data?.ok)throw new Error('No pudimos comprobar los accesos. Revisa tu sesión.');setEngine(data);setStatusMsg({type:'info',text:data.openai?.text_model?'Motor disponible: '+data.openai.text_model:'El motor de IA requiere revisar su acceso.'});}catch(e){setStatusMsg({type:'err',text:e.message})}finally{setCheckingEngine(false)}}
+  async function setCreativeAsset(url,type){
+    if(!generatedContent?.id)throw new Error('Genera y guarda el copy antes de añadir una pieza.');
+    const patch={asset_url:url,asset_type:type,preview_url:url,...(type==='video'?{content_type:'reel'}:{})};
+    const {error}=await supabase.from('generated_content').update(patch).eq('id',generatedContent.id).eq('status','draft');
+    if(error)throw new Error('No pudimos guardar la pieza en el borrador.');
+    setGeneratedContent(previous=>({...previous,...patch}));if(type==='video'){setContentType('reel');setVideoUrl(url)}
+  }
 
   // retry / regen
   const [lastRequest, setLastRequest] = useState(null);
@@ -64,6 +83,7 @@ export default function ContentGenerator() {
 
   useEffect(() => {
     loadProducts();
+    loadDrafts();
     return () => {
       try {
         if (genAbortRef.current) genAbortRef.current.abort();
@@ -110,13 +130,12 @@ export default function ContentGenerator() {
 
   const loadProducts = async () => {
     try {
-      // opcional: sincroniza
-      await supabase.functions.invoke('sync-shopify-products', { body: { limit: 100 } });
+      // Read cached catalog first. Synchronization is an explicit user action.
 
       // Nota: intento leer image_urls si existe, sino no pasa nada
       const { data, error } = await supabase
         .from('products')
-        .select('id, name, price, currency, image_url, image_urls, video_url, shopify_product_id, created_at')
+        .select('id, name, description, price, currency, image_url, image_urls, video_url, shopify_product_id, created_at')
         .order('created_at', { ascending: false })
         .limit(200);
 
@@ -194,6 +213,9 @@ export default function ContentGenerator() {
       product_id: product?.id ?? null,
       product_name: product?.name || 'Producto Keloke',
       product_price: product?.price ?? null,
+      product_description: product?.description || '',
+      brief,
+      destination_url: destinationUrl,
       product_currency: product?.currency || 'CLP',
       product_image_url: product?.image_url || null,
 
@@ -222,7 +244,7 @@ export default function ContentGenerator() {
     const controller = new AbortController();
     genAbortRef.current = controller;
 
-    const timeoutMs = 25000;
+    const timeoutMs = 95000;
     const t = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
@@ -230,7 +252,8 @@ export default function ContentGenerator() {
         body: payload,
         signal: controller.signal,
       });
-      if (error) throw error;
+      if (error) {const detail=await error.context?.json?.().catch(()=>null);throw new Error(detail?.error||error.message||'La IA no pudo completar la generación.');}
+      if(!data?.ok)throw new Error(data?.error||'La IA no pudo completar la generación.');
       return data;
     } finally {
       clearTimeout(t);
@@ -238,12 +261,13 @@ export default function ContentGenerator() {
   };
 
   const normalizeGenerated = (raw, payload, product) => {
-    const fallback = generateContentByStrategy(payload, product);
-    if (!raw || typeof raw !== 'object') return fallback;
+    const fallback = {title:'',body:'',caption:'',hashtags:'',cta:'',preview_url:null};
+    if (!raw || typeof raw !== 'object' || !raw.ok || !raw.title || !raw.caption) throw new Error('No hay contenido generado por IA.');
 
     const mp4 = payload?.video_asset_url || null;
 
     return {
+      ...raw,
       title: raw.title ?? fallback.title,
       body: raw.body ?? fallback.body,
       caption: raw.caption ?? fallback.caption,
@@ -287,6 +311,7 @@ export default function ContentGenerator() {
 
       asset_url: content.asset_url ?? null,
       asset_type: content.asset_type ?? null,
+      creative_payload: {variants:content.variants||[],scene_script:content.scene_script||[],voiceover_script:content.voiceover_script||'',on_screen_text:content.on_screen_text||[],hook_0_2s:content.hook_0_2s||'',image_prompt:content.image_prompt||'',creative_rationale:content.creative_rationale||'',model:content.model,brief:payload.brief,destination_url:payload.destination_url},
     };
 
     const { data: saved, error } = await supabase
@@ -310,7 +335,7 @@ export default function ContentGenerator() {
         text: 'Se liberó el estado de carga por seguridad (watchdog). Si pasa seguido, el timeout viene del backend.'
       });
       clearStatusSoon(4500);
-    }, 35000);
+    }, 100000);
   };
 
   const stopWatchdog = () => {
@@ -337,21 +362,7 @@ export default function ContentGenerator() {
       const payload = buildPayload(product);
       setLastRequest({ payload, product });
 
-      let raw = null;
-      try {
-        raw = await generateViaEdgeFunction(payload);
-      } catch (edgeErr) {
-        const msg = String(edgeErr?.message || edgeErr);
-        console.error('generate-content failed:', edgeErr);
-
-        if (msg.toLowerCase().includes('abort') || msg.toLowerCase().includes('timeout')) {
-          setStatusMsg({ type: 'info', text: 'Timeout en generate-content. Usé generador local como respaldo.' });
-        } else {
-          setStatusMsg({ type: 'info', text: 'generate-content falló. Usé generador local como respaldo.' });
-        }
-        clearStatusSoon(3500);
-        raw = null;
-      }
+      const raw = await generateViaEdgeFunction(payload);
 
       const content = normalizeGenerated(raw, payload, product);
       const savedContent = await saveGeneratedToSupabase(payload, product, content);
@@ -362,13 +373,14 @@ export default function ContentGenerator() {
         saved_at: new Date().toISOString(),
       });
 
+      loadDrafts();
       setStatusMsg({ type: 'ok', text: '✅ Contenido generado y guardado.' });
       clearStatusSoon();
     } catch (error) {
       console.error('Error generando contenido:', error);
-      setStatusMsg({ type: 'err', text: '❌ Error al generar contenido. Revisa logs.' });
+      setStatusMsg({ type: 'err', text: error.message || 'No pudimos generar el contenido.' });
       clearStatusSoon(3500);
-      alert('Error al generar contenido. Intenta nuevamente.');
+
     } finally {
       stopWatchdog();
       setLoading(false);
@@ -392,15 +404,7 @@ export default function ContentGenerator() {
     try {
       const { payload, product } = lastRequest;
 
-      let raw = null;
-      try {
-        raw = await generateViaEdgeFunction({ ...payload, regenerate: true });
-      } catch (edgeErr) {
-        console.error('regenerate generate-content failed:', edgeErr);
-        setStatusMsg({ type: 'info', text: 'Timeout/fallo en regenerate. Usé respaldo local.' });
-        clearStatusSoon(3500);
-        raw = null;
-      }
+      const raw = await generateViaEdgeFunction({ ...payload, regenerate:true });
 
       const content = normalizeGenerated(raw, payload, product);
       const savedContent = await saveGeneratedToSupabase(payload, product, content);
@@ -411,13 +415,14 @@ export default function ContentGenerator() {
         saved_at: new Date().toISOString(),
       });
 
+      loadDrafts();
       setStatusMsg({ type: 'ok', text: '✅ Regenerado y guardado.' });
       clearStatusSoon();
     } catch (e) {
       console.error('regenerateContent error:', e);
-      setStatusMsg({ type: 'err', text: '❌ No pude regenerar.' });
+      setStatusMsg({ type: 'err', text: e.message || 'No pudimos regenerar el contenido.' });
       clearStatusSoon(3500);
-      alert('Error al regenerar contenido.');
+
     } finally {
       stopWatchdog();
       setLoading(false);
@@ -434,10 +439,8 @@ export default function ContentGenerator() {
     }
 
     try {
-      await supabase
-        .from('generated_content')
-        .update({ status: 'rejected', rejected_at: new Date().toISOString() })
-        .eq('id', generatedContent.id);
+      const {error}=await supabase.from('generated_content').update({status:'rejected'}).eq('id',generatedContent.id).eq('status','draft');
+      if(error)throw error;
 
       setGeneratedContent(null);
       setStatusMsg({ type: 'ok', text: '✅ Contenido rechazado. Puedes regenerar otro.' });
@@ -463,19 +466,7 @@ export default function ContentGenerator() {
       .trim();
   };
 
-  const buildPublishCaption = ({ title, body, cta, hashtags }, p) => {
-    const cleanBody = stripFrameworkLabels(body);
-    const cleanTitle = stripFrameworkLabels(title);
-    const hash = (hashtags || '').trim();
-    const ctaLine = cta ? `\n\n${cta}` : '';
-
-    const base = `${cleanTitle}\n\n${cleanBody}${ctaLine}\n\n${hash}`.replace(/\n{3,}/g, '\n\n').trim();
-
-    if (p === 'whatsapp') {
-      return base.slice(0, 900).trim();
-    }
-    return base;
-  };
+  const buildPublishCaption = (content,p) => buildCreativeCaption(content,p);
 
   const publishContent = async () => {
     if (!generatedContent) return;
@@ -493,7 +484,7 @@ export default function ContentGenerator() {
     }
 
     if (platform === 'tiktok') {
-      setStatusMsg({ type: 'info', text: 'TikTok queda en modo manual: copiar/pegar (placeholder).' });
+      setStatusMsg({ type: 'info', text: 'Descarga el MP4 del Estudio visual y usa Compartir copy para completar la publicación en TikTok. La publicación directa requiere que TikTok apruebe ese permiso.' });
       clearStatusSoon(3500);
       return;
     }
@@ -507,6 +498,7 @@ export default function ContentGenerator() {
       const finalCaption = buildPublishCaption(
         {
           title: generatedContent.title,
+          caption: generatedContent.caption,
           body: generatedContent.body,
           cta: generatedContent.cta,
           hashtags: generatedContent.hashtags,
@@ -666,6 +658,7 @@ export default function ContentGenerator() {
     const caption_final = buildPublishCaption(
       {
         title: generatedContent.title,
+        caption: generatedContent.caption,
         body: generatedContent.body,
         cta: generatedContent.cta,
         hashtags: generatedContent.hashtags,
@@ -703,108 +696,17 @@ export default function ContentGenerator() {
 
     setShowScheduleModal(false);
     window.dispatchEvent(new CustomEvent('calendar:refresh'));
-    alert('✅ Contenido programado exitosamente en el calendario');
+    alert('Contenido guardado en el calendario. La publicación automática requiere completar la verificación del programador y del canal.');
   } catch (error) {
     console.error('Error scheduling content:', error);
     alert(`❌ Error al programar contenido: ${error?.message || JSON.stringify(error)}`);
   }
 };
 
-  // Fallback local
-  const generateContentByStrategy = (data, product) => {
-    const productName = product?.name || 'Producto Keloke';
-    const price = product?.price ?? '29.990';
-    const currency = product?.currency || 'CLP';
-
-    let title = '';
-    let body = '';
-    let caption = '';
-    let cta = '';
-    let hashtags = [];
-
-    const priceLabel = formatPrice(price, currency);
-
-    switch (data.strategy) {
-      case 'aida':
-        title = `🔥 ¡Descubre ${productName}!`;
-        body =
-          `ATENCIÓN: ¿Buscas una solución práctica para tu día a día?\n\n` +
-          `INTERÉS: ${productName} te ayuda con un beneficio clave sin complicarte.\n\n` +
-          `DESEO: Imagina mejorar resultados en minutos, con menos esfuerzo.\n\n` +
-          `ACCIÓN: Llévalo hoy por $${priceLabel}.\n🚚 Envío a todo Chile.`;
-        caption = `¡${productName} puede ser tu mejor compra! 🚀`;
-        cta = '¡Compra ahora con envío a todo Chile!';
-        hashtags = ['#Keloke', '#Chile', '#Ofertas', '#ComprasOnline'];
-        break;
-
-      case 'pas':
-        title = `😰 ¿Te pasa esto? ${productName} lo soluciona`;
-        body =
-          `PROBLEMA: Ese problema típico te quita tiempo.\n\n` +
-          `AGITACIÓN: Terminas gastando más de lo necesario.\n\n` +
-          `SOLUCIÓN: ${productName} te lo deja resuelto en minutos.\n\n` +
-          `💰 $${priceLabel}\n🚚 Envío a todo Chile`;
-        caption = `La solución real: ${productName} ✅`;
-        cta = '¡Pídelo ahora!';
-        hashtags = ['#Keloke', '#Chile', '#Solución', '#Ofertas'];
-        break;
-
-      case 'storytelling':
-        title = `📖 La historia de alguien que probó ${productName}`;
-        body =
-          `“Antes me costaba resolver esto. Probé ${productName} y cambió todo.”\n\n` +
-          `✨ ${productName}\n💰 $${priceLabel}\n🚚 Envío a todo Chile`;
-        caption = `Tu historia puede ser la próxima 🌟`;
-        cta = '¡Compra hoy!';
-        hashtags = ['#Keloke', '#Testimonio', '#Chile', '#Transformación'];
-        break;
-
-      case 'gatillo':
-        title = `⏰ Últimas unidades de ${productName}`;
-        body =
-          `🚨 STOCK LIMITADO 🚨\n\n` +
-          `Quedan pocas unidades a $${priceLabel}.\n` +
-          `✅ Envío a todo Chile\n✅ Compra segura`;
-        caption = `No lo dejes pasar ⚡`;
-        cta = '¡Comprar ahora!';
-        hashtags = ['#OfertaLimitada', '#Keloke', '#Chile', '#Urgente'];
-        break;
-
-      default:
-        title = `✨ ${productName}`;
-        body = `Descubre ${productName}.\n💰 $${priceLabel}\n🚚 Envío a todo Chile`;
-        caption = `¡Conoce ${productName}! 🎉`;
-        cta = '¡Compra ahora!';
-        hashtags = ['#Keloke', '#Chile', '#Productos'];
-    }
-
-    if (data.platform === 'whatsapp') {
-      body = body.replace(/\n\n/g, '\n').substring(0, 650);
-      caption = `*${caption}*`;
-    }
-
-    if (data.campaign_type === 'paid') {
-      cta = `${cta} - Variante ${data.ab_variant}`;
-      body = `🎯 Audiencia: ${data.age_range} años | Intereses: ${data.interests}\n\n${body}`;
-    }
-
-    return {
-      title,
-      body,
-      caption,
-      cta,
-      hashtags: hashtags.join(' '),
-      preview_url: data.preview_url || product?.image_url || safePlaceholder(data.content_type),
-      asset_url: null,
-      asset_type: null,
-      carousel_urls: Array.isArray(data.carousel_urls) ? data.carousel_urls : [],
-    };
-  };
-
   const compiledTextForCopy = useMemo(() => {
     if (!generatedContent) return '';
-    return `${generatedContent.title}\n\n${generatedContent.body}\n\n${generatedContent.caption}\n\n${generatedContent.hashtags}\n\n${generatedContent.cta}`;
-  }, [generatedContent]);
+    return buildCreativeCaption(generatedContent,platform);
+  }, [generatedContent,platform]);
 
   // ✅ Preview helpers (no rompe si preview_url es MP4)
   const isVideoPreview = useMemo(() => {
@@ -828,20 +730,26 @@ export default function ContentGenerator() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold" style={{ color: '#173d31' }}>
-            Generador de Contenido Automático
+            Estudio de publicidad
           </h1>
           <p className="text-gray-600 mt-1">
-            Crea contenido optimizado con IA para redes sociales y campañas pagadas
+            Copy, fotografía y graphic motion para tus productos y redes sociales.
           </p>
         </div>
         <div className="flex items-center gap-2">
           <Sparkles className="w-6 h-6" style={{ color: '#6e9942' }} />
           <span className="text-sm font-medium" style={{ color: '#173d31' }}>
-            IA Activa
+            {engine?.openai?.text_model || 'Motor pendiente de comprobar'}
           </span>
         </div>
       </div>
 
+      <div className="panel p-5 space-y-3">
+        <div className="flex items-center justify-between gap-3 flex-wrap"><div><h3 className="text-sm font-semibold">Dirección de la campaña</h3><p className="text-xs text-gray-500 mt-1">Cuenta qué quieres destacar y entrega solo condiciones comerciales confirmadas.</p></div><button className="subtle-button" disabled={checkingEngine} onClick={checkEngine}><RefreshCw size={14} className={checkingEngine?'animate-spin':''}/>Actualizar conexión IA</button></div>
+        <label className="block text-xs font-medium" htmlFor="campaign-brief">Objetivo y mensaje</label><textarea id="campaign-brief" value={brief} maxLength={2000} onChange={e=>setBrief(e.target.value)} rows={2} className="w-full p-3 border rounded-lg text-sm" placeholder="Ej.: presentar el producto, mostrar su uso y resolver una duda frecuente. Indica aquí descuentos o envío solo si están confirmados."/>
+        <label className="block text-xs font-medium" htmlFor="campaign-destination">Enlace de compra (opcional)</label><input id="campaign-destination" type="url" value={destinationUrl} onChange={e=>setDestinationUrl(e.target.value)} className="w-full p-3 border rounded-lg text-sm" placeholder="https://tu-tienda.cl/products/..."/>
+      </div>
+      {drafts.length>0&&<div className="panel p-4 flex items-center gap-3 flex-wrap"><label htmlFor="creative-drafts" className="text-xs font-semibold">Continuar un borrador</label><select id="creative-drafts" className="text-sm border rounded-lg p-2 max-w-full" value="" onChange={e=>restoreDraft(e.target.value)}><option value="" disabled>Elige uno de tus últimos borradores</option>{drafts.map(draft=><option key={draft.id} value={draft.id}>{draft.title} · {draft.platform}</option>)}</select></div>}
       {/* Status */}
       {statusMsg && (
         <div
@@ -1113,6 +1021,10 @@ export default function ContentGenerator() {
           </div>
 
           {/* Preview */}
+          {generatedContent && <>
+            {Array.isArray(generatedContent.variants)&&generatedContent.variants.length>0&&<section className="panel p-5 mb-5"><h3 className="text-sm font-semibold mb-3">Tres ángulos para tu campaña</h3><div className="grid sm:grid-cols-3 gap-3">{generatedContent.variants.map((variant,i)=><div key={i} className="border rounded-xl p-4"><p className="eyebrow">{variant.angle}</p><h4 className="text-sm font-semibold my-2">{variant.headline}</h4><p className="text-xs text-gray-600 leading-relaxed">{variant.caption}</p><button className="text-link mt-3" onClick={async()=>{const patch={title:variant.headline,caption:variant.caption,body:variant.caption,cta:variant.cta};const {error}=await supabase.from('generated_content').update(patch).eq('id',generatedContent.id).eq('status','draft');if(error){setStatusMsg({type:'err',text:'No pudimos guardar esta variante.'});return}setGeneratedContent(previous=>({...previous,...patch}));}}>Usar este ángulo</button></div>)}</div></section>}
+            <CreativeStudioTools content={generatedContent} product={activeProduct} onAsset={setCreativeAsset}/>
+          </>}
           {generatedContent && (
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
               <div className="flex items-center justify-between mb-4">
@@ -1148,11 +1060,8 @@ export default function ContentGenerator() {
 
                   <button
                     className="p-2 rounded-lg hover:bg-gray-100 transition-all"
-                    title="Compartir (placeholder UI)"
-                    onClick={() => {
-                      setStatusMsg({ type: 'info', text: 'Compartir queda como placeholder (se implementa si lo necesitas).' });
-                      clearStatusSoon(3000);
-                    }}
+                    title="Compartir copy"
+                    onClick={async () => {try{if(navigator.share)await navigator.share({title:generatedContent.title,text:compiledTextForCopy});else await copyToClipboard(compiledTextForCopy);}catch(e){if(e.name!=='AbortError')setStatusMsg({type:'err',text:'No pudimos compartir el contenido.'})}}}
                   >
                     <Share2 className="w-4 h-4" style={{ color: '#173d31' }} />
                   </button>

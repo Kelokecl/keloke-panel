@@ -22,10 +22,7 @@ export default function OAuthCallback() {
     const platform =
       qs.get("platform") || qs.get("p") || hs.get("platform") || "unknown";
 
-    const success =
-      qs.get("success") === "true" ||
-      Boolean(hs.get("access_token")) ||
-      Boolean(qs.get("code"));
+    const success = qs.get("success") === "true";
 
     const account =
       qs.get("account") || qs.get("account_name") || null;
@@ -60,6 +57,12 @@ export default function OAuthCallback() {
   }, [qs, hs]);
 
   useEffect(() => {
+    if (payload.state?.startsWith('keloke_tiktok_')) {
+      const target=new URL(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/tiktok-oauth/callback`);
+      ['code','state','error'].forEach(key=>{const value=qs.get(key);if(value)target.searchParams.set(key,value)});
+      window.location.replace(target.href);
+      return;
+    }
     const message = {
       type: "OAUTH_RESULT",
       success: payload.success,

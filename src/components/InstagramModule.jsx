@@ -43,6 +43,9 @@ export default function InstagramModule() {
 
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
+  const [health,setHealth]=useState(null),[checkingHealth,setCheckingHealth]=useState(false);
+  useEffect(()=>{supabase.from('keloke_runtime_checks').select('payload').eq('key','capabilities').maybeSingle().then(({data})=>setHealth(data?.payload?.instagram||null));},[]);
+  async function checkConnection(){setCheckingHealth(true);try{const {data,error}=await supabase.functions.invoke('keloke-capabilities',{body:{}});if(error||!data?.ok)throw new Error('No pudimos comprobar la conexión. Revisa tu sesión.');setHealth(data.instagram);}catch(e){setError(e.message)}finally{setCheckingHealth(false)}}
 
   // filtros
   const [filterKind, setFilterKind] = useState("all"); // all|dm|comment
@@ -317,6 +320,7 @@ export default function InstagramModule() {
             </button>
           </div>
 
+          <div className="mt-3 p-3 bg-[#f5f8f1] rounded-lg text-xs text-gray-600"><p>{health?.message || 'Comprueba el acceso de Meta y prueba un mensaje real para verificar la recepción.'}</p><div className="flex items-center gap-3 mt-2"><button className="font-semibold text-[#4f793f]" onClick={checkConnection} disabled={checkingHealth}>{checkingHealth?'Comprobando…':'Comprobar conexión'}</button><a className="font-semibold text-[#4f793f]" href="/connections">Revisar accesos</a></div></div>
           <div className="mt-3 flex gap-2">
             <div className="flex-1 min-w-0">
               <input
@@ -481,18 +485,7 @@ export default function InstagramModule() {
                     Refrescar
                   </button>
 
-                  <button
-                    onClick={genAiDraft}
-                    className={cls(
-                      "px-3 py-2 rounded-lg text-sm flex items-center gap-2 border",
-                      isAiLoading ? "bg-gray-100 text-gray-500 border-gray-200" : "bg-pink-600 text-white border-pink-600 hover:bg-pink-700"
-                    )}
-                    disabled={isAiLoading}
-                    title="Generar respuesta IA (ventas/suscripción)"
-                  >
-                    <Sparkles className={cls("w-4 h-4", isAiLoading && "animate-spin")} />
-                    IA
-                  </button>
+
                 </div>
               </div>
             </div>

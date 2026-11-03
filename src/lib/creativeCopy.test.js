@@ -1,0 +1,4 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {buildCreativeCaption} from './creativeCopy.js';
+test('publication uses the reviewed caption without appending an alternative body',()=>{assert.equal(buildCreativeCaption({title:'Título interno',body:'Otra versión',caption:'Conoce el producto.',cta:'Conoce el producto.',hashtags:'#Keloke #Chile #Keloke'}),'Conoce el producto.\n\n#Keloke #Chile')});
+test('WhatsApp omits social hashtags and preserves a single call to action',()=>{assert.equal(buildCreativeCaption({caption:'Disponible para consultar.',cta:'Escríbenos',hashtags:'#Keloke'},'whatsapp'),'Disponible para consultar.\n\nEscríbenos')});
+test('Instagram caption respects the platform limit',()=>assert.equal(buildCreativeCaption({caption:'a'.repeat(2500)}).length,2200));

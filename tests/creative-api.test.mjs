@@ -1,0 +1,12 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {readFileSync}from'node:fs';import{transformSync}from'esbuild';
+function generator({valid=true,upstreamStatus=200,output='{"title":"Campaña","caption":"Producto real","variants":[{},{},{}]}',quota=false}={}){
+ const source=readFileSync(new URL('../src/supabase/functions/generate-content/index.ts',import.meta.url),'utf8').replace(/^import .*\n/,'');let handler,calls=0;
+ const db={auth:{getUser:async()=>({data:{user:valid?{id:'test-admin'}:null}})},from(table){const value=table==='users'?{data:{role:'admin',is_active:true}}:{data:{payload:{openai:{models:['gpt-6-astra']}}}};const q=new Proxy({}, {get:(o,k)=>k==='then'?(resolve)=>Promise.resolve(value).then(resolve):()=>q});return q;}};
+ const mockFetch=async(url,options)=>{calls++;const body=JSON.parse(options.body);assert.equal(body.model,'gpt-6-astra');assert.equal(body.store,false);assert.ok(body.max_output_tokens<=5000);return new Response(JSON.stringify(upstreamStatus===200?{output_text:output}:{error:{code:quota?'insufficient_quota':'provider_error'}}),{status:upstreamStatus})};
+ new Function('Deno','createClient','fetch',transformSync(source,{loader:'ts',format:'iife'}).code)({env:{get:()=> 'unit-test-only'},serve:fn=>handler=fn},()=>db,mockFetch);
+ return {request:()=>handler(new Request('https://test.invalid',{method:'POST',headers:{Authorization:'Bearer test-only','Content-Type':'application/json'},body:JSON.stringify({product_name:'Producto verificado'})})),calls:()=>calls};
+}
+test('unauthorized requests cannot spend on AI',async()=>{const api=generator({valid:false});const r=await api.request();assert.equal(r.status,401);assert.equal(api.calls(),0)});
+test('quota errors are visible and never become a successful fallback',async()=>{const api=generator({upstreamStatus:429,quota:true});const r=await api.request();const data=await r.json();assert.equal(r.status,502);assert.equal(data.ok,false);assert.match(data.error,/saldo/);assert.equal(data.caption,undefined)});
+test('malformed provider output is rejected',async()=>{const api=generator({output:'not json'});const r=await api.request();assert.equal(r.status,502);assert.equal((await r.json()).ok,false)});
+test('successful output retains provider and selected model',async()=>{const api=generator();const r=await api.request();const data=await r.json();assert.equal(r.status,200);assert.equal(data.provider,'openai');assert.equal(data.model,'gpt-6-astra');assert.equal(data.variants.length,3)});

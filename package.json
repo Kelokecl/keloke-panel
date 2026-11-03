@@ -15,6 +15,7 @@
     "framer-motion": "latest",
     "html2canvas": "latest",
     "lucide-react": "latest",
+    "mediabunny": "1.65.1",
     "opus-media-recorder": "^0.8.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",

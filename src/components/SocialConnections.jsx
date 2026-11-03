@@ -159,13 +159,22 @@ export default function SocialConnections() {
   };
 
   const connectPlatform = async (platform) => {
+    const preparedPopup=['instagram','tiktok'].includes(platform)?window.open('about:blank',`oauth_${platform}`,'width=600,height=760'):null;
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
+        preparedPopup?.close();
         alert('Debes iniciar sesión primero');
         return;
       }
 
+      if(platform==='instagram'){
+        const popup=preparedPopup;oauthWindowRef.current=popup;
+        if(!popup){alert('Permite las ventanas emergentes para conectar Instagram.');return;}
+        const {data,error}=await supabase.functions.invoke('social-oauth-start',{body:{platform:'instagram'}});
+        if(error||!data?.url){popup.close();alert(data?.error||'No pudimos preparar la conexión de Instagram. Revisa tu sesión.');return;}
+        popup.location.href=data.url;return;
+      }
       // ✅ TikTok: NO abrir TikTok directo (ESO ES LO QUE TE ROMPE)
       if (platform === 'tiktok') {
         const width = 600;
@@ -173,11 +182,9 @@ export default function SocialConnections() {
         const left = window.screen.width / 2 - width / 2;
         const top = window.screen.height / 2 - height / 2;
 
-        const win = window.open(
-          `${window.location.origin}/oauth/tiktok-start`,
-          'oauth_tiktok',
-          `width=${width},height=${height},left=${left},top=${top}`
-        );
+        const win=preparedPopup;
+        if(!win){alert('Permite las ventanas emergentes para conectar TikTok.');return;}
+        win.location.href=`${window.location.origin}/oauth/tiktok-start`;
 
         oauthWindowRef.current = win;
         return;
