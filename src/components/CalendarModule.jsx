@@ -304,7 +304,7 @@ export default function CalendarModule() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold" style={{ color: '#2D5016' }}>
+          <h1 className="text-3xl font-bold" style={{ color: '#173d31' }}>
             Calendario Inteligente
           </h1>
           <p className="text-gray-600 mt-1">
@@ -314,7 +314,7 @@ export default function CalendarModule() {
         <button
           onClick={() => setShowScheduleModal(true)}
           className="px-6 py-3 rounded-lg text-white font-medium flex items-center gap-2 transition-all hover:opacity-90"
-          style={{ backgroundColor: '#2D5016' }}
+          style={{ backgroundColor: '#173d31' }}
         >
           <Plus className="w-5 h-5" />
           Programar Contenido
@@ -333,7 +333,7 @@ export default function CalendarModule() {
             </button>
 
             <div className="text-center min-w-[200px]">
-              <p className="font-bold text-lg" style={{ color: '#2D5016' }}>
+              <p className="font-bold text-lg" style={{ color: '#173d31' }}>
                 {selectedDate.toLocaleDateString('es-CL', { month: 'long', year: 'numeric' })}
               </p>
               <p className="text-sm text-gray-600">
@@ -387,8 +387,8 @@ export default function CalendarModule() {
       {/* Optimal Times */}
       <div className="bg-gradient-to-r from-green-50 to-yellow-50 p-6 rounded-xl border border-green-200">
         <div className="flex items-center gap-2 mb-4">
-          <TrendingUp className="w-5 h-5" style={{ color: '#2D5016' }} />
-          <h3 className="font-bold" style={{ color: '#2D5016' }}>
+          <TrendingUp className="w-5 h-5" style={{ color: '#173d31' }} />
+          <h3 className="font-bold" style={{ color: '#173d31' }}>
             Horarios Óptimos para Chile
           </h3>
         </div>
@@ -440,7 +440,7 @@ export default function CalendarModule() {
                 </p>
                 <p
                   className={`text-lg font-bold mt-1 ${isToday ? 'text-white px-2 py-1 rounded-full' : ''}`}
-                  style={isToday ? { backgroundColor: '#2D5016' } : { color: '#2D5016' }}
+                  style={isToday ? { backgroundColor: '#173d31' } : { color: '#173d31' }}
                 >
                   {day.getDate()}
                 </p>
@@ -462,7 +462,7 @@ export default function CalendarModule() {
                   <div key={idx} className="p-2 border-r border-gray-100 min-h-[80px] relative">
                     {content.map((item) => {
                       const sb = statusBadge(item.status);
-                      const color = platformColors[item.platform] || '#2D5016';
+                      const color = platformColors[item.platform] || '#173d31';
 
                       return (
                         <div
@@ -574,7 +574,7 @@ function ScheduleModal({ onClose, onSchedule, optimalTimes }) {
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
         <div className="p-6 border-b border-gray-200 flex items-center justify-between">
-          <h2 className="text-2xl font-bold" style={{ color: '#2D5016' }}>
+          <h2 className="text-2xl font-bold" style={{ color: '#173d31' }}>
             Programar Contenido
           </h2>
           <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg transition-all">✕</button>
@@ -665,8 +665,8 @@ function ScheduleModal({ onClose, onSchedule, optimalTimes }) {
 
           <div className="bg-green-50 p-4 rounded-lg border border-green-200">
             <div className="flex items-center gap-2 mb-3">
-              <TrendingUp className="w-4 h-4" style={{ color: '#2D5016' }} />
-              <p className="font-medium text-sm" style={{ color: '#2D5016' }}>
+              <TrendingUp className="w-4 h-4" style={{ color: '#173d31' }} />
+              <p className="font-medium text-sm" style={{ color: '#173d31' }}>
                 Horarios Recomendados para {formData.platform}
               </p>
             </div>
@@ -709,7 +709,7 @@ function ScheduleModal({ onClose, onSchedule, optimalTimes }) {
             <button
               type="submit"
               className="flex-1 px-6 py-3 rounded-lg text-white font-medium transition-all hover:opacity-90"
-              style={{ backgroundColor: '#2D5016' }}
+              style={{ backgroundColor: '#173d31' }}
             >
               Programar
             </button>
@@ -738,7 +738,7 @@ function ContentDetailModal({ content, onClose, onDelete, onDuplicate }) {
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
         <div className="p-6 border-b border-gray-200 flex items-center justify-between">
-          <h2 className="text-2xl font-bold" style={{ color: '#2D5016' }}>
+          <h2 className="text-2xl font-bold" style={{ color: '#173d31' }}>
             Detalle del Contenido
           </h2>
           <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg transition-all">✕</button>

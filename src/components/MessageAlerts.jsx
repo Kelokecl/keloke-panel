@@ -51,9 +51,9 @@ export default function MessageAlerts() {
     return () => { active = false; clearInterval(interval); window.removeEventListener('focus', poll); supabase.removeChannel(subscription); };
   }, [user?.id, user?.role]);
   if (user?.role !== 'admin') return null;
-  return <div className="px-4 py-2 bg-white border-b flex flex-wrap items-center justify-between gap-2" aria-label="Alertas de mensajes">
-    <span className="text-sm text-gray-600">Avisos de mensajes mientras el panel esté abierto.</span>
-    {permission === 'default' && <button className="text-sm font-semibold text-green-800" onClick={async () => setPermission(await Notification.requestPermission())}>Activar avisos del navegador</button>}
+  return <div className="message-alert-bar" aria-label="Alertas de mensajes">
+    <span className="">Avisos de mensajes mientras el panel esté abierto.</span>
+    {permission === 'default' && <button className="" onClick={async () => setPermission(await Notification.requestPermission())}>Activar avisos del navegador</button>}
     {permission === 'granted' && <span className="text-xs text-green-700">Avisos del navegador activados</span>}
     {permission === 'denied' && <span className="text-xs text-gray-600">Avisos bloqueados por el navegador; verás los avisos aquí.</span>}
     {notice && <div role="status" className="w-full flex justify-between rounded bg-green-50 p-3"><Link className="font-semibold text-green-900" to={notice.target}>{notice.title} · Abrir</Link><button aria-label="Cerrar aviso" onClick={() => setNotice(null)}>×</button></div>}

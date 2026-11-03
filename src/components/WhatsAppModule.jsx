@@ -25,7 +25,7 @@ export default function WhatsAppModule() {
       setIsLoading(true);
       const { data, error } = await supabase
         .from('social_connections')
-        .select('*')
+        .select('id,platform,is_active,phone_number_id,waba_id,updated_at')
         .eq('platform', 'whatsapp')
         .eq('is_active', true)
         .single();
@@ -90,7 +90,7 @@ export default function WhatsAppModule() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-gray-100">
+    <div className="whatsapp-workspace flex flex-col bg-gray-100">
       {/* HEADER VERDE:
           - Desktop: siempre visible
           - Móvil: se oculta cuando entras a un chat (selectedContact) */}
@@ -99,7 +99,7 @@ export default function WhatsAppModule() {
           <MessageCircle className="w-8 h-8 shrink-0" />
           <div className="min-w-0">
             <h1 className="text-xl font-bold truncate">WhatsApp Business</h1>
-            <p className="text-sm text-green-100 truncate">{connection.username || 'Conectado'}</p>
+            <p className="text-sm text-green-100 truncate">{connection.phone_number_id ? 'Atención y ventas' : 'Conexión guardada'}</p>
           </div>
         </div>
 

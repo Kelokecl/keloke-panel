@@ -1,0 +1,19 @@
+import React, {useEffect,useState} from 'react';
+import {ArrowUpRight, Package, RefreshCw, ShieldCheck, AlertCircle, CalendarDays} from 'lucide-react';
+import {loadWeeklyProducts,moneyCLP,safeProductUrl} from '../lib/weeklyProducts';
+export default function WeeklyProducts(){
+ const [selection,setSelection]=useState(null),[loading,setLoading]=useState(true),[error,setError]=useState('');
+ async function load(){setLoading(true);setError('');try{setSelection(await loadWeeklyProducts())}catch{setError('No pudimos consultar la selección semanal. Vuelve a intentar.')}finally{setLoading(false)}}
+ useEffect(()=>{let active=true;loadWeeklyProducts().then(d=>{if(active)setSelection(d)}).catch(()=>{if(active)setError('No pudimos consultar la selección semanal. Vuelve a intentar.')}).finally(()=>{if(active)setLoading(false)});return()=>{active=false}},[]);
+ const items=selection?.items||[];
+ const date=value=>value?new Date(`${value.slice(0,10)}T12:00:00`).toLocaleDateString('es-CL',{day:'numeric',month:'long'}):'';
+ return <div className="page-wrap"><div className="page-heading"><div><span className="eyebrow">INTELIGENCIA COMERCIAL · CHILE</span><h2>Cinco oportunidades.<br/>Una semana de foco.</h2><p>Una selección breve de productos con ventas informadas por la fuente. Decide qué promocionar con datos, precio y origen a la vista.</p></div><button className="subtle-button" onClick={load} disabled={loading}><RefreshCw size={14} className={loading?'animate-spin':''}/>Consultar selección</button></div>
+ <div className="weekly-note"><ShieldCheck size={22}/><div><strong>Máximo 5 productos por semana.</strong> Actualización los lunes. Consultar esta pantalla no ejecuta nuevas búsquedas. Las ventas informadas son acumuladas; no representan ventas semanales ni una garantía de resultados.</div></div>
+ {error&&<div className="error-banner" role="alert">{error}</div>}
+ {loading?<div className="loading-state"><RefreshCw size={18} className="animate-spin"/>Consultando selección…</div>:<>
+ <div className="flex items-center justify-between gap-4 mb-5"><span className="text-sm font-semibold text-gray-700">{selection?.week_start?`Semana del ${date(selection.week_start)}`:'Selección semanal'}</span><span className="status-pill neutral">{items.length} de 5 oportunidades</span></div>
+ {!!selection?.notice&&<div className="error-banner flex items-start gap-2"><AlertCircle size={17} className="shrink-0"/><span>{selection.notice}</span></div>}
+ {items.length?<div className="products-grid">{items.map((item,i)=>{const url=safeProductUrl(item.product_url);return <article className="product-card" key={item.external_id||i}><div className="product-visual">{safeProductUrl(item.image_url)?<img src={item.image_url} alt={item.title} loading="lazy" referrerPolicy="no-referrer"/>:<Package size={45} strokeWidth={1}/>}<span className="product-rank">OPORTUNIDAD 0{i+1}</span></div><div className="product-body"><span className="eyebrow">{item.category||'Mercado Libre Chile'}</span><h3>{item.title}</h3><div className="product-numbers"><div><span>Precio observado</span><strong>{moneyCLP(item.price_clp)}</strong></div><div><span>Ventas informadas</span><strong>{Number(item.sold_quantity).toLocaleString('es-CL')}+</strong></div></div><p className="product-evidence">Fuente: Mercado Libre · Verificado el {date(item.observed_at)}.<br/>Valida stock, margen y envío antes de invertir.</p>{url&&<a className="text-link" href={url} target="_blank" rel="noopener noreferrer">Revisar producto <ArrowUpRight size={14}/></a>}</div></article>})}</div>:<div className="panel empty-state"><Package size={35} strokeWidth={1}/><h3 className="text-base font-semibold text-gray-700 mb-2">Esperando datos comerciales actuales</h3><p>No mostramos productos antiguos como ganadores de esta semana.<br/>La selección aparecerá cuando la fuente entregue evidencia suficiente.</p></div>}
+ </>}
+ </div>
+}

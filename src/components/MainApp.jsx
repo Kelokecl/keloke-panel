@@ -1,88 +1,44 @@
-import React from 'react';
+import React, {lazy, Suspense} from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 
 import Sidebar from './Sidebar';
 import MessageAlerts from './MessageAlerts';
+import WeeklyProducts from './WeeklyProducts';
+import { useLocation, Link } from 'react-router-dom';
+import { Plus, ArrowUpRight } from 'lucide-react';
 import Dashboard from './Dashboard';
-import ContentGenerator from './ContentGenerator';
-import CalendarModule from './CalendarModule';
-import AnalyticsModule from './AnalyticsModule';
-import SocialConnections from './SocialConnections';
-import UsersModule from './UsersModule';
+const ContentGenerator = lazy(()=>import('./ContentGenerator'));
+const CalendarModule = lazy(()=>import('./CalendarModule'));
+const AnalyticsModule = lazy(()=>import('./AnalyticsModule'));
+const SocialConnections = lazy(()=>import('./SocialConnections'));
+const UsersModule = lazy(()=>import('./UsersModule'));
 import OAuthCallback from './OAuthCallback';
-import WhatsAppModule from './WhatsAppModule';
-import WhatsAppAIConfig from './WhatsAppAIConfig';
-import InstagramModule from './InstagramModule';
+const WhatsAppModule = lazy(()=>import('./WhatsAppModule'));
+const WhatsAppAIConfig = lazy(()=>import('./WhatsAppAIConfig'));
+const InstagramModule = lazy(()=>import('./InstagramModule'));
 
 // ✅ IMPORTA EL AUTO-GERENTE (tu chat IA)
-import AIManagerModule from './AIManagerModule';
+const AIManagerModule = lazy(()=>import('./AIManagerModule'));
 
 // ✅ IMPORTA Trends si existe como componente (si no existe, usamos placeholder)
 // Si tú NO tienes un archivo Trends.jsx, NO importes nada aquí.
  // import Trends from './Trends';
 
-// Placeholders para los otros módulos
-function WinningProductsModule() {
-  return (
-    <div className="p-6">
-      <h1 className="text-3xl font-bold" style={{ color: '#2D5016' }}>
-        Productos Ganadores IA
-      </h1>
-      <p className="text-gray-600 mt-1">Top productos (Chile) y oportunidades de catálogo</p>
-
-      <div className="mt-6 bg-white p-8 rounded-xl shadow-sm border border-gray-100">
-        <p className="text-gray-700 font-medium mb-2">Estado</p>
-        <p className="text-gray-500">
-          Este módulo se alimenta desde la tabla <span className="font-mono">winning_products</span> y/o tu función de “trends-scan”.
-        </p>
-
-        <div className="mt-4 p-4 rounded-lg border border-gray-200 bg-gray-50">
-          <p className="text-sm text-gray-600">
-            Próximo paso: conectar el scanner + guardar resultados en DB para que el dashboard muestre el Top automáticamente.
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AutomationsModule() {
-  return (
-    <div className="p-6">
-      <h1 className="text-3xl font-bold" style={{ color: '#2D5016' }}>
-        Automatizaciones
-      </h1>
-      <p className="text-gray-600 mt-1">Gestión de reglas automáticas y engagement WhatsApp</p>
-      <div className="mt-6 bg-white p-8 rounded-xl shadow-sm border border-gray-100">
-        <p className="text-gray-500">Módulo de automatizaciones en desarrollo...</p>
-      </div>
-    </div>
-  );
-}
-
-function SettingsModule() {
-  return (
-    <div className="p-6">
-      <h1 className="text-3xl font-bold" style={{ color: '#2D5016' }}>
-        Configuración del Sistema
-      </h1>
-      <p className="text-gray-600 mt-1">Roles, integraciones y configuración general</p>
-      <div className="mt-6 bg-white p-8 rounded-xl shadow-sm border border-gray-100">
-        <p className="text-gray-500">Módulo de configuración en desarrollo...</p>
-      </div>
-    </div>
-  );
-}
-
 export default function MainApp() {
   const { user } = useAuth();
+  const { pathname } = useLocation();
+  const labels = { '/dashboard':'Resumen', '/instagram':'Bandeja de Instagram', '/whatsapp':'Bandeja de WhatsApp', '/connections':'Conexiones', '/content':'Estudio de contenido', '/calendar':'Calendario editorial', '/analytics':'Resultados', '/trends':'Top 5 semanal', '/users':'Equipo', '/whatsapp-ai':'Asistente de WhatsApp', '/ai-manager':'Asistente de marketing' };
+  const inbox = ['/instagram','/whatsapp'].includes(pathname);
 
   return (
-    <div className="flex h-screen overflow-hidden" style={{ backgroundColor: '#F5E6D3' }}>
+    <div className="workspace-shell">
       <Sidebar />
-      <div className="flex-1 overflow-y-auto">
+      <div className="workspace-body">
+        <header className="workspace-header"><div><span className="header-eyebrow">KELOKE WORKSPACE</span><h1>{labels[pathname] || 'Keloke'}</h1></div><Link className="header-action" aria-label="Crear contenido" to="/content"><Plus size={17}/><span>Crear contenido</span></Link></header>
         <MessageAlerts />
+        <main id="main-content" className={`workspace-content ${inbox ? 'is-inbox' : ''}`} key={pathname}>
+        <Suspense fallback={<div className="loading-state">Cargando tu espacio…</div>}>
         <Routes>
           {/* ✅ Landing interna */}
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
@@ -93,7 +49,7 @@ export default function MainApp() {
           <Route path="/content" element={<ContentGenerator />} />
           <Route path="/calendar" element={<CalendarModule />} />
           <Route path="/analytics" element={<AnalyticsModule />} />
-          <Route path="/users" element={<UsersModule currentUser={user} />} />
+          <Route path="/users" element={user?.role === 'admin' ? <UsersModule currentUser={user} /> : <Navigate to="/dashboard" replace />} />
           <Route path="/whatsapp" element={<WhatsAppModule />} />
           <Route path="/whatsapp-ai" element={<WhatsAppAIConfig />} />
           <Route path="/instagram" element={<InstagramModule />} />
@@ -103,15 +59,17 @@ export default function MainApp() {
 
           {/* ✅ NUEVOS: Auto-Gerente IA y Trends/Ganadores */}
           <Route path="/ai-manager" element={<AIManagerModule />} />
-          <Route path="/trends" element={<WinningProductsModule />} />
+          <Route path="/trends" element={<WeeklyProducts />} />
 
           {/* ✅ Opcionales: automatizaciones / settings si después los agregas al sidebar */}
-          <Route path="/automations" element={<AutomationsModule />} />
-          <Route path="/settings" element={<SettingsModule />} />
+          <Route path="/automations" element={<Navigate to="/whatsapp-ai" replace />} />
+          <Route path="/settings" element={<Navigate to="/connections" replace />} />
 
           {/* ✅ Fallback */}
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
+        </Suspense>
+        </main>
       </div>
     </div>
   );

@@ -208,7 +208,7 @@ export default function Analytics() {
       {/* Header */}
       <div className="flex items-start sm:items-center justify-between gap-4 flex-col sm:flex-row">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-bold" style={{ color: "#2D5016" }}>
+          <h1 className="text-2xl sm:text-3xl font-bold" style={{ color: "#173d31" }}>
             Analítica Avanzada
           </h1>
           <p className="text-gray-600 mt-1 text-sm sm:text-base">
@@ -239,7 +239,7 @@ export default function Analytics() {
                   ? "text-white"
                   : "bg-gray-100 text-gray-700 hover:bg-gray-200"
               }`}
-              style={selectedPlatform === platform.id ? { backgroundColor: "#2D5016" } : {}}
+              style={selectedPlatform === platform.id ? { backgroundColor: "#173d31" } : {}}
             >
               <span>{platform.emoji}</span>
               <span>{platform.name}</span>
@@ -268,7 +268,7 @@ export default function Analytics() {
         <CardMetric
           title="ROI Promedio"
           value={`${totals.avgROI}x`}
-          icon={<DollarSign className="w-5 h-5" style={{ color: "#D4A017" }} />}
+          icon={<DollarSign className="w-5 h-5" style={{ color: "#6e9942" }} />}
         />
       </div>
 
@@ -296,7 +296,7 @@ export default function Analytics() {
           ) : !shopifyData ? (
             <div className="bg-white p-10 sm:p-12 rounded-xl shadow-sm border border-gray-100 text-center">
               <ShoppingCart className="w-14 h-14 sm:w-16 sm:h-16 mx-auto mb-4 text-gray-300" />
-              <h3 className="font-bold text-xl mb-2" style={{ color: "#2D5016" }}>
+              <h3 className="font-bold text-xl mb-2" style={{ color: "#173d31" }}>
                 No hay datos de Shopify disponibles
               </h3>
               <p className="text-gray-600 mb-4 text-sm sm:text-base">
@@ -333,7 +333,7 @@ export default function Analytics() {
                 <CardMetric
                   title="Ingresos Totales"
                   value={formatCurrency(shopifyData.totalRevenue)}
-                  icon={<DollarSign className="w-5 h-5" style={{ color: "#D4A017" }} />}
+                  icon={<DollarSign className="w-5 h-5" style={{ color: "#6e9942" }} />}
                 />
                 <CardMetric
                   title="Ticket Promedio"
@@ -375,7 +375,7 @@ export default function Analytics() {
                             </div>
 
                             <div className="text-right flex-shrink-0 pl-2">
-                              <p className="font-bold text-sm whitespace-nowrap" style={{ color: "#2D5016" }}>
+                              <p className="font-bold text-sm whitespace-nowrap" style={{ color: "#173d31" }}>
                                 {formatCurrency(product.revenue)}
                               </p>
                               <p className="text-xs text-gray-500 whitespace-nowrap">
@@ -404,7 +404,7 @@ export default function Analytics() {
                               <div className="flex items-center gap-2 mb-1 min-w-0 flex-wrap">
                                 <p
                                   className="font-mono font-bold text-sm whitespace-nowrap"
-                                  style={{ color: "#2D5016" }}
+                                  style={{ color: "#173d31" }}
                                 >
                                   {order.id || "—"}
                                 </p>
@@ -432,7 +432,7 @@ export default function Analytics() {
                             </div>
 
                             <div className="text-right flex-shrink-0">
-                              <p className="font-bold text-sm whitespace-nowrap" style={{ color: "#2D5016" }}>
+                              <p className="font-bold text-sm whitespace-nowrap" style={{ color: "#173d31" }}>
                                 {formatCurrency(order.total)}
                               </p>
                               <p className="text-xs text-gray-500 whitespace-nowrap">
@@ -460,7 +460,7 @@ export default function Analytics() {
                             <span className="font-medium text-sm min-w-0 break-words">
                               {cat.category || "Categoría"}
                             </span>
-                            <span className="text-sm font-bold whitespace-nowrap" style={{ color: "#2D5016" }}>
+                            <span className="text-sm font-bold whitespace-nowrap" style={{ color: "#173d31" }}>
                               {formatCurrency(cat.revenue)}
                             </span>
                           </div>
@@ -495,7 +495,7 @@ export default function Analytics() {
                               {week.week || "Semana"}
                             </span>
                             <div className="text-right flex-shrink-0">
-                              <span className="font-bold whitespace-nowrap" style={{ color: "#2D5016" }}>
+                              <span className="font-bold whitespace-nowrap" style={{ color: "#173d31" }}>
                                 {formatCurrency(week.revenue)}
                               </span>
                               <span className="text-xs text-gray-500 ml-2 whitespace-nowrap">
@@ -567,7 +567,7 @@ export default function Analytics() {
                       <Zap className="w-5 h-5 text-white" />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <h3 className="font-bold text-lg mb-2" style={{ color: "#2D5016" }}>
+                      <h3 className="font-bold text-lg mb-2" style={{ color: "#173d31" }}>
                         Insights de Shopify
                       </h3>
                       <ul className="space-y-2 text-sm text-gray-700">
@@ -600,7 +600,7 @@ export default function Analytics() {
       {/* Placeholder para otros */}
       {selectedPlatform !== "shopify" && (
         <div className="bg-white p-4 sm:p-6 rounded-xl shadow-sm border border-gray-100">
-          <h3 className="font-bold text-lg mb-2" style={{ color: "#2D5016" }}>
+          <h3 className="font-bold text-lg mb-2" style={{ color: "#173d31" }}>
             {selectedPlatform === "all"
               ? "Rendimiento por Plataforma"
               : `Analítica: ${selectedPlatform}`}
@@ -624,7 +624,7 @@ function Panel({ title, icon, children }) {
   return (
     <div className="bg-white p-4 sm:p-6 rounded-xl shadow-sm border border-gray-100">
       <div className="flex items-center justify-between mb-4 gap-3">
-        <h3 className="font-bold text-lg min-w-0" style={{ color: "#2D5016" }}>
+        <h3 className="font-bold text-lg min-w-0" style={{ color: "#173d31" }}>
           <span className="break-words">{title}</span>
         </h3>
         <div className="flex-shrink-0">{icon}</div>
@@ -638,7 +638,7 @@ function EmptyText({ text }) {
   return <p className="text-gray-500 text-sm">{text}</p>;
 }
 
-function LoadingCard({ text = "Cargando...", color = "#2D5016" }) {
+function LoadingCard({ text = "Cargando...", color = "#173d31" }) {
   return (
     <div className="bg-white p-10 sm:p-12 rounded-xl shadow-sm border border-gray-100 flex flex-col items-center justify-center">
       <div
@@ -657,7 +657,7 @@ function CardMetric({ title, value, icon }) {
         <p className="text-sm text-gray-600 min-w-0 break-words">{title}</p>
         <div className="flex-shrink-0">{icon}</div>
       </div>
-      <p className="text-2xl sm:text-3xl font-bold" style={{ color: "#2D5016" }}>
+      <p className="text-2xl sm:text-3xl font-bold" style={{ color: "#173d31" }}>
         {value}
       </p>
       <div className="flex items-center gap-1 mt-2">

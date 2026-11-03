@@ -827,7 +827,7 @@ export default function ContentGenerator() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold" style={{ color: '#2D5016' }}>
+          <h1 className="text-3xl font-bold" style={{ color: '#173d31' }}>
             Generador de Contenido Automático
           </h1>
           <p className="text-gray-600 mt-1">
@@ -835,8 +835,8 @@ export default function ContentGenerator() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Sparkles className="w-6 h-6" style={{ color: '#D4A017' }} />
-          <span className="text-sm font-medium" style={{ color: '#2D5016' }}>
+          <Sparkles className="w-6 h-6" style={{ color: '#6e9942' }} />
+          <span className="text-sm font-medium" style={{ color: '#173d31' }}>
             IA Activa
           </span>
         </div>
@@ -862,7 +862,7 @@ export default function ContentGenerator() {
         <div className="lg:col-span-1 space-y-4">
           {/* Campaign */}
           <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
-            <h3 className="font-bold mb-3 flex items-center gap-2" style={{ color: '#2D5016' }}>
+            <h3 className="font-bold mb-3 flex items-center gap-2" style={{ color: '#173d31' }}>
               <Target className="w-4 h-4" />
               Tipo de Campaña
             </h3>
@@ -874,7 +874,7 @@ export default function ContentGenerator() {
                     ? 'border-opacity-100 shadow-sm'
                     : 'border-gray-200 hover:border-gray-300'
                 }`}
-                style={campaignType === 'organic' ? { borderColor: '#2D5016', backgroundColor: '#F5E6D3' } : {}}
+                style={campaignType === 'organic' ? { borderColor: '#173d31', backgroundColor: '#edf3e7' } : {}}
               >
                 <p className="font-medium text-sm">📱 Contenido Orgánico</p>
                 <p className="text-xs text-gray-500 mt-1">Posts, reels, historias</p>
@@ -887,7 +887,7 @@ export default function ContentGenerator() {
                     ? 'border-opacity-100 shadow-sm'
                     : 'border-gray-200 hover:border-gray-300'
                 }`}
-                style={campaignType === 'paid' ? { borderColor: '#2D5016', backgroundColor: '#F5E6D3' } : {}}
+                style={campaignType === 'paid' ? { borderColor: '#173d31', backgroundColor: '#edf3e7' } : {}}
               >
                 <p className="font-medium text-sm">💰 Campañas Pagadas</p>
                 <p className="text-xs text-gray-500 mt-1">Meta Ads, TikTok Ads</p>
@@ -897,7 +897,7 @@ export default function ContentGenerator() {
 
           {/* Platform */}
           <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
-            <h3 className="font-bold mb-3" style={{ color: '#2D5016' }}>Plataforma</h3>
+            <h3 className="font-bold mb-3" style={{ color: '#173d31' }}>Plataforma</h3>
             <div className="grid grid-cols-2 gap-2">
               {platformMeta.map((p) => (
                 <button
@@ -908,7 +908,7 @@ export default function ContentGenerator() {
                       ? 'border-opacity-100 shadow-sm'
                       : 'border-gray-200 hover:border-gray-300'
                   }`}
-                  style={platform === p.id ? { borderColor: '#2D5016', backgroundColor: '#F5E6D3' } : {}}
+                  style={platform === p.id ? { borderColor: '#173d31', backgroundColor: '#edf3e7' } : {}}
                 >
                   <p className="font-medium text-xs">{p.emoji} {p.name}</p>
                 </button>
@@ -918,7 +918,7 @@ export default function ContentGenerator() {
 
           {/* Content type */}
           <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
-            <h3 className="font-bold mb-3" style={{ color: '#2D5016' }}>Formato</h3>
+            <h3 className="font-bold mb-3" style={{ color: '#173d31' }}>Formato</h3>
             <div className="space-y-2">
               {[
                 { id: 'post', name: 'Post', icon: FileText },
@@ -936,7 +936,7 @@ export default function ContentGenerator() {
                         ? 'border-opacity-100 shadow-sm'
                         : 'border-gray-200 hover:border-gray-300'
                     }`}
-                    style={contentType === type.id ? { borderColor: '#2D5016', backgroundColor: '#F5E6D3' } : {}}
+                    style={contentType === type.id ? { borderColor: '#173d31', backgroundColor: '#edf3e7' } : {}}
                   >
                     <Icon className="w-4 h-4" />
                     <p className="font-medium text-sm">{type.name}</p>
@@ -952,11 +952,11 @@ export default function ContentGenerator() {
           {/* Form */}
           <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-bold flex items-center gap-2" style={{ color: '#2D5016' }}>
+              <h3 className="font-bold flex items-center gap-2" style={{ color: '#173d31' }}>
                 <Wand2 className="w-5 h-5" />
                 Configuración de Contenido
               </h3>
-              <Sparkles className="w-5 h-5" style={{ color: '#D4A017' }} />
+              <Sparkles className="w-5 h-5" style={{ color: '#6e9942' }} />
             </div>
 
             <div className="space-y-4">
@@ -1034,7 +1034,7 @@ export default function ContentGenerator() {
 
               {campaignType === 'paid' && (
                 <div className="border-t pt-4">
-                  <h4 className="font-medium text-sm mb-3" style={{ color: '#2D5016' }}>
+                  <h4 className="font-medium text-sm mb-3" style={{ color: '#173d31' }}>
                     🎯 Configuración de Campaña Pagada
                   </h4>
 
@@ -1053,7 +1053,7 @@ export default function ContentGenerator() {
                                 ? 'border-opacity-100'
                                 : 'border-gray-200 hover:border-gray-300'
                             }`}
-                            style={abVariant === variant ? { borderColor: '#2D5016', backgroundColor: '#F5E6D3' } : {}}
+                            style={abVariant === variant ? { borderColor: '#173d31', backgroundColor: '#edf3e7' } : {}}
                           >
                             Variante {variant}
                           </button>
@@ -1095,7 +1095,7 @@ export default function ContentGenerator() {
                 onClick={generateContent}
                 disabled={loading || (!selectedProduct && products.length > 0)}
                 className="w-full py-4 rounded-lg text-white font-medium flex items-center justify-center gap-2 transition-all hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
-                style={{ backgroundColor: '#2D5016' }}
+                style={{ backgroundColor: '#173d31' }}
               >
                 {loading ? (
                   <>
@@ -1116,7 +1116,7 @@ export default function ContentGenerator() {
           {generatedContent && (
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
               <div className="flex items-center justify-between mb-4">
-                <h3 className="font-bold flex items-center gap-2" style={{ color: '#2D5016' }}>
+                <h3 className="font-bold flex items-center gap-2" style={{ color: '#173d31' }}>
                   <Eye className="w-5 h-5" />
                   Vista Previa del Contenido
                 </h3>
@@ -1127,7 +1127,7 @@ export default function ContentGenerator() {
                     className="p-2 rounded-lg hover:bg-gray-100 transition-all"
                     title="Copiar contenido"
                   >
-                    <Copy className="w-4 h-4" style={{ color: '#2D5016' }} />
+                    <Copy className="w-4 h-4" style={{ color: '#173d31' }} />
                   </button>
 
                   <button
@@ -1135,7 +1135,7 @@ export default function ContentGenerator() {
                     className="p-2 rounded-lg hover:bg-gray-100 transition-all"
                     title="Descargar texto"
                   >
-                    <Download className="w-4 h-4" style={{ color: '#2D5016' }} />
+                    <Download className="w-4 h-4" style={{ color: '#173d31' }} />
                   </button>
 
                   <button
@@ -1143,7 +1143,7 @@ export default function ContentGenerator() {
                     className="p-2 rounded-lg hover:bg-gray-100 transition-all"
                     title="Descargar imagen/video (si existe)"
                   >
-                    <ImageIcon className="w-4 h-4" style={{ color: '#2D5016' }} />
+                    <ImageIcon className="w-4 h-4" style={{ color: '#173d31' }} />
                   </button>
 
                   <button
@@ -1154,7 +1154,7 @@ export default function ContentGenerator() {
                       clearStatusSoon(3000);
                     }}
                   >
-                    <Share2 className="w-4 h-4" style={{ color: '#2D5016' }} />
+                    <Share2 className="w-4 h-4" style={{ color: '#173d31' }} />
                   </button>
                 </div>
               </div>
@@ -1196,7 +1196,7 @@ export default function ContentGenerator() {
                     {campaignType === 'paid' && (
                       <>
                         <span>•</span>
-                        <span className="font-medium" style={{ color: '#D4A017' }}>
+                        <span className="font-medium" style={{ color: '#6e9942' }}>
                           Variante {abVariant}
                         </span>
                       </>
@@ -1207,7 +1207,7 @@ export default function ContentGenerator() {
                 <div className="space-y-4">
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">TÍTULO</label>
-                    <p className="font-bold text-lg" style={{ color: '#2D5016' }}>
+                    <p className="font-bold text-lg" style={{ color: '#173d31' }}>
                       {generatedContent.title}
                     </p>
                   </div>
@@ -1221,7 +1221,7 @@ export default function ContentGenerator() {
 
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">CAPTION (PUBLICACIÓN)</label>
-                    <p className="text-sm font-medium whitespace-pre-line" style={{ color: '#2D5016' }}>
+                    <p className="text-sm font-medium whitespace-pre-line" style={{ color: '#173d31' }}>
                       {buildPublishCaption(
                         {
                           title: generatedContent.title,
@@ -1248,7 +1248,7 @@ export default function ContentGenerator() {
                     <label className="block text-xs font-medium text-gray-500 mb-1">LLAMADO A LA ACCIÓN</label>
                     <div
                       className="inline-block px-4 py-2 rounded-lg text-white font-medium text-sm"
-                      style={{ backgroundColor: '#2D5016' }}
+                      style={{ backgroundColor: '#173d31' }}
                     >
                       {generatedContent.cta}
                     </div>
@@ -1259,11 +1259,11 @@ export default function ContentGenerator() {
                       <label className="block text-xs font-medium text-gray-500 mb-2">SEGMENTACIÓN</label>
                       <div className="flex items-center gap-4 text-sm">
                         <div className="flex items-center gap-1">
-                          <Users className="w-4 h-4" style={{ color: '#2D5016' }} />
+                          <Users className="w-4 h-4" style={{ color: '#173d31' }} />
                           <span>{ageRange} años</span>
                         </div>
                         <div className="flex items-center gap-1">
-                          <Target className="w-4 h-4" style={{ color: '#2D5016' }} />
+                          <Target className="w-4 h-4" style={{ color: '#173d31' }} />
                           <span>{interests || 'General'}</span>
                         </div>
                       </div>
@@ -1277,7 +1277,7 @@ export default function ContentGenerator() {
                 <button
                   onClick={() => setShowScheduleModal(true)}
                   className="flex-1 min-w-[220px] py-3 rounded-lg font-medium text-white transition-all hover:opacity-90"
-                  style={{ backgroundColor: '#2D5016' }}
+                  style={{ backgroundColor: '#173d31' }}
                 >
                   📅 Programar Publicación
                 </button>
@@ -1286,7 +1286,7 @@ export default function ContentGenerator() {
                   onClick={publishContent}
                   disabled={publishLoading}
                   className="flex-1 min-w-[160px] py-3 rounded-lg font-medium text-white transition-all hover:opacity-90 disabled:opacity-50"
-                  style={{ backgroundColor: '#D4A017' }}
+                  style={{ backgroundColor: '#6e9942' }}
                 >
                   {publishLoading ? 'Publicando...' : '🚀 Publicar'}
                 </button>
@@ -1319,8 +1319,8 @@ export default function ContentGenerator() {
           {!generatedContent && !loading && (
             <div className="bg-white p-12 rounded-xl shadow-sm border border-gray-100">
               <div className="text-center">
-                <Sparkles className="w-16 h-16 mx-auto mb-4" style={{ color: '#D4A017' }} />
-                <h3 className="font-bold text-xl mb-2" style={{ color: '#2D5016' }}>
+                <Sparkles className="w-16 h-16 mx-auto mb-4" style={{ color: '#6e9942' }} />
+                <h3 className="font-bold text-xl mb-2" style={{ color: '#173d31' }}>
                   Genera tu primer contenido
                 </h3>
                 <p className="text-gray-600 mb-6">
@@ -1328,20 +1328,20 @@ export default function ContentGenerator() {
                 </p>
                 <div className="grid grid-cols-3 gap-4 max-w-md mx-auto">
                   <div className="text-center">
-                    <div className="w-12 h-12 rounded-full mx-auto mb-2 flex items-center justify-center" style={{ backgroundColor: '#F5E6D3' }}>
-                      <TrendingUp className="w-6 h-6" style={{ color: '#2D5016' }} />
+                    <div className="w-12 h-12 rounded-full mx-auto mb-2 flex items-center justify-center" style={{ backgroundColor: '#edf3e7' }}>
+                      <TrendingUp className="w-6 h-6" style={{ color: '#173d31' }} />
                     </div>
                     <p className="text-xs text-gray-600">Optimizado para engagement</p>
                   </div>
                   <div className="text-center">
-                    <div className="w-12 h-12 rounded-full mx-auto mb-2 flex items-center justify-center" style={{ backgroundColor: '#F5E6D3' }}>
-                      <Target className="w-6 h-6" style={{ color: '#2D5016' }} />
+                    <div className="w-12 h-12 rounded-full mx-auto mb-2 flex items-center justify-center" style={{ backgroundColor: '#edf3e7' }}>
+                      <Target className="w-6 h-6" style={{ color: '#173d31' }} />
                     </div>
                     <p className="text-xs text-gray-600">Segmentación precisa</p>
                   </div>
                   <div className="text-center">
-                    <div className="w-12 h-12 rounded-full mx-auto mb-2 flex items-center justify-center" style={{ backgroundColor: '#F5E6D3' }}>
-                      <Zap className="w-6 h-6" style={{ color: '#2D5016' }} />
+                    <div className="w-12 h-12 rounded-full mx-auto mb-2 flex items-center justify-center" style={{ backgroundColor: '#edf3e7' }}>
+                      <Zap className="w-6 h-6" style={{ color: '#173d31' }} />
                     </div>
                     <p className="text-xs text-gray-600">Generación instantánea</p>
                   </div>
@@ -1389,7 +1389,7 @@ function ScheduleModalContent({ onClose, onSchedule, platform }) {
       <div className="bg-white rounded-xl max-w-md w-full">
         <div className="p-6 border-b border-gray-200">
           <div className="flex items-center justify-between">
-            <h2 className="text-2xl font-bold" style={{ color: '#2D5016' }}>
+            <h2 className="text-2xl font-bold" style={{ color: '#173d31' }}>
               📅 Programar Publicación
             </h2>
             <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg transition-all">
@@ -1430,8 +1430,8 @@ function ScheduleModalContent({ onClose, onSchedule, platform }) {
 
           <div className="bg-green-50 p-4 rounded-lg border border-green-200">
             <div className="flex items-center gap-2 mb-2">
-              <TrendingUp className="w-4 h-4" style={{ color: '#2D5016' }} />
-              <p className="font-medium text-sm" style={{ color: '#2D5016' }}>
+              <TrendingUp className="w-4 h-4" style={{ color: '#173d31' }} />
+              <p className="font-medium text-sm" style={{ color: '#173d31' }}>
                 Horarios Recomendados para {platform}
               </p>
             </div>
@@ -1446,7 +1446,7 @@ function ScheduleModalContent({ onClose, onSchedule, platform }) {
                       ? 'text-white'
                       : 'bg-white border border-green-300 hover:border-green-400'
                   }`}
-                  style={scheduleTime === time ? { backgroundColor: '#2D5016' } : {}}
+                  style={scheduleTime === time ? { backgroundColor: '#173d31' } : {}}
                 >
                   {time}
                 </button>
@@ -1465,7 +1465,7 @@ function ScheduleModalContent({ onClose, onSchedule, platform }) {
             <button
               type="submit"
               className="flex-1 px-6 py-3 rounded-lg text-white font-medium transition-all hover:opacity-90"
-              style={{ backgroundColor: '#2D5016' }}
+              style={{ backgroundColor: '#173d31' }}
             >
               Programar
             </button>

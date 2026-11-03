@@ -1,7 +1,7 @@
 // src/components/InstagramModule.jsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../lib/supabase";
-import { Instagram, MessageCircle, RefreshCw, User, Send, Sparkles, Filter, CheckCircle2 } from "lucide-react";
+import { Instagram, MessageCircle, RefreshCw, User, Send, Sparkles, Filter, CheckCircle2, ArrowLeft } from "lucide-react";
 
 function formatTime(ts) {
   if (!ts) return "";
@@ -30,6 +30,8 @@ function cls(...a) {
 export default function InstagramModule() {
   const [conversations, setConversations] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  const selectedIdRef = useRef(null);
+  useEffect(()=>{selectedIdRef.current=selectedId},[selectedId]);
 
   const [messages, setMessages] = useState([]);
   const [replyText, setReplyText] = useState("");
@@ -116,10 +118,10 @@ export default function InstagramModule() {
         const res = await callEdge({
           action: "list_messages",
           conversation_id: conversationId,
-          limit: 300,
+          limit: 100,
         });
 
-        if (msgSeqRef.current !== seq) return;
+        if (msgSeqRef.current !== seq || selectedIdRef.current !== conversationId) return;
 
         const list = Array.isArray(res.messages) ? res.messages : [];
         messagesCacheRef.current.set(conversationId, list);
@@ -131,10 +133,10 @@ export default function InstagramModule() {
         // refresca unread counts
         fetchConversations();
       } catch (e) {
-        if (msgSeqRef.current !== seq) return;
+        if (msgSeqRef.current !== seq || selectedIdRef.current !== conversationId) return;
         if (!silent) setError(e?.message || "Error al cargar mensajes.");
       } finally {
-        if (msgSeqRef.current !== seq) return;
+        if (msgSeqRef.current !== seq || selectedIdRef.current !== conversationId) return;
         setIsLoadingMessages(false);
       }
     },
@@ -165,7 +167,7 @@ export default function InstagramModule() {
 
         // if open conversation, append
         if (convId === selectedId) {
-          setMessages((prev) => [...prev, msg]);
+          setMessages((prev) => prev.some(m=>String(m.id)===String(msg.id)) ? prev : [...prev, msg]);
         }
       })
       .subscribe();
@@ -186,6 +188,7 @@ export default function InstagramModule() {
     async (conv) => {
       const convId = conv?.conversation_id;
       if (!convId) return;
+      selectedIdRef.current=convId;
       setSelectedId(convId);
       setReplyText("");
       setAutoScroll(true);
@@ -230,7 +233,7 @@ export default function InstagramModule() {
       // replace optimistic if possible
       if (res?.message?.id) {
         const real = res.message;
-        setMessages((prev) => prev.map((m) => (String(m.id).startsWith("tmp_") ? real : m)));
+        if(selectedIdRef.current===convId) setMessages((prev) => [...prev.filter(m=>m.id!==optimistic.id && String(m.id)!==String(real.id)),real]);
         const current = messagesCacheRef.current.get(convId) || [];
         messagesCacheRef.current.set(convId, [...current.filter((m) => !String(m.id).startsWith("tmp_")), real]);
       } else {
@@ -243,8 +246,8 @@ export default function InstagramModule() {
       fetchConversations();
     } catch (e) {
       // rollback optimistic
-      setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
-      setReplyText(text); // devuelve texto al input
+      if(selectedIdRef.current===convId) {setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
+      setReplyText(text);} // devuelve texto al input
       setError(e?.message || "Error al enviar respuesta.");
     } finally {
       setIsSending(false);
@@ -270,7 +273,7 @@ export default function InstagramModule() {
       const draft = String(res?.draft || "").trim();
       if (!draft) throw new Error("IA no devolvió texto");
       setReplyText(draft);
-      setToast("Draft IA listo");
+      setToast("Borrador listo");
       setTimeout(() => setToast(""), 1400);
     } catch (e) {
       setError(e?.message || "Error generando IA.");
@@ -294,14 +297,14 @@ export default function InstagramModule() {
   }, [conversations, filterKind, filterUnread, search]);
 
   return (
-    <div className="flex h-screen bg-gray-50">
+    <div className="instagram-workspace flex bg-gray-50">
       {/* Sidebar */}
-      <div className="w-[420px] bg-white border-r border-gray-200 flex flex-col">
+      <div className={cls("w-full md:w-[340px] xl:w-[380px] shrink-0 min-w-0 bg-white border-r border-gray-200 flex flex-col", selectedId && "hidden md:flex")}>
         <div className="p-4 border-b border-gray-200">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Instagram className="w-6 h-6 text-pink-600" />
-              <h2 className="text-xl font-bold text-gray-900">Instagram Inbox</h2>
+              <h2 className="text-xl font-bold text-gray-900">Mensajes de Instagram</h2>
             </div>
 
             <button
@@ -315,11 +318,12 @@ export default function InstagramModule() {
           </div>
 
           <div className="mt-3 flex gap-2">
-            <div className="flex-1">
+            <div className="flex-1 min-w-0">
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Buscar..."
+                aria-label="Buscar conversaciones"
+                placeholder="Buscar conversación…"
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-pink-500 focus:border-transparent text-sm"
               />
             </div>
@@ -333,11 +337,11 @@ export default function InstagramModule() {
               title="Solo no leídos"
             >
               <CheckCircle2 className="w-4 h-4" />
-              Unread
+              Sin leer
             </button>
           </div>
 
-          <div className="mt-2 flex items-center gap-2">
+          <div className="mt-2 flex flex-wrap items-center gap-2">
             <span className="text-xs text-gray-500 flex items-center gap-1">
               <Filter className="w-3 h-3" /> Tipo:
             </span>
@@ -376,7 +380,7 @@ export default function InstagramModule() {
             <div className="flex flex-col items-center justify-center h-full text-gray-500 p-6 text-center">
               <Instagram className="w-12 h-12 mb-3 text-gray-300" />
               <p className="text-sm">No hay conversaciones</p>
-              <p className="text-xs mt-2">Si esperabas mensajes, revisa Webhooks/ingesta.</p>
+              <p className="text-xs mt-2">Los mensajes nuevos aparecerán aquí al recibirlos. Si esperabas uno, comprueba el acceso en Conexiones.</p>
             </div>
           ) : (
             filteredConversations.map((conv) => {
@@ -436,13 +440,13 @@ export default function InstagramModule() {
       </div>
 
       {/* Conversation */}
-      <div className="flex-1 flex flex-col bg-white">
+      <div className={cls("flex-1 min-w-0 flex-col bg-white", selectedId ? "flex" : "hidden md:flex")}>
         {!selectedConversation ? (
           <div className="flex-1 flex items-center justify-center text-gray-400">
             <div className="text-center">
               <Instagram className="w-16 h-16 mx-auto mb-4 text-gray-300" />
               <p className="text-lg font-medium">Selecciona una conversación</p>
-              <p className="text-sm mt-2">DMs y comentarios en un solo inbox</p>
+              <p className="text-sm mt-2">Mensajes y comentarios, en un solo lugar</p>
             </div>
           </div>
         ) : (
@@ -450,6 +454,7 @@ export default function InstagramModule() {
             {/* Header */}
             <div className="p-4 border-b border-gray-200 bg-white">
               <div className="flex items-center gap-3">
+                <button className="md:hidden p-2 shrink-0 rounded-lg hover:bg-gray-100" aria-label="Volver a conversaciones" onClick={()=>{selectedIdRef.current=null;msgSeqRef.current++;setSelectedId(null)}}><ArrowLeft size={20}/></button>
                 <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-pink-500 rounded-full flex items-center justify-center">
                   <User className="w-5 h-5 text-white" />
                 </div>
@@ -514,7 +519,7 @@ export default function InstagramModule() {
                     <div key={msg.id} className={cls("flex", fromBiz ? "justify-end" : "justify-start")}>
                       <div
                         className={cls(
-                          "max-w-[680px] px-4 py-2 rounded-2xl",
+                          "max-w-[85%] md:max-w-[680px] break-words px-4 py-2 rounded-2xl",
                           fromBiz ? "bg-pink-600 text-white" : "bg-gray-100 text-gray-900"
                         )}
                       >
@@ -525,7 +530,7 @@ export default function InstagramModule() {
                           </div>
                         ) : null}
 
-                        <p className="text-sm whitespace-pre-wrap">{safeText(msg.message_text, "")}</p>
+                        <p className="text-sm whitespace-pre-wrap">{safeText(msg.message_text || msg.message_content, "")}</p>
 
                         {msg.media_url ? (
                           <img
@@ -559,15 +564,17 @@ export default function InstagramModule() {
                       sendReply();
                     }
                   }}
-                  placeholder="Escribe tu respuesta… (Enter envía, Shift+Enter nueva línea)"
+                  aria-label="Respuesta al mensaje"
+                  placeholder="Escribe tu respuesta…"
                   rows={3}
-                  className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-pink-500 focus:border-transparent resize-none"
+                  className="flex-1 min-w-0 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-pink-500 focus:border-transparent resize-none"
                 />
 
                 <button
                   onClick={sendReply}
                   disabled={!replyText.trim() || isSending}
                   className="px-4 py-2 bg-pink-600 text-white rounded-lg hover:bg-pink-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+                  aria-label="Enviar respuesta"
                   title="Enviar"
                 >
                   {isSending ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
@@ -576,7 +583,7 @@ export default function InstagramModule() {
 
               <div className="mt-2 flex items-center justify-between">
                 <p className="text-xs text-gray-500">
-                  Auto-scroll: <span className="font-semibold">{autoScroll ? "ON" : "OFF"}</span>
+                  Desplazamiento: <span className="font-semibold">{autoScroll ? "automático" : "manual"}</span>
                 </p>
 
                 {toast ? (

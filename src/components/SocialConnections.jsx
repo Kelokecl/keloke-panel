@@ -183,19 +183,15 @@ export default function SocialConnections() {
         return;
       }
 
-      const { data: row, error: credErr } = await supabase
-        .from('oauth_credentials')
-        .select('credentials')
-        .eq('platform', platform)
-        .single();
+      const { data: config, error: credErr } = await supabase.rpc('keloke_oauth_public_config', {p_platform: platform});
 
-      if (credErr || !row?.credentials) {
+      if (credErr || !config?.client_id || !config?.redirect_uri) {
         console.error('oauth_credentials error:', credErr);
         alert('Credenciales no configuradas para esta plataforma');
         return;
       }
 
-      const credentials = row.credentials;
+      const credentials = config;
       const state = JSON.stringify({ user_id: user.id, app_origin: window.location.origin });
       let authUrl = '';
 
@@ -419,11 +415,11 @@ export default function SocialConnections() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="bg-gradient-to-r from-purple-600 to-pink-600 rounded-xl p-6 text-white">
+    <div className="page-wrap space-y-6">
+      <div className="bg-[#173d31] rounded-2xl p-6 text-white">
         <h2 className="text-2xl font-bold mb-2">Conexiones de Redes Sociales</h2>
-        <p className="text-purple-100">
-          Conecta tus cuentas para que el Auto-Gerente IA pueda publicar contenido automáticamente
+        <p className="text-[#b9d1c0]">
+          Administra los accesos de tus canales y comprueba sus permisos antes de publicar.
         </p>
       </div>
 
@@ -436,7 +432,7 @@ export default function SocialConnections() {
           const isExpiringSoon = expiresAt && (expiresAt - new Date()) < 2 * 60 * 60 * 1000;
 
           return (
-            <div key={platform.id} className="bg-white rounded-xl shadow-lg overflow-hidden hover:shadow-xl transition-shadow">
+            <div key={platform.id} className="bg-white rounded-2xl border border-[#e2e9e6] overflow-hidden">
               <div className={`bg-gradient-to-r ${platform.color} p-6 text-white`}>
                 <div className="flex items-center justify-between mb-4">
                   <Icon className="w-12 h-12" />

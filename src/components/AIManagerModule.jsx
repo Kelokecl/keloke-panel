@@ -222,15 +222,15 @@ export default function AIManagerModule() {
   );
 
   return (
-    <div className="p-6 h-screen flex flex-col">
+    <div className="p-4 md:p-6 h-full min-h-0 flex flex-col">
       {/* Header */}
       <div className="mb-4">
         <div className="flex items-center gap-3 mb-1">
-          <div className="w-12 h-12 rounded-xl flex items-center justify-center" style={{ backgroundColor: "#D4A017" }}>
+          <div className="w-12 h-12 rounded-xl flex items-center justify-center" style={{ backgroundColor: "#6e9942" }}>
             <Bot className="w-7 h-7 text-white" />
           </div>
           <div>
-            <h1 className="text-3xl font-bold" style={{ color: "#2D5016" }}>
+            <h1 className="text-3xl font-bold" style={{ color: "#173d31" }}>
               Auto-Gerente IA
             </h1>
             <p className="text-gray-600">Copiloto del negocio (sugerencias + alertas + ganadores)</p>
@@ -248,8 +248,8 @@ export default function AIManagerModule() {
             className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 text-left hover:border-gray-200 transition-colors disabled:opacity-60"
           >
             <div className="flex items-center gap-2 mb-1">
-              <c.icon className="w-4 h-4" style={{ color: "#2D5016" }} />
-              <span className="text-sm font-semibold" style={{ color: "#2D5016" }}>
+              <c.icon className="w-4 h-4" style={{ color: "#173d31" }} />
+              <span className="text-sm font-semibold" style={{ color: "#173d31" }}>
                 {c.title}
               </span>
             </div>
@@ -263,10 +263,10 @@ export default function AIManagerModule() {
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center">
-              <div className="w-20 h-20 rounded-full flex items-center justify-center mb-4" style={{ backgroundColor: "#F5E6D3" }}>
-                <Sparkles className="w-10 h-10" style={{ color: "#D4A017" }} />
+              <div className="w-20 h-20 rounded-full flex items-center justify-center mb-4" style={{ backgroundColor: "#edf3e7" }}>
+                <Sparkles className="w-10 h-10" style={{ color: "#6e9942" }} />
               </div>
-              <h3 className="text-xl font-bold mb-2" style={{ color: "#2D5016" }}>
+              <h3 className="text-xl font-bold mb-2" style={{ color: "#173d31" }}>
                 ¡Hola! Soy tu Auto-Gerente IA
               </h3>
               <p className="text-gray-600 max-w-md">
@@ -278,10 +278,10 @@ export default function AIManagerModule() {
               <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                 <div
                   className={`max-w-[70%] rounded-lg p-4 ${msg.role === "user" ? "text-white" : "bg-gray-50 text-gray-800"}`}
-                  style={msg.role === "user" ? { backgroundColor: "#2D5016" } : {}}
+                  style={msg.role === "user" ? { backgroundColor: "#173d31" } : {}}
                 >
                   <div className="flex items-start gap-2">
-                    {msg.role === "assistant" && <Bot className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: "#D4A017" }} />}
+                    {msg.role === "assistant" && <Bot className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: "#6e9942" }} />}
                     <div className="flex-1">
                       <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                       <p className={`text-xs mt-2 ${msg.role === "user" ? "text-white/70" : "text-gray-500"}`}>
@@ -298,7 +298,7 @@ export default function AIManagerModule() {
             <div className="flex justify-start">
               <div className="bg-gray-50 rounded-lg p-4 max-w-[70%]">
                 <div className="flex items-center gap-2">
-                  <Bot className="w-5 h-5" style={{ color: "#D4A017" }} />
+                  <Bot className="w-5 h-5" style={{ color: "#6e9942" }} />
                   <div className="flex gap-1">
                     <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: "0ms" }} />
                     <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: "150ms" }} />
@@ -328,7 +328,7 @@ export default function AIManagerModule() {
               onClick={handleSendMessage}
               disabled={!inputMessage.trim() || isLoading}
               className="px-6 py-3 rounded-lg text-white font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-lg"
-              style={{ backgroundColor: "#2D5016" }}
+              style={{ backgroundColor: "#173d31" }}
             >
               <Send className="w-5 h-5" />
             </button>
