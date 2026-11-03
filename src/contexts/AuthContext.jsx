@@ -31,6 +31,7 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null); // perfil desde public.users
   const [loading, setLoading] = useState(true);
   const [initialized, setInitialized] = useState(false);
+  const [profileError, setProfileError] = useState(null);
 
   // Guards anti-race
   const mountedRef = useRef(false);
@@ -54,12 +55,12 @@ export function AuthProvider({ children }) {
 
       if (error) {
         console.error("❌ Error fetching user data:", error);
-        return null;
+        throw error;
       }
       return data || null;
     } catch (err) {
       console.error("❌ Exception in fetchUserData:", err);
-      return null;
+      throw err;
     }
   }, []);
 
@@ -144,7 +145,9 @@ export function AuthProvider({ children }) {
         console.error("❌ [INIT] Exception:", err);
         if (!mountedRef.current) return;
 
-        // nunca dejes loading colgado
+        // A network failure is not a revoked account. Keep the session so other
+        // tabs and unsaved creative work are not signed out globally.
+        setProfileError("No pudimos comprobar tu perfil. Tu sesión sigue guardada; vuelve a intentar.");
         setUser(null);
         setLoading(false);
         setInitialized(true);
@@ -228,6 +231,8 @@ export function AuthProvider({ children }) {
   }
 
   const value = useMemo(() => ({ user, loading, signIn, signOut }), [user, loading]);
+
+  if (profileError && !user && !loading) return <main role="alert" className="min-h-screen flex flex-col items-center justify-center gap-5 p-8 bg-slate-50"><h1 className="text-xl font-semibold">No pudimos cargar tu espacio</h1><p>{profileError}</p><button className="rounded-xl bg-slate-900 text-white px-6 py-3" onClick={() => window.location.reload()}>Reintentar conexión</button></main>;
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

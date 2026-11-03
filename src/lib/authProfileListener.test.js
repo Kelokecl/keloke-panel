@@ -25,3 +25,10 @@ test('unmount cancels scheduled work and unsubscribes',async()=>{
   h.event('SIGNED_IN',{user:{email:'test@example.invalid'}});h.cleanup();await tick();
   assert.equal(calls,0);assert.equal(h.unsubscribed,true);
 });
+
+test('a transient profile failure preserves the current session and profile',async()=>{
+  let listener; let signedOut=false; const profiles=[]; const errors=[];
+  const cleanup=subscribeProfileAuth({onAuthStateChange:fn=>{listener=fn;return {data:{subscription:{unsubscribe(){}}}};}},{fetchProfile:async()=>{throw new Error('Network timeout');},setProfile:p=>profiles.push(p),signOut:async()=>{signedOut=true;},onError:e=>errors.push(e.message)});
+  listener('TOKEN_REFRESHED',{user:{email:'test@example.invalid'}}); await tick();
+  assert.equal(signedOut,false);assert.deepEqual(profiles,[]);assert.deepEqual(errors,['Network timeout']);cleanup();
+});
