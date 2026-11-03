@@ -9,6 +9,7 @@ import React, {
   useRef,
 } from "react";
 import { supabase } from "../lib/supabase";
+import { subscribeProfileAuth } from "../lib/authProfileListener";
 
 const AuthContext = createContext(null);
 export const useAuth = () => {
@@ -167,46 +168,12 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     if (!initialized) return;
 
-    const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
-      try {
-        if (!mountedRef.current) return;
-
-        if (event === "SIGNED_OUT") {
-          setUser(null);
-          return;
-        }
-
-        if (event === "SIGNED_IN" || event === "USER_UPDATED" || event === "TOKEN_REFRESHED") {
-          const email = session?.user?.email || null;
-
-          // si no hay email, limpia
-          if (!email) {
-            setUser(null);
-            return;
-          }
-
-          const profile = await fetchUserData(email);
-
-          if (!mountedRef.current) return;
-
-          if (!profile) {
-            // si el perfil no existe/inactivo, fuera
-            await safeSignOut();
-            setUser(null);
-            return;
-          }
-
-          setUser(profile);
-        }
-      } catch (err) {
-        console.error("❌ [AUTH LISTENER] error:", err);
-        // no congeles la app por un listener fallido
-      }
+    return subscribeProfileAuth(supabase.auth, {
+      fetchProfile: fetchUserData,
+      setProfile: setUser,
+      signOut: safeSignOut,
+      onError: (err) => console.error("[AUTH LISTENER]", err),
     });
-
-    return () => {
-      data?.subscription?.unsubscribe?.();
-    };
   }, [initialized, fetchUserData, safeSignOut]);
 
   async function signIn(email, password) {

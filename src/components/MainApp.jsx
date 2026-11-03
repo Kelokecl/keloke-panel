@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 
 import Sidebar from './Sidebar';
+import MessageAlerts from './MessageAlerts';
 import Dashboard from './Dashboard';
 import ContentGenerator from './ContentGenerator';
 import CalendarModule from './CalendarModule';
@@ -81,6 +82,7 @@ export default function MainApp() {
     <div className="flex h-screen overflow-hidden" style={{ backgroundColor: '#F5E6D3' }}>
       <Sidebar />
       <div className="flex-1 overflow-y-auto">
+        <MessageAlerts />
         <Routes>
           {/* ✅ Landing interna */}
           <Route path="/" element={<Navigate to="/dashboard" replace />} />

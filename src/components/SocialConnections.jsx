@@ -96,7 +96,7 @@ export default function SocialConnections() {
 
       const { data: tokens, error: tokensErr } = await supabase
         .from('user_social_tokens')
-        .select('*')
+        .select('platform,is_active,account_username,account_name,token_expires_at,token_expire,created_at')
         .eq('user_id', user.id);
 
       if (tokensErr) console.error('user_social_tokens error:', tokensErr);
@@ -106,9 +106,9 @@ export default function SocialConnections() {
       if (tokens && Array.isArray(tokens)) {
         tokens.forEach((token) => {
           newConnections[token.platform] = {
-            connected: !!token.is_active,
+            connected: !!token.is_active && !(token.token_expires_at || token.token_expire ? new Date(token.token_expires_at || token.token_expire).getTime() <= Date.now() : false),
             username: token.account_username || token.account_name || null,
-            expires: token.token_expires_at,
+            expires: token.token_expires_at || token.token_expire,
             lastConnection: token.created_at,
           };
         });
@@ -116,7 +116,7 @@ export default function SocialConnections() {
 
       const { data: whatsappConnection } = await supabase
         .from('social_connections')
-        .select('*')
+        .select('id,platform,is_active,phone_number_id,waba_id,updated_at')
         .eq('platform', 'whatsapp')
         .eq('is_active', true)
         .single();
@@ -133,8 +133,8 @@ export default function SocialConnections() {
         newConnections.whatsapp = {
           connected: true,
           username: whatsappConnection.username || 'WhatsApp Business',
-          phone: whatsappConnection.username,
-          lastConnection: whatsappConnection.last_connected,
+          phone: whatsappConnection.phone_number_id,
+          lastConnection: whatsappConnection.updated_at,
           lastMessageReceived: lastMessage?.created_at || null,
         };
       }
@@ -147,6 +147,7 @@ export default function SocialConnections() {
       };
 
       setConnections(newConnections);
+      setError(null);
       clearTimeout(timeout);
     } catch (e) {
       console.error('Error loading connections:', e);
@@ -210,7 +211,7 @@ export default function SocialConnections() {
             alert('❌ Falta App ID de Meta en oauth_credentials (instagram).');
             return;
           }
-          const igScopes = 'instagram_basic';
+          const igScopes = 'instagram_basic,instagram_manage_messages,instagram_manage_comments,pages_show_list,pages_read_engagement,pages_manage_metadata';
           authUrl =
             `https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth` +
             `?client_id=${encodeURIComponent(metaAppId)}` +
@@ -226,7 +227,7 @@ export default function SocialConnections() {
             alert('❌ Falta App ID de Meta en oauth_credentials (facebook).');
             return;
           }
-          const fbScopes = 'public_profile';
+          const fbScopes = 'public_profile,pages_show_list,pages_read_engagement,pages_manage_metadata,pages_messaging,instagram_basic,instagram_manage_messages,instagram_manage_comments';
           authUrl =
             `https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth` +
             `?client_id=${encodeURIComponent(metaAppId)}` +
