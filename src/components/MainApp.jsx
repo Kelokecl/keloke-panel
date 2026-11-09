@@ -4,7 +4,6 @@ import { useAuth } from '../contexts/AuthContext';
 
 import Sidebar from './Sidebar';
 import MessageAlerts from './MessageAlerts';
-import WeeklyProducts from './WeeklyProducts';
 import { useLocation, Link } from 'react-router-dom';
 import { Plus, ArrowUpRight } from 'lucide-react';
 import Dashboard from './Dashboard';
@@ -28,7 +27,7 @@ const AIManagerModule = lazy(()=>import('./AIManagerModule'));
 export default function MainApp() {
   const { user } = useAuth();
   const { pathname } = useLocation();
-  const labels = { '/dashboard':'Resumen', '/instagram':'Bandeja de Instagram', '/whatsapp':'Bandeja de WhatsApp', '/connections':'Conexiones', '/content':'Estudio de contenido', '/calendar':'Calendario editorial', '/analytics':'Resultados', '/trends':'Top 5 semanal', '/users':'Equipo', '/whatsapp-ai':'Asistente de WhatsApp', '/ai-manager':'Asistente de marketing' };
+  const labels = { '/dashboard':'Resumen', '/instagram':'Bandeja de Instagram', '/whatsapp':'Bandeja de WhatsApp', '/connections':'Conexiones', '/content':'Estudio de contenido', '/calendar':'Calendario editorial', '/analytics':'Resultados', '/users':'Equipo', '/whatsapp-ai':'Asistente de WhatsApp', '/ai-manager':'Agentes Keloke' };
   const inbox = ['/instagram','/whatsapp'].includes(pathname);
 
   return (
@@ -59,7 +58,7 @@ export default function MainApp() {
 
           {/* ✅ NUEVOS: Auto-Gerente IA y Trends/Ganadores */}
           <Route path="/ai-manager" element={<AIManagerModule />} />
-          <Route path="/trends" element={<WeeklyProducts />} />
+          <Route path="/trends" element={<Navigate to="/ai-manager" replace />} />
 
           {/* ✅ Opcionales: automatizaciones / settings si después los agregas al sidebar */}
           <Route path="/automations" element={<Navigate to="/whatsapp-ai" replace />} />

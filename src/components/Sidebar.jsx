@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { LayoutDashboard, FileText, CalendarDays, TrendingUp, BarChart3, LogOut, Link2, Users, Menu, X, MessageCircle, Bot, Instagram, ArrowUpRight } from 'lucide-react';
+import { LayoutDashboard, FileText, CalendarDays, BarChart3, LogOut, Link2, Users, Menu, X, MessageCircle, Bot, Instagram, ArrowUpRight } from 'lucide-react';
 const groups = [
   { label: 'ESPACIO DE TRABAJO', items: [['/dashboard','Resumen',LayoutDashboard], ['/whatsapp','WhatsApp',MessageCircle], ['/instagram','Instagram',Instagram]] },
-  { label: 'MARKETING Y VENTAS', items: [['/content','Estudio de contenido',FileText], ['/calendar','Calendario',CalendarDays], ['/analytics','Resultados',BarChart3], ['/trends','Top 5 semanal',TrendingUp], ['/ai-manager','Asistente de marketing',Bot]] },
+  { label: 'MARKETING Y VENTAS', items: [['/content','Estudio de contenido',FileText], ['/calendar','Calendario',CalendarDays], ['/analytics','Resultados',BarChart3], ['/ai-manager','Agentes Keloke',Bot]] },
   { label: 'ADMINISTRACIÓN', items: [['/connections','Conexiones',Link2], ['/whatsapp-ai','Asistente de WhatsApp',Bot], ['/users','Equipo',Users]] }
 ];
 export default function Sidebar(){
