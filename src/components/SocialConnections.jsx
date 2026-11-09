@@ -506,6 +506,15 @@ export default function SocialConnections() {
                         </button>
                       )}
 
+                      {platform.id === 'instagram' && (
+                        <button
+                          type="button"
+                          onClick={() => connectPlatform('instagram')}
+                          className="flex-1 rounded-lg border border-emerald-700 px-4 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-50"
+                        >
+                          Renovar acceso de Instagram
+                        </button>
+                      )}
                       <button
                         onClick={() => disconnectPlatform(platform.id)}
                         disabled={refreshing === platform.id}
