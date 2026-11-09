@@ -16,9 +16,10 @@ export default function OAuthTikTokStart() {
           throw new Error("No hay sesión activa en el popup. Inicia sesión en el panel primero.");
         }
 
+        const sandbox = new URLSearchParams(window.location.search).get('mode') === 'sandbox';
         const startUrl =
           `${SUPABASE_URL}/functions/v1/tiktok-oauth/start` +
-          `?app_origin=${encodeURIComponent(window.location.origin)}`;
+          (sandbox ? '?mode=sandbox' : '');
 
         const res = await fetch(startUrl, {
           method: "GET",
@@ -28,7 +29,7 @@ export default function OAuthTikTokStart() {
         // Si la Edge Function responde con redirect 302, fetch lo sigue y termina en HTML (TikTok).
         // Para evitar webeo con redirects, la Edge Function te va a devolver JSON con {url}.
         const data = await res.json();
-        if (!data?.url) throw new Error(`Respuesta inesperada: ${JSON.stringify(data)}`);
+        if (!res.ok || !data?.url) throw new Error(data?.error || 'No se pudo preparar la conexión de TikTok.');
 
         window.location.href = data.url;
       } catch (e) {
