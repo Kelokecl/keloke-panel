@@ -40,11 +40,18 @@ export default function SocialConnections() {
     loadConnections();
 
     const handleMessage = (event) => {
-      if (APP_ORIGIN && event.origin !== APP_ORIGIN) return;
+      const apiOrigin = new URL(import.meta.env.VITE_SUPABASE_URL).origin;
+      const fromTikTokCallback = event.origin === apiOrigin && event.source === oauthWindowRef.current
+        && event.data?.type === 'OAUTH_RESULT' && event.data?.platform === 'tiktok';
+      if (APP_ORIGIN && event.origin !== APP_ORIGIN && !fromTikTokCallback) return;
 
       const data = safeParseJson(event.data) ?? event.data;
       if (!data || typeof data !== 'object') return;
 
+      if (data.sandbox === true && data.success === true) {
+        alert('Prueba de TikTok completada. La cuenta de producción sigue sin vincularse.');
+        return;
+      }
       if (data?.success === true) {
         alert(`✅ ${data.platform} conectado exitosamente${data.account ? ': ' + data.account : ''}`);
 
@@ -158,7 +165,7 @@ export default function SocialConnections() {
     }
   };
 
-  const connectPlatform = async (platform) => {
+  const connectPlatform = async (platform, sandbox = false) => {
     const preparedPopup=['instagram','tiktok'].includes(platform)?window.open('about:blank',`oauth_${platform}`,'width=600,height=760'):null;
     try {
       const { data: { user } } = await supabase.auth.getUser();
@@ -184,7 +191,7 @@ export default function SocialConnections() {
 
         const win=preparedPopup;
         if(!win){alert('Permite las ventanas emergentes para conectar TikTok.');return;}
-        win.location.href=`${window.location.origin}/oauth/tiktok-start`;
+        win.location.href=`${window.location.origin}/oauth/tiktok-start${sandbox ? '?mode=sandbox' : ''}`;
 
         oauthWindowRef.current = win;
         return;
@@ -536,6 +543,11 @@ export default function SocialConnections() {
                     >
                       Conectar {platform.name}
                     </button>
+                    {platform.id === 'tiktok' && (
+                      <button type="button" onClick={() => connectPlatform('tiktok', true)} className="w-full rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700">
+                        Probar TikTok en Sandbox
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
